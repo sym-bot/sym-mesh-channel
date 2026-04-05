@@ -39,7 +39,7 @@ const FIELD_WEIGHTS = {
 // ── SymNode — full peer on the mesh ──────────────────────────
 
 const node = new SymNode({
-  name: 'claude-code',
+  name: 'claude-code-mac',
   cognitiveProfile: 'Engineering node. Code, architecture, debugging, technical decisions.',
   svafFieldWeights: FIELD_WEIGHTS,
   svafFreshnessSeconds: 7200, // 2hr — session-length context
@@ -152,7 +152,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
         intent: args.intent || 'observation',
         motivation: args.motivation || '',
         commitment: args.commitment || '',
-        perspective: args.perspective || 'claude-code',
+        perspective: args.perspective || 'claude-code-mac',
         mood: args.mood || { text: 'neutral', valence: 0, arousal: 0 },
       };
       const entry = node.remember(fields);
@@ -216,7 +216,7 @@ function pushChannel(eventType, data) {
 
 node.on('cmb-accepted', (entry) => {
   // Don't echo back our own CMBs
-  if (entry.source === 'claude-code' || entry.cmb?.createdBy === 'claude-code') return;
+  if (entry.source === 'claude-code-mac' || entry.cmb?.createdBy === 'claude-code-mac') return;
 
   const source = entry.source || entry.cmb?.createdBy || 'unknown';
   const focus = entry.cmb?.fields?.focus?.text || entry.content || '';
