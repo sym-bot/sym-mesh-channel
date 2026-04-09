@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.1.7
+
+### Added
+
+- **`npx @sym-bot/mesh-channel init`** — interactive installer that
+  writes `~/.claude.json` for the current project, picks a sensible
+  default `SYM_NODE_NAME` (`claude-mac` / `claude-win` / `claude-linux`),
+  resolves the absolute path to `server.js`, and prints the launch
+  command including the `--dangerously-load-development-channels` flag.
+  Backs up the existing config to `~/.claude.json.bak-<timestamp>`,
+  validates JSON round-trip, atomic write via tmp+rename. Refuses to
+  overwrite an existing entry without `--force`.
+- **README rewritten for LAN-first install.** Quick start is two
+  minutes: install, init, launch. No relay required. Bonjour/mDNS
+  is the default discovery path. Cross-network setup (relay) is now
+  the optional advanced section.
+
+### Changed
+
+- `package.json` `bin` now exposes both `sym-mesh-channel` (server
+  entrypoint) and `sym-mesh-channel-init` (installer). The package
+  description leads with "LAN-first via Bonjour, no relay required."
+
+### Why
+
+The 0.1.5/0.1.6 install path required users to manually edit
+`~/.claude.json`, know about the Channels dev flag, set up a relay,
+and obtain a relay token. That gated the demo behind real friction.
+LAN-only mode has worked since day one in the underlying SymNode
+(`sym/lib/node.js:509-511` only connects to the relay if `SYM_RELAY_URL`
+is set; Bonjour discovery starts unconditionally), but no documentation
+or installer surfaced it. This release closes that gap: two users on
+the same wifi can join the same mesh in two minutes with three commands.
+
 ## 0.1.6
 
 ### Fixed
