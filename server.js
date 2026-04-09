@@ -44,7 +44,11 @@ const FIELD_WEIGHTS = {
 
 // ── SymNode — full peer on the mesh ──────────────────────────
 
-const NODE_NAME = process.env.SYM_NODE_NAME || 'claude-code-mac';
+// Default: hostname-based identity, unique per machine. The old default
+// ('claude-code-mac') caused ghost-peer bugs when another machine ran
+// without SYM_NODE_NAME set — both machines claimed the same name with
+// different nodeIds, creating phantom peers that absorbed messages.
+const NODE_NAME = process.env.SYM_NODE_NAME || `claude-${require('os').hostname().toLowerCase().replace(/[^a-z0-9-]/g, '-')}`;
 
 const node = new SymNode({
   name: NODE_NAME,

@@ -42,9 +42,10 @@ if (cmd !== 'init') {
 
 // ── Detect platform & defaults ────────────────────────────────────
 
-const platform = process.platform;
-const platformSuffix = platform === 'darwin' ? 'mac' : platform === 'win32' ? 'win' : 'linux';
-const defaultNodeName = `claude-${platformSuffix}`;
+// Default: hostname-based identity, unique per machine. Prevents
+// the ghost-peer bug where two machines with the same default name
+// create phantom peers that absorb messages.
+const defaultNodeName = `claude-${os.hostname().toLowerCase().replace(/[^a-z0-9-]/g, '-')}`;
 
 // SYM_NODE_NAME from env wins over default
 const nodeName = process.env.SYM_NODE_NAME || defaultNodeName;
