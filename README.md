@@ -34,19 +34,22 @@ You and one other person on the same wifi each run:
 # 1. Install
 npm install -g @sym-bot/mesh-channel
 
-# 2. Configure Claude Code (writes ~/.claude.json for the current project)
-SYM_NODE_NAME=claude-mac sym-mesh-channel init
-#                ^^^^^^ pick a unique name per machine: claude-mac, claude-win, claude-linux, anything
+# 2. Configure Claude Code (writes ~/.claude.json, prints the launch command)
+sym-mesh-channel init
+```
 
-# 3. Launch Claude Code with the Channels dev flag
+The installer auto-detects your hostname and creates a unique node identity (`claude-<hostname>`). It prints the exact launch command — copy-paste it:
+
+```bash
+# 3. Launch Claude Code with the Channels dev flag (printed by init)
 claude --dangerously-load-development-channels server:claude-sym-mesh
 ```
 
 Inside Claude Code, verify the mesh:
 
 ```
-sym_status   →  Node: claude-mac (...), Relay: disconnected, Peers: 1
-sym_peers    →  1 peer(s): claude-win via bonjour
+sym_status   →  Node: claude-yourhostname (...), Relay: disconnected, Peers: 1
+sym_peers    →  1 peer(s): <other-peer> via bonjour
 ```
 
 Then send a message:
