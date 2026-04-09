@@ -1,6 +1,6 @@
 {
   "name": "@sym-bot/mesh-channel",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "description": "MCP server — Claude Code as a peer node on the SYM mesh. LAN-first via Bonjour, no relay required.",
   "main": "server.js",
   "bin": {
@@ -15,7 +15,7 @@
   ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
-    "@sym-bot/sym": "^0.3.75"
+    "@sym-bot/sym": "^0.3.76"
   },
   "engines": {
     "node": ">=18"
