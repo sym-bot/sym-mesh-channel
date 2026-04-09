@@ -230,13 +230,11 @@ node.on('message', (from, content) => {
   pushChannel('message', `[message from ${from}] ${content}`);
 });
 
-node.on('peer-joined', (data) => {
-  pushChannel('peer', `[+] ${data.name || 'unknown'} joined the mesh`);
-});
-
-node.on('peer-left', (data) => {
-  pushChannel('peer', `[-] ${data.name || 'unknown'} left the mesh`);
-});
+// Peer presence events are intentionally NOT pushed to Claude's context.
+// They're high-frequency, low-signal (peers flap on relay reconnects, daemon
+// restarts, NAT keepalive blips), and a flood will eat the context window.
+// Use sym_peers / sym_status on demand instead. Only CMBs and direct messages
+// are surfaced as channel notifications — those carry actual cognitive payload.
 
 // ── Start ────────────────────────────────────────────────────
 
