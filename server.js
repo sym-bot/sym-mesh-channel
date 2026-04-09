@@ -238,6 +238,30 @@ node.on('message', (from, content) => {
 
 // ── Start ────────────────────────────────────────────────────
 
+// Clean shutdown — disconnect from the relay before exiting so other peers
+// see us leave immediately, and so a fast restart of this MCP doesn't race
+// our own zombie connection on the relay (which would trigger the relay's
+// duplicate-nodeId replacement path and cause peer flap loops).
+//
+// Idempotent: Claude Code may send SIGTERM and then SIGKILL; we want the
+// first signal to get us cleanly off the relay even if the second one
+// arrives before stop() resolves.
+let shuttingDown = false;
+async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  try {
+    await node.stop();
+  } catch {
+    // Best effort — we're exiting anyway. Don't block on cleanup errors.
+  }
+  process.exit(0);
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT',  () => shutdown('SIGINT'));
+process.on('SIGHUP',  () => shutdown('SIGHUP'));
+
 async function main() {
   // Start SymNode — connects to relay as a peer
   await node.start();
