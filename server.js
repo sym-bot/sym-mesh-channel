@@ -50,6 +50,19 @@ const node = new SymNode({
   silent: true,
 });
 
+// Identity collision (added in @sym-bot/sym 0.3.68): the relay told us
+// another process is holding our nodeId. Don't try to reconnect — that
+// caused the peer-flap loop documented in v0.1.2/v0.1.3 commit messages.
+// Exit so Claude Code can decide whether to respawn (with the freshness
+// window now elapsed) or surface the failure to the user.
+node.on('identity-collision', (info) => {
+  process.stderr.write(
+    `sym-mesh-channel: identity collision on relay — another process is holding ` +
+    `nodeId=${info.nodeId} name=${info.name}. Exiting.\n`
+  );
+  process.exit(2);
+});
+
 // ── MCP Server ───────────────────────────────────────────────
 
 const mcp = new Server(
