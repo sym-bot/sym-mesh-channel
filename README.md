@@ -26,12 +26,15 @@ Add to `~/.claude/mcp.json` (macOS/Linux) or `%USERPROFILE%\.claude\mcp.json` (W
       "args": ["/absolute/path/to/sym-mesh-channel/server.js"],
       "env": {
         "SYM_RELAY_URL": "wss://your-relay-url",
-        "SYM_RELAY_TOKEN": "your-token"
+        "SYM_RELAY_TOKEN": "your-token",
+        "SYM_NODE_NAME": "claude-code-mac"
       }
     }
   }
 }
 ```
+
+`SYM_NODE_NAME` sets the node's identity on the mesh. Use platform-scoped names (`claude-code-mac`, `claude-code-win`) when running the same role on multiple devices, per MMP §3.1.2. Defaults to `claude-code-mac` if unset.
 
 ### 3. Restart Claude Code
 

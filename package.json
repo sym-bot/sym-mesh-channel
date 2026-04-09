@@ -1,6 +1,6 @@
 {
   "name": "@sym-bot/mesh-channel",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "MCP server — Claude Code as a peer node on the SYM mesh",
   "main": "server.js",
   "bin": {

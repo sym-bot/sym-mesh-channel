@@ -38,8 +38,10 @@ const FIELD_WEIGHTS = {
 
 // ── SymNode — full peer on the mesh ──────────────────────────
 
+const NODE_NAME = process.env.SYM_NODE_NAME || 'claude-code-mac';
+
 const node = new SymNode({
-  name: 'claude-code-mac',
+  name: NODE_NAME,
   cognitiveProfile: 'Engineering node. Code, architecture, debugging, technical decisions.',
   svafFieldWeights: FIELD_WEIGHTS,
   svafFreshnessSeconds: 7200, // 2hr — session-length context
@@ -58,7 +60,7 @@ const mcp = new Server(
       experimental: { 'claude/channel': {} },
     },
     instructions:
-      'You are a peer node on the SYM mesh (identity: claude-code). ' +
+      `You are a peer node on the SYM mesh (identity: ${NODE_NAME}). ` +
       'Mesh events arrive as <channel> notifications in real-time. ' +
       'When you see a message or CMB from another node, respond via the sym_send tool if actionable. ' +
       'Share observations about the user\'s state via sym_observe. ' +
@@ -138,7 +140,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
         intent: 'inter-node message',
         motivation: 'mesh communication',
         commitment: msg.slice(0, 120),
-        perspective: 'claude-code, direct message',
+        perspective: `${NODE_NAME}, direct message`,
         mood: { text: 'neutral', valence: 0, arousal: 0 },
       });
       const peers = node.peers();
@@ -152,7 +154,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
         intent: args.intent || 'observation',
         motivation: args.motivation || '',
         commitment: args.commitment || '',
-        perspective: args.perspective || 'claude-code-mac',
+        perspective: args.perspective || NODE_NAME,
         mood: args.mood || { text: 'neutral', valence: 0, arousal: 0 },
       };
       const entry = node.remember(fields);
@@ -187,7 +189,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
       return {
         content: [{
           type: 'text',
-          text: `Node: claude-code (${node.nodeId?.slice(0, 8) || '?'})\n` +
+          text: `Node: ${NODE_NAME} (${node.nodeId?.slice(0, 8) || '?'})\n` +
             `Relay: ${s.relayConnected ? 'connected' : 'disconnected'}\n` +
             `Peers: ${s.peerCount || 0}\n` +
             `Memories: ${s.memoryCount || 0}`,
@@ -216,7 +218,7 @@ function pushChannel(eventType, data) {
 
 node.on('cmb-accepted', (entry) => {
   // Don't echo back our own CMBs
-  if (entry.source === 'claude-code-mac' || entry.cmb?.createdBy === 'claude-code-mac') return;
+  if (entry.source === NODE_NAME || entry.cmb?.createdBy === NODE_NAME) return;
 
   const source = entry.source || entry.cmb?.createdBy || 'unknown';
   const focus = entry.cmb?.fields?.focus?.text || entry.content || '';
