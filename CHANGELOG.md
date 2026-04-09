@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.1.6
+
+### Fixed
+
+- `sym_send` no longer double-delivers. Previously called both
+  `node.send()` (broadcast as `event_type=message`) AND `node.remember()`
+  (persist as CMB which gets gossiped as `event_type=cmb`), causing
+  the same payload to arrive twice on receivers and double the
+  context-window cost. Now broadcasts the message frame only. Hosts
+  that want CMB persistence should call `sym_observe` separately
+  with proper CAT7 fields.
+- `sym_send` now reports the actual delivered count, not
+  `peers().length`. Requires `@sym-bot/sym >= 0.3.70` where `send()`
+  returns the count of peer transports that successfully accepted
+  the broadcast. The two can disagree when peers are tracked but
+  have broken transports — the delivered count is the truth about
+  what was actually sent.
+
+### Changed
+
+- Bumped `@sym-bot/sym` dep `^0.3.69` → `^0.3.70`. 0.3.70 ships the
+  identity lockfile that prevents two SymNode processes from
+  claiming the same nodeId on a host (the cliHostMode-vs-MCP
+  collision that broke real-time push on Windows during the
+  2026-04-09 round-trip test).
+
 ## 0.1.5
 
 ### Changed

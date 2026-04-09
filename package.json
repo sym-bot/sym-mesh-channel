@@ -1,6 +1,6 @@
 {
   "name": "@sym-bot/mesh-channel",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "MCP server — Claude Code as a peer node on the SYM mesh",
   "main": "server.js",
   "bin": {
@@ -13,7 +13,7 @@
     "LICENSE"
   ],
   "dependencies": {
-    "@sym-bot/sym": "^0.3.69",
+    "@sym-bot/sym": "^0.3.70",
     "@modelcontextprotocol/sdk": "^1.12.1"
   },
   "engines": {

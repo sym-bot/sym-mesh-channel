@@ -145,19 +145,22 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   switch (name) {
     case 'sym_send': {
+      // Direct inter-node message — broadcast as type:'message' frame only.
+      // Do NOT also persist as a CMB via node.remember(): that caused
+      // double-delivery on receivers, who saw the same payload arrive once
+      // as event_type='message' (from this broadcast) and again as
+      // event_type='cmb' (from CMB gossip replication). One tool, one job:
+      // sym_send is for ephemeral inter-node messages; sym_observe is for
+      // structured CAT7 CMBs. Hosts that want both should call both.
+      //
+      // Report the actual delivered count (the number of peer transports
+      // that successfully accepted the broadcast), not peers().length.
+      // The two can disagree when peers are in _peers but their transports
+      // are broken — counting peers().length would lie about delivery.
+      // Requires @sym-bot/sym >= 0.3.70 where send() returns the count.
       const msg = args.message;
-      node.send(msg);
-      node.remember({
-        focus: msg,
-        issue: 'none',
-        intent: 'inter-node message',
-        motivation: 'mesh communication',
-        commitment: msg.slice(0, 120),
-        perspective: `${NODE_NAME}, direct message`,
-        mood: { text: 'neutral', valence: 0, arousal: 0 },
-      });
-      const peers = node.peers();
-      return { content: [{ type: 'text', text: `Message sent to ${peers.length} peer(s).` }] };
+      const delivered = node.send(msg);
+      return { content: [{ type: 'text', text: `Message delivered to ${delivered} peer(s).` }] };
     }
 
     case 'sym_observe': {
