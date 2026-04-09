@@ -1,6 +1,12 @@
 #!/usr/bin/env node
 'use strict';
 
+// Subcommand dispatch: `sym-mesh-channel init` runs the installer.
+if (process.argv[2] === 'init') {
+  require('./bin/install.js');
+  return;
+}
+
 /**
  * sym-mesh-channel — MCP server that makes Claude Code a peer node on the SYM mesh.
  *

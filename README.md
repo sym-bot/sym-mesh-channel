@@ -31,11 +31,11 @@ This MCP server composes two things:
 You and one other person on the same wifi each run:
 
 ```bash
-# 1. Install globally (exposes two commands: sym-mesh-channel + sym-mesh-channel-init)
+# 1. Install
 npm install -g @sym-bot/mesh-channel
 
 # 2. Configure Claude Code (writes ~/.claude.json for the current project)
-SYM_NODE_NAME=claude-mac sym-mesh-channel-init
+SYM_NODE_NAME=claude-mac sym-mesh-channel init
 #                ^^^^^^ pick a unique name per machine: claude-mac, claude-win, claude-linux, anything
 
 # 3. Launch Claude Code with the Channels dev flag
