@@ -16,7 +16,7 @@
   ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
-    "@sym-bot/sym": "^0.3.73"
+    "@sym-bot/sym": "^0.3.74"
   },
   "engines": {
     "node": ">=18"
