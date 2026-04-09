@@ -113,11 +113,16 @@ const entry = {
   args: [serverJsPath],
   env: {
     SYM_NODE_NAME: nodeName,
-    // Relay env vars are intentionally NOT set by default. Without
-    // them, the SymNode runs in LAN-only mode and discovers other
-    // peers via Bonjour mDNS. To enable cross-network connectivity,
-    // add SYM_RELAY_URL and SYM_RELAY_TOKEN to this env block manually
-    // (see README for details on running your own relay).
+    // Explicitly blank the relay vars so the MCP doesn't inherit them
+    // from the parent shell (e.g. ~/.zshrc exports). Claude Code's env
+    // block is ADDITIVE — omitting a key doesn't remove it from the
+    // child process. Setting to '' makes process.env.SYM_RELAY_URL
+    // falsy in JS, so the SymNode skips the relay and runs LAN-only.
+    //
+    // To enable cross-network connectivity later, replace these empty
+    // values with your relay URL and token (see README).
+    SYM_RELAY_URL: '',
+    SYM_RELAY_TOKEN: '',
   },
 };
 
