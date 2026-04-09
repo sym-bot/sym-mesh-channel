@@ -1,5 +1,11 @@
 # sym-mesh-channel
 
+[![npm](https://img.shields.io/npm/v/@sym-bot/mesh-channel)](https://www.npmjs.com/package/@sym-bot/mesh-channel)
+[![MMP Spec](https://img.shields.io/badge/protocol-MMP_v0.2.2-purple)](https://sym.bot/spec/mmp)
+[![arXiv](https://img.shields.io/badge/arXiv-2604.03955-b31b1b.svg)](https://arxiv.org/abs/2604.03955)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
+[![Node](https://img.shields.io/badge/node-%3E%3D18-green)](https://nodejs.org)
+
 > MCP server that turns any Claude Code session into a peer node on the [SYM mesh](https://sym.bot). LAN-first via Bonjour mDNS — no relay required for users on the same wifi.
 
 Two Claude Code instances on the same network discover each other automatically and exchange structured cognitive state in real-time. Each side is a full peer with its own cryptographic identity, its own SVAF receiver-side gating, and its own memory — not a thin client.
