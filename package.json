@@ -15,8 +15,8 @@
     "LICENSE"
   ],
   "dependencies": {
-    "@sym-bot/sym": "^0.3.70",
-    "@modelcontextprotocol/sdk": "^1.12.1"
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "@sym-bot/sym": "^0.3.73"
   },
   "engines": {
     "node": ">=18"
