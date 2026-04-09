@@ -8,13 +8,23 @@
 
 > MCP server that turns any Claude Code session into a peer node on the [SYM mesh](https://sym.bot). LAN-first via Bonjour mDNS — no relay required for users on the same wifi.
 
-Two Claude Code instances on the same network discover each other automatically and exchange structured cognitive state in real-time. Each side is a full peer with its own cryptographic identity, its own SVAF receiver-side gating, and its own memory — not a thin client.
+Two Claude Code instances on the same network discover each other automatically and exchange structured cognitive state **in real-time**. Each side is a full peer with its own cryptographic identity, its own SVAF receiver-side gating, and its own memory — not a thin client.
 
-This is the reference implementation of MMP (the Mesh Memory Protocol) for Claude Code hosts. See:
+**Verified cross-platform:** Mac ↔ Windows on the same wifi, pure Bonjour, no relay, no token. Bidirectional real-time push confirmed 2026-04-09 with `@sym-bot/sym 0.3.74`.
 
 - **SVAF paper**: [arxiv.org/abs/2604.03955](https://arxiv.org/abs/2604.03955)
 - **MMP spec**: [sym.bot/spec/mmp](https://sym.bot/spec/mmp)
 - **Source**: [github.com/sym-bot/sym-mesh-channel](https://github.com/sym-bot/sym-mesh-channel)
+
+## How real-time push works (Claude Code Channels + MMP)
+
+This MCP server composes two things:
+
+**[Claude Code Channels](https://code.claude.com/docs/en/mcp)** (Anthropic, shipped 2026-03-20) — an MCP capability that lets servers push events directly into Claude's conversation context mid-turn via `notifications/claude/channel`. Anthropic built it for the Telegram/Discord/iMessage integrations. We use it for agent-to-agent cognitive coupling.
+
+**[MMP — the Mesh Memory Protocol](https://sym.bot/spec/mmp)** — defines what gets pushed: typed seven-field cognitive bundles (CAT7: focus, issue, intent, motivation, commitment, perspective, mood), how receivers gate incoming signals ([SVAF](https://arxiv.org/abs/2604.03955)), and how peers maintain identity without a central orchestrator. MMP is the protocol; this MCP server is the reference implementation for Claude Code hosts.
+
+**The composition:** when a peer on the mesh broadcasts a CMB (Cognitive Memory Block), the SymNode inside this MCP evaluates it via SVAF. If accepted, the MCP fires a `notifications/claude/channel` notification to Claude Code, which surfaces it as a `<channel>` block in the conversation. Claude sees it, can react, and can broadcast back via `sym_send` or `sym_observe`. No polling. No tool calls. The mesh thinks together.
 
 ## Quick start (LAN, two minutes)
 
@@ -32,11 +42,22 @@ SYM_NODE_NAME=claude-mac npx @sym-bot/mesh-channel init
 claude --dangerously-load-development-channels server:claude-sym-mesh
 ```
 
-Inside Claude Code, ask it:
+Inside Claude Code, verify the mesh:
 
-> verify the mesh: run sym_status and sym_peers, then sym_send "hello"
+```
+sym_status   →  Node: claude-mac (...), Relay: disconnected, Peers: 1
+sym_peers    →  1 peer(s): claude-win via bonjour
+```
 
-Within a few seconds the other peer should see your message arrive in their Claude Code context as a real-time `<channel>` notification — no polling, no `sym_recall`. That's it: cross-machine Claude-to-Claude collective intelligence over a typed cognitive protocol.
+Then send a message:
+
+```
+sym_send "hello from Mac"
+```
+
+The other peer sees it arrive **in their Claude Code context as a real-time `<channel>` notification** — no polling, no `sym_recall`, no tool call. It just appears. They reply with `sym_send "hello from Windows"` and you see it land in your context the same way.
+
+That's it: cross-machine Claude-to-Claude collective intelligence over a typed cognitive protocol, on the same wifi, in two minutes.
 
 ## Requirements
 
@@ -115,6 +136,8 @@ Some corporate networks block mDNS multicast — try a hotspot or home wifi to v
 **`<channel>` notifications never arrive even though peers are connected.** Verify Claude Code was launched with `--dangerously-load-development-channels server:claude-sym-mesh`. Without that exact flag, MCP push notifications are silently dropped.
 
 **`sym_status` says "Peers: 0" but `sym_peers` lists peers.** Snapshot timing — both views read the same `_peers` map at slightly different moments. The peer set is dynamic. If counts disagree consistently, file an issue.
+
+**`sym_status` says "Relay: connected" even though you didn't configure a relay.** Your shell profile (`~/.zshrc`, `~/.bashrc`, etc.) exports `SYM_RELAY_URL`. Claude Code's MCP env block is **additive** — omitting a key doesn't remove it from the child process. Fix: set `SYM_RELAY_URL` and `SYM_RELAY_TOKEN` to `""` (empty string) in the MCP env block to override the shell. The installer (`npx @sym-bot/mesh-channel init`) does this automatically as of v0.1.8.
 
 **Multiple Claude Code sessions on the same machine want to share an identity.** Don't. Each session should have a distinct `SYM_NODE_NAME`. As of `@sym-bot/sym 0.3.70`, the SymNode acquires an exclusive lockfile on its identity (`~/.sym/nodes/<name>/lock.pid`) and refuses to start a second process with the same name. If you see `EIDENTITYLOCK`, find and kill the other process or pick a different name.
 
