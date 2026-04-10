@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.1.18
+
+### Changed
+
+- **Auto-configure on install.** `npm install -g` now runs `postinstall`
+  that writes the MCP server config to global `mcpServers` in
+  `~/.claude.json` automatically. No separate `sym-mesh-channel init`
+  step needed — two commands to mesh: install + launch.
+- **Global MCP config** — server entry is now written to top-level
+  `mcpServers` (available in all Claude Code sessions), not
+  project-scoped.
+- **Windows postinstall fixes** — `require.resolve` for server.js path
+  (handles npm staging directory on Windows), EBUSY handling when
+  Claude Code has `~/.claude.json` locked, graceful skip if Claude
+  Code not yet installed.
+- **README repositioned** — lead with capability ("first non-Anthropic
+  Claude Code Channels implementation"), not use case. Simplified
+  Quick Start to two commands.
+- **0 vulnerabilities** — fresh dependency rebuild resolves all 6
+  moderate hono/node-server advisories.
+- Windows mDNS: built-in on Windows 10+, no Bonjour install needed.
+
 ## 0.1.7
 
 ### Added
