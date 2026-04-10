@@ -33,10 +33,22 @@ This MCP server composes two things:
 
 ## Quick start
 
+### Via npm (available now)
+
 ```bash
 npm install -g @sym-bot/mesh-channel    # install + auto-configure ~/.claude.json
 claude --dangerously-load-development-channels server:claude-sym-mesh   # launch
 ```
+
+### Via Claude Code plugin (pending Anthropic approval)
+
+```
+/plugin install sym-mesh-channel
+```
+
+The plugin has been [submitted to the Anthropic Plugin Directory](https://claude.ai/settings/plugins/submit) and is pending review. Once approved, the `--dangerously-load-development-channels` flag is no longer needed.
+
+---
 
 Install auto-detects your hostname, creates a unique node identity, and configures the MCP server globally in `~/.claude.json`. If two people are on the same wifi, their sessions discover each other automatically. Verify inside Claude Code:
 
@@ -58,7 +70,7 @@ For cross-network setup (different offices, remote team), see [Cross-network set
 | Claude Code ≥ 2.1.97 (Channels feature) | ✓ | ✓ | ✓ |
 | Bonjour / mDNS for LAN discovery | built-in | install `avahi-daemon` | built-in (Windows 10+) |
 
-The `--dangerously-load-development-channels` flag is required because this MCP server is not yet on Anthropic's public Channels allowlist. The flag opts your local Claude Code into receiving `notifications/claude/channel` from a non-allowlisted MCP server. Without it, the MCP loads but real-time push is silently dropped.
+The `--dangerously-load-development-channels` flag is required during the review period. Once the plugin is approved on the Anthropic Plugin Directory, this flag is no longer needed — install via `/plugin install` and launch normally.
 
 ## What you get
 
