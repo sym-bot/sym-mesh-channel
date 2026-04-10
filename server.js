@@ -228,6 +228,21 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
+// ── Peer Allowlist (optional, defense-in-depth) ─────────────
+// SYM_ALLOWED_PEERS is a comma-separated list of peer node names.
+// When set, only CMBs and messages from listed peers are pushed to
+// Claude's context. When empty/unset, all authenticated peers are
+// accepted (SVAF still gates on content relevance).
+const ALLOWED_PEERS = (process.env.SYM_ALLOWED_PEERS || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+
+function isPeerAllowed(peerName) {
+  if (ALLOWED_PEERS.length === 0) return true; // no allowlist = accept all
+  return ALLOWED_PEERS.includes(peerName);
+}
+
 // ── Mesh Events → Channel Notifications ──────────────────────
 
 function pushChannel(eventType, data) {
@@ -247,12 +262,19 @@ node.on('cmb-accepted', (entry) => {
   if (entry.source === NODE_NAME || entry.cmb?.createdBy === NODE_NAME) return;
 
   const source = entry.source || entry.cmb?.createdBy || 'unknown';
+
+  // Peer allowlist gate (defense-in-depth, see SECURITY.md)
+  if (!isPeerAllowed(source)) return;
+
   const focus = entry.cmb?.fields?.focus?.text || entry.content || '';
   const mood = entry.cmb?.fields?.mood?.text || '';
   pushChannel('cmb', `[${source}] ${focus}${mood && mood !== 'neutral' ? ` (mood: ${mood})` : ''}`);
 });
 
 node.on('message', (from, content) => {
+  // Peer allowlist gate
+  if (!isPeerAllowed(from)) return;
+
   pushChannel('message', `[message from ${from}] ${content}`);
 });
 
