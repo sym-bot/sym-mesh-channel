@@ -1,0 +1,33 @@
+{
+  "name": "sym-mesh-channel",
+  "version": "0.1.18",
+  "description": "Real-time Claude-to-Claude mesh. Peer-to-peer cognitive signals over Bonjour LAN or WebSocket relay.",
+  "author": {
+    "name": "Hongwei Xu",
+    "email": "hongwei@sym.bot",
+    "url": "https://sym.bot"
+  },
+  "homepage": "https://sym.bot/spec/mmp",
+  "repository": "https://github.com/sym-bot/sym-mesh-channel",
+  "license": "Apache-2.0",
+  "keywords": ["mesh", "p2p", "mcp", "channel", "agents", "multi-agent", "bonjour", "cognitive", "svaf", "mmp"],
+  "channels": [
+    {
+      "server": "claude-sym-mesh",
+      "userConfig": {
+        "relay_url": {
+          "description": "SYM relay WebSocket URL for cross-network mesh (leave empty for LAN-only via Bonjour)",
+          "sensitive": false
+        },
+        "relay_token": {
+          "description": "Relay authentication token (leave empty for LAN-only)",
+          "sensitive": true
+        },
+        "allowed_peers": {
+          "description": "Comma-separated peer node names to accept (leave empty to accept all authenticated peers)",
+          "sensitive": false
+        }
+      }
+    }
+  ]
+}

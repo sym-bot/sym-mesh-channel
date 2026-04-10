@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "claude-sym-mesh": {
+      "command": "node",
+      "args": ["./server.js"],
+      "cwd": "${CLAUDE_PLUGIN_ROOT}",
+      "env": {
+        "SYM_RELAY_URL": "${user_config.relay_url}",
+        "SYM_RELAY_TOKEN": "${user_config.relay_token}",
+        "SYM_ALLOWED_PEERS": "${user_config.allowed_peers}"
+      }
+    }
+  }
+}

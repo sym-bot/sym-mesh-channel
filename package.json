@@ -7,11 +7,15 @@
     "sym-mesh-channel": "server.js"
   },
   "scripts": {
+    "test": "node test/plugin.test.js",
     "postinstall": "node bin/install.js init --postinstall"
   },
   "files": [
     "server.js",
     "bin/",
+    ".claude-plugin/",
+    ".mcp.json",
+    "SECURITY.md",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"
