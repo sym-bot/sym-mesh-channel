@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.1.19
+
+### Added
+
+- **Claude Code plugin manifest** for Anthropic Channels allowlist
+  submission. `.claude-plugin/plugin.json` + `.mcp.json` following the
+  official single-repo pattern (Telegram/Discord). Submitted to
+  Anthropic Plugin Directory 10 Apr 2026.
+- **`SYM_ALLOWED_PEERS`** — optional peer allowlist (defense-in-depth).
+  Comma-separated node names; only listed peers can push to Claude's
+  context. Empty = accept all authenticated peers. SVAF still gates on
+  content relevance regardless.
+- **`SECURITY.md`** — 3-layer defense model documentation (transport
+  auth + SVAF content gate + peer allowlist) for Anthropic review.
+- **17 plugin tests** covering manifest validation, security checks
+  (no permission relay, no code execution, self-echo filtering, peer
+  allowlist), and lifecycle (shutdown handlers, identity collision).
+
 ## 0.1.18
 
 ### Changed
