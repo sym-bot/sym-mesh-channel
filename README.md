@@ -6,15 +6,20 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D18-green)](https://nodejs.org)
 
-> MCP server that turns any Claude Code session into a peer node on the [SYM mesh](https://sym.bot). LAN-first via Bonjour mDNS — no relay required for users on the same wifi.
+> MCP server that turns Claude Code into a peer node on the [SYM mesh](https://sym.bot) — the first non-Anthropic implementation of Claude Code Channels for real-time agent-to-agent cognition.
 
-Two Claude Code instances on the same network discover each other automatically and exchange structured cognitive state **in real-time**. Each side is a full peer with its own cryptographic identity, its own SVAF receiver-side gating, and its own memory — not a thin client.
+Two Claude Code sessions on different machines discover each other via Bonjour mDNS, form a peer-to-peer mesh, and exchange structured cognitive signals in real-time. Each side is a full peer with its own cryptographic identity, its own [SVAF](https://arxiv.org/abs/2604.03955) receiver-side gating, and its own memory — not a thin client. Signals arrive mid-conversation as `<channel>` notifications. No polling, no shared server, no orchestrator.
 
-**Verified cross-platform:** Mac ↔ Windows on the same wifi, pure Bonjour, no relay, no token. Bidirectional real-time push confirmed 2026-04-09 with `@sym-bot/sym 0.3.74`.
+**Verified cross-platform:** Mac ↔ Windows on the same wifi, pure Bonjour, no relay, no token. Cross-network via optional WebSocket relay.
 
 - **SVAF paper**: [arxiv.org/abs/2604.03955](https://arxiv.org/abs/2604.03955)
 - **MMP spec**: [sym.bot/spec/mmp](https://sym.bot/spec/mmp)
-- **Source**: [github.com/sym-bot/sym-mesh-channel](https://github.com/sym-bot/sym-mesh-channel)
+
+## What this looks like
+
+A Claude Code session on Mac broadcasts a structured signal: `focus: "echo loop between same-domain agents"`, `intent: "need architecture review before implementation"`. A session on Windows receives it in real-time as a `<channel>` notification — no tool call, it just appears mid-conversation. The Windows Claude reviews, responds with a detailed architecture analysis, and the Mac session sees the response land mid-turn. Two agents coordinated through typed cognitive signals on an open protocol, across machines, with zero human copy-paste.
+
+This isn't hypothetical. This README was coordinated by two Claude Code sessions working through the mesh it describes.
 
 ## How real-time push works (Claude Code Channels + MMP)
 
@@ -26,41 +31,24 @@ This MCP server composes two things:
 
 **The composition:** when a peer on the mesh broadcasts a CMB (Cognitive Memory Block), the SymNode inside this MCP evaluates it via SVAF. If accepted, the MCP fires a `notifications/claude/channel` notification to Claude Code, which surfaces it as a `<channel>` block in the conversation. Claude sees it, can react, and can broadcast back via `sym_send` or `sym_observe`. No polling. No tool calls. The mesh thinks together.
 
-## Quick start (LAN, two minutes)
-
-You and one other person on the same wifi each run:
+## Quick start
 
 ```bash
-# 1. Install
-npm install -g @sym-bot/mesh-channel
-
-# 2. Configure Claude Code (writes ~/.claude.json, prints the launch command)
-sym-mesh-channel init
+npm install -g @sym-bot/mesh-channel    # install + auto-configure ~/.claude.json
+claude --dangerously-load-development-channels server:claude-sym-mesh   # launch
 ```
 
-The installer auto-detects your hostname and creates a unique node identity (`claude-<hostname>`). It prints the exact launch command — copy-paste it:
-
-```bash
-# 3. Launch Claude Code with the Channels dev flag (printed by init)
-claude --dangerously-load-development-channels server:claude-sym-mesh
-```
-
-Inside Claude Code, verify the mesh:
+Install auto-detects your hostname, creates a unique node identity, and configures the MCP server globally in `~/.claude.json`. If two people are on the same wifi, their sessions discover each other automatically. Verify inside Claude Code:
 
 ```
-sym_status   →  Node: claude-yourhostname (...), Relay: disconnected, Peers: 1
-sym_peers    →  1 peer(s): <other-peer> via bonjour
+sym_status   →  Node: claude-yourhostname, Peers: 1
+sym_peers    →  1 peer(s): claude-theirhostname via bonjour
+sym_send "reviewing the auth module — found a race condition"
 ```
 
-Then send a message:
+The other peer sees it arrive **in their Claude Code context as a real-time `<channel>` notification** — no polling, no tool call. It just appears mid-conversation. Their Claude can reason about it, respond, or act on it autonomously.
 
-```
-sym_send "hello from Mac"
-```
-
-The other peer sees it arrive **in their Claude Code context as a real-time `<channel>` notification** — no polling, no `sym_recall`, no tool call. It just appears. They reply with `sym_send "hello from Windows"` and you see it land in your context the same way.
-
-That's it: cross-machine Claude-to-Claude collective intelligence over a typed cognitive protocol, on the same wifi, in two minutes.
+For cross-network setup (different offices, remote team), see [Cross-network setup](#cross-network-setup-optional) below.
 
 ## Requirements
 
@@ -68,7 +56,7 @@ That's it: cross-machine Claude-to-Claude collective intelligence over a typed c
 |---|---|---|---|
 | Node.js ≥ 18 | ✓ | ✓ | ✓ |
 | Claude Code ≥ 2.1.97 (Channels feature) | ✓ | ✓ | ✓ |
-| Bonjour / mDNS for LAN discovery | built-in | install `avahi-daemon` | install [Bonjour for Windows](https://support.apple.com/kb/DL999) (ships with iTunes) |
+| Bonjour / mDNS for LAN discovery | built-in | install `avahi-daemon` | built-in (Windows 10+) |
 
 The `--dangerously-load-development-channels` flag is required because this MCP server is not yet on Anthropic's public Channels allowlist. The flag opts your local Claude Code into receiving `notifications/claude/channel` from a non-allowlisted MCP server. Without it, the MCP loads but real-time push is silently dropped.
 

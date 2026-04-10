@@ -33,6 +33,7 @@ const os = require('os');
 
 const args = process.argv.slice(2);
 const force = args.includes('--force');
+const isPostinstall = args.includes('--postinstall');
 const cmd = args.find((a) => !a.startsWith('--')) || 'init';
 
 if (cmd !== 'init') {
@@ -52,10 +53,16 @@ const nodeName = process.env.SYM_NODE_NAME || defaultNodeName;
 
 // ── Resolve server.js path ────────────────────────────────────────
 
-// __dirname is .../node_modules/@sym-bot/mesh-channel/bin in npm install,
-// or .../sym-mesh-channel/bin if running from a clone. server.js is one
-// level up either way.
-const serverJsPath = path.resolve(__dirname, '..', 'server.js');
+// Resolve server.js from the installed package location. require.resolve
+// returns the actual installed path regardless of where postinstall runs
+// from (npm on Windows may run postinstall from a temp staging directory).
+let serverJsPath;
+try {
+  serverJsPath = require.resolve('@sym-bot/mesh-channel/server.js');
+} catch {
+  // Fallback for local development / cloned repo
+  serverJsPath = path.resolve(__dirname, '..', 'server.js');
+}
 if (!fs.existsSync(serverJsPath)) {
   process.stderr.write(`ERROR: cannot find server.js at ${serverJsPath}\n`);
   process.stderr.write('This installer must be run from a published @sym-bot/mesh-channel package.\n');
@@ -67,6 +74,11 @@ if (!fs.existsSync(serverJsPath)) {
 const claudeJsonPath = path.join(os.homedir(), '.claude.json');
 
 if (!fs.existsSync(claudeJsonPath)) {
+  if (isPostinstall) {
+    // During postinstall, skip silently if Claude Code isn't installed yet
+    console.log('sym-mesh-channel: ~/.claude.json not found — run `sym-mesh-channel init` after installing Claude Code.');
+    process.exit(0);
+  }
   process.stderr.write(`ERROR: ${claudeJsonPath} not found.\n`);
   process.stderr.write('Claude Code does not appear to be installed (or has not been launched yet).\n');
   process.stderr.write('Install Claude Code from https://claude.com/code first, launch it once, then re-run this installer.\n');
@@ -89,20 +101,21 @@ const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
 const backupPath = `${claudeJsonPath}.bak-${ts}`;
 fs.copyFileSync(claudeJsonPath, backupPath);
 
-// ── Find the project entry to insert into ────────────────────────
+// ── Find the MCP servers entry to insert into ───────────────────
+// Write to global mcpServers (available in all Claude Code sessions),
+// not project-scoped. A mesh node should be available everywhere.
 
-const projectDir = process.cwd();
-if (!claudeJson.projects) claudeJson.projects = {};
-if (!claudeJson.projects[projectDir]) {
-  claudeJson.projects[projectDir] = {};
-}
-const project = claudeJson.projects[projectDir];
-if (!project.mcpServers) project.mcpServers = {};
+if (!claudeJson.mcpServers) claudeJson.mcpServers = {};
 
 // ── Refuse to overwrite without --force ──────────────────────────
 
-if (project.mcpServers['claude-sym-mesh'] && !force) {
-  process.stderr.write(`'claude-sym-mesh' is already configured for this project (${projectDir}).\n`);
+if (claudeJson.mcpServers['claude-sym-mesh'] && !force) {
+  if (isPostinstall) {
+    // During postinstall, silently skip if already configured
+    console.log('sym-mesh-channel: already configured in ~/.claude.json (skipping)');
+    process.exit(0);
+  }
+  process.stderr.write(`'claude-sym-mesh' is already configured in ~/.claude.json.\n`);
   process.stderr.write('Re-run with --force to overwrite, or remove the existing entry first.\n');
   process.exit(2);
 }
@@ -127,7 +140,7 @@ const entry = {
   },
 };
 
-project.mcpServers['claude-sym-mesh'] = entry;
+claudeJson.mcpServers['claude-sym-mesh'] = entry;
 
 // ── Atomic write ──────────────────────────────────────────────────
 
@@ -143,48 +156,44 @@ try {
 }
 
 const tmpPath = `${claudeJsonPath}.tmp-${process.pid}`;
-fs.writeFileSync(tmpPath, serialized);
-fs.renameSync(tmpPath, claudeJsonPath);
+try {
+  fs.writeFileSync(tmpPath, serialized);
+  fs.renameSync(tmpPath, claudeJsonPath);
+} catch (e) {
+  // EBUSY on Windows when Claude Code has ~/.claude.json locked
+  if (e.code === 'EBUSY' || e.code === 'EPERM') {
+    try { fs.unlinkSync(tmpPath); } catch {}
+    if (isPostinstall) {
+      console.log('sym-mesh-channel: ~/.claude.json is locked (Claude Code may be running).');
+      console.log('Run `sym-mesh-channel init` after quitting Claude Code.');
+      process.exit(0);
+    }
+    process.stderr.write(`ERROR: ${claudeJsonPath} is locked — Claude Code may be running.\n`);
+    process.stderr.write('Quit Claude Code, then re-run: sym-mesh-channel init\n');
+    process.stderr.write(`Backup is at ${backupPath}\n`);
+    process.exit(1);
+  }
+  throw e;
+}
 
 // ── Print next steps ──────────────────────────────────────────────
 
 const launchCmd = `claude --dangerously-load-development-channels server:claude-sym-mesh`;
 
 console.log(`
-✓ sym-mesh-channel installed for project: ${projectDir}
+✓ sym-mesh-channel configured globally in ~/.claude.json
 
   Node name:     ${nodeName}
   Server path:   ${serverJsPath}
   Backup:        ${backupPath}
 
-Next steps:
+Launch Claude Code with the Channels flag:
 
-  1. Launch Claude Code from this directory with the Channels flag:
+  ${launchCmd}
 
-     ${launchCmd}
+Inside Claude Code, verify:
 
-     The flag is required because this MCP server is not yet on
-     Anthropic's public Channels allowlist. Without the flag, the
-     MCP loads but inbound real-time push notifications are silently
-     dropped.
-
-  2. Inside Claude Code, verify the mesh is up:
-
-       sym_status   →  shows your node id, relay state, peer count
-       sym_peers    →  lists discovered peers via Bonjour or relay
-
-  3. Have a friend on the same wifi run the same install with a
-     different SYM_NODE_NAME (e.g. claude-mac vs claude-win). Within
-     a few seconds you should see each other in sym_peers.
-
-  4. Send a message:
-
-       sym_send "hello mesh"
-
-     The other peer should see it land in their Claude Code context
-     as a real-time channel notification — no polling.
-
-LAN-only mode is the default. To connect across networks, add
-SYM_RELAY_URL and SYM_RELAY_TOKEN to the env block in
-${claudeJsonPath} (see README for relay setup).
+  sym_status   →  node id, relay state, peer count
+  sym_peers    →  discovered peers via Bonjour or relay
+  sym_send "hello mesh"   →  broadcast to all peers
 `);
