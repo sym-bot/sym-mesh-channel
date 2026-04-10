@@ -50,7 +50,7 @@ The plugin has been [submitted to the Anthropic Plugin Directory](https://claude
 
 ---
 
-Install auto-detects your hostname, creates a unique node identity, and configures the MCP server globally in `~/.claude.json`. If two people are on the same wifi, their sessions discover each other automatically. Verify inside Claude Code:
+Install auto-detects your hostname, creates a unique node identity (`claude-<hostname>`), and configures the MCP server globally in `~/.claude.json`. To customize your node name, set `SYM_NODE_NAME` before installing. If two people are on the same wifi, their sessions discover each other automatically. Verify inside Claude Code:
 
 ```
 sym_status   →  Node: claude-yourhostname, Peers: 1
@@ -132,7 +132,7 @@ Both peers must use the same relay URL and token to be on the same channel. The 
 **Peers don't see each other on the same wifi.** Check Bonjour is running:
 - macOS: `dns-sd -B _sym._tcp` (built-in)
 - Linux: `avahi-browse -r _sym._tcp` (needs `avahi-daemon` running)
-- Windows: ensure Bonjour Print Services or iTunes-bundled Bonjour is installed; check Services → Bonjour Service is running
+- Windows 10+: mDNS is built-in. If discovery fails, check Windows Firewall allows mDNS (port 5353 UDP).
 
 Some corporate networks block mDNS multicast — try a hotspot or home wifi to verify. If LAN is blocked, fall back to a relay.
 
@@ -143,6 +143,27 @@ Some corporate networks block mDNS multicast — try a hotspot or home wifi to v
 **`sym_status` says "Relay: connected" even though you didn't configure a relay.** Your shell profile (`~/.zshrc`, `~/.bashrc`, etc.) exports `SYM_RELAY_URL`. Claude Code's MCP env block is **additive** — omitting a key doesn't remove it from the child process. Fix: set `SYM_RELAY_URL` and `SYM_RELAY_TOKEN` to `""` (empty string) in the MCP env block to override the shell. The installer (`npx @sym-bot/mesh-channel init`) does this automatically as of v0.1.8.
 
 **Multiple Claude Code sessions on the same machine want to share an identity.** Don't. Each session should have a distinct `SYM_NODE_NAME`. As of `@sym-bot/sym 0.3.70`, the SymNode acquires an exclusive lockfile on its identity (`~/.sym/nodes/<name>/lock.pid`) and refuses to start a second process with the same name. If you see `EIDENTITYLOCK`, find and kill the other process or pick a different name.
+
+## Security
+
+Defense in depth — three layers, all must pass before a mesh signal reaches Claude's context:
+
+1. **Transport**: Ed25519 peer identity (LAN) + relay token auth (cross-network). Unauthenticated sources cannot reach `pushChannel()`.
+2. **Protocol**: [SVAF](https://arxiv.org/abs/2604.03955) per-field content gating — evaluates each incoming CMB across 7 semantic dimensions and rejects irrelevant signals.
+3. **Application**: text-only context injection, no code execution, no permission relay (`claude/channel/permission` is explicitly not declared).
+
+**Optional peer allowlist**: set `SYM_ALLOWED_PEERS=claude-mac,claude-win` to restrict which authenticated peers can push to Claude's context. When empty (default), all authenticated peers are accepted.
+
+See [SECURITY.md](SECURITY.md) for the full security model.
+
+## References
+
+- [SVAF paper (arXiv:2604.03955)](https://arxiv.org/abs/2604.03955) — Xu, 2026. Symbolic-Vector Attention Fusion for Collective Intelligence.
+- [MMP spec v0.2.2](https://sym.bot/spec/mmp) — Mesh Memory Protocol specification.
+- [sym-swift](https://github.com/sym-bot/sym-swift) — iOS/macOS SDK implementing the same protocol.
+- [sym-relay](https://github.com/sym-bot/sym-relay) — WebSocket relay for cross-network mesh.
+
+**Verified cross-platform:** Mac ↔ Windows on the same wifi (April 2026).
 
 ## License
 
