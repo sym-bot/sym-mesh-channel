@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.21
+
+### Changed
+
+- **README: accurate `sym_status` / `sym_peers` example output.** The
+  Quick Start sample output was a stylized one-line compression; the
+  real output is multi-line with additional fields (nodeId suffix,
+  Relay, Memories, one peer per line). Updated so users see in the
+  README exactly what their terminal will show. Doc-only — no code
+  changes.
+
 ## 0.1.20
 
 ### Added

@@ -53,9 +53,18 @@ The plugin has been [submitted to the Anthropic Plugin Directory](https://claude
 Install auto-detects your hostname, creates a unique node identity (`claude-<hostname>`), and configures the MCP server globally in `~/.claude.json`. To customize your node name, set `SYM_NODE_NAME` before installing. If two people are on the same wifi, their sessions discover each other automatically. Verify inside Claude Code:
 
 ```
-sym_status   →  Node: claude-yourhostname, Peers: 1
-sym_peers    →  1 peer(s): claude-theirhostname via bonjour
-sym_send "reviewing the auth module — found a race condition"
+> sym_status
+Node: claude-yourhostname (019d599d)
+Relay: disconnected
+Peers: 1
+Memories: 0
+
+> sym_peers
+1 peer(s):
+claude-theirhostname via bonjour
+
+> sym_send "reviewing the auth module — found a race condition"
+Message delivered to 1 peer(s).
 ```
 
 The other peer sees it arrive **in their Claude Code context as a real-time `<channel>` notification** — no polling, no tool call. It just appears mid-conversation. Their Claude can reason about it, respond, or act on it autonomously.
