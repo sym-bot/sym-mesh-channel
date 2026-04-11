@@ -14,6 +14,7 @@
  */
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 const assert = require('assert');
@@ -190,10 +191,152 @@ test('identity collision exits cleanly', () => {
   assert.ok(code.includes('process.exit(2)'), 'should exit with code 2 on identity collision');
 });
 
+// ── 6. Installer: project-scoped mode (--project flag) ─────
+
+async function runProjectInstallTests() {
+  console.log('\nInstaller - project-scoped mode:');
+
+  await testAsync('--project writes .mcp.json and settings.local.json at cwd', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-proj-'));
+    try {
+      const { code } = await spawnInstaller(['init', '--project'], {
+        cwd: tmpDir,
+        env: { ...process.env, SYM_NODE_NAME: 'claude-test-project' },
+      });
+      assert.strictEqual(code, 0, 'installer should exit 0');
+
+      const mcpJson = JSON.parse(fs.readFileSync(path.join(tmpDir, '.mcp.json'), 'utf8'));
+      assert.ok(mcpJson.mcpServers, 'mcpServers missing');
+      const entry = mcpJson.mcpServers['claude-sym-mesh'];
+      assert.ok(entry, 'claude-sym-mesh missing from .mcp.json');
+      assert.strictEqual(entry.command, 'node');
+      assert.strictEqual(entry.env.SYM_NODE_NAME, 'claude-test-project');
+      assert.strictEqual(entry.env.SYM_RELAY_URL, '', 'relay url must be explicitly blank');
+      assert.strictEqual(entry.env.SYM_RELAY_TOKEN, '', 'relay token must be explicitly blank');
+
+      const settings = JSON.parse(fs.readFileSync(path.join(tmpDir, '.claude', 'settings.local.json'), 'utf8'));
+      assert.deepStrictEqual(settings.enabledMcpjsonServers, ['claude-sym-mesh']);
+      assert.strictEqual(settings.enableAllProjectMcpServers, true);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  await testAsync('--project preserves existing settings.local.json keys', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-proj-'));
+    try {
+      fs.mkdirSync(path.join(tmpDir, '.claude'));
+      const existing = {
+        permissions: { allow: ['Read(//*)'] },
+        customKey: 42,
+      };
+      fs.writeFileSync(
+        path.join(tmpDir, '.claude', 'settings.local.json'),
+        JSON.stringify(existing),
+      );
+
+      const { code } = await spawnInstaller(['init', '--project'], { cwd: tmpDir });
+      assert.strictEqual(code, 0);
+
+      const settings = JSON.parse(fs.readFileSync(path.join(tmpDir, '.claude', 'settings.local.json'), 'utf8'));
+      assert.deepStrictEqual(settings.permissions, existing.permissions, 'permissions should be preserved');
+      assert.strictEqual(settings.customKey, 42, 'customKey should be preserved');
+      assert.deepStrictEqual(settings.enabledMcpjsonServers, ['claude-sym-mesh']);
+      assert.strictEqual(settings.enableAllProjectMcpServers, true);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  await testAsync('--project refuses re-install without --force (exit 2)', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-proj-'));
+    try {
+      const first = await spawnInstaller(['init', '--project'], { cwd: tmpDir });
+      assert.strictEqual(first.code, 0, 'first install should succeed');
+
+      const second = await spawnInstaller(['init', '--project'], {
+        cwd: tmpDir,
+        allowFail: true,
+      });
+      assert.strictEqual(second.code, 2, 'second install without --force should exit 2');
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  await testAsync('--project --force overwrites and creates a .mcp.json backup', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-proj-'));
+    try {
+      await spawnInstaller(['init', '--project'], { cwd: tmpDir });
+      const { code } = await spawnInstaller(['init', '--project', '--force'], { cwd: tmpDir });
+      assert.strictEqual(code, 0);
+
+      const backups = fs.readdirSync(tmpDir).filter((f) => f.startsWith('.mcp.json.bak-'));
+      assert.ok(backups.length > 0, 'backup file should exist after --force overwrite');
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  await testAsync('--project + --postinstall falls back to global install (no .mcp.json written)', async () => {
+    // --postinstall always runs global (postinstall runs from npm staging
+    // dir, not the user's project). When paired with --project we want
+    // the project flag ignored, NOT an error — preserves existing
+    // postinstall auto-config behavior for npm install -g.
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-proj-'));
+    try {
+      // Global install writes ~/.claude.json which we don't want to
+      // mutate in a test. Simulate absence: point HOME at a tmp dir that
+      // has no .claude.json, and expect postinstall-branch graceful skip.
+      const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-home-'));
+      try {
+        const { code } = await spawnInstaller(['init', '--project', '--postinstall'], {
+          cwd: tmpDir,
+          env: { ...process.env, HOME: fakeHome, USERPROFILE: fakeHome },
+        });
+        // Postinstall skips gracefully (exit 0) when ~/.claude.json
+        // is missing, and must NOT have created <cwd>/.mcp.json.
+        assert.strictEqual(code, 0, 'postinstall should skip gracefully');
+        assert.ok(!fs.existsSync(path.join(tmpDir, '.mcp.json')),
+          '--project should be ignored during postinstall; no project files should be written');
+      } finally {
+        fs.rmSync(fakeHome, { recursive: true, force: true });
+      }
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+}
+
+function spawnInstaller(args, opts = {}) {
+  return new Promise((resolve, reject) => {
+    const installJs = path.join(__dirname, '..', 'bin', 'install.js');
+    const proc = spawn(process.execPath, [installJs, ...args], {
+      cwd: opts.cwd,
+      env: opts.env || process.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stderr = '';
+    proc.stderr.on('data', (d) => { stderr += d.toString(); });
+    // Drain stdout to prevent buffer fill on long output
+    proc.stdout.on('data', () => {});
+    proc.on('close', (code) => {
+      if (code !== 0 && !opts.allowFail) {
+        return reject(new Error(`installer exited ${code}: ${stderr}`));
+      }
+      resolve({ code, stderr });
+    });
+    proc.on('error', reject);
+  });
+}
+
 // ── Results ─────────────────────────────────────────────────
 
-console.log(`\n${passed + failed} tests, ${passed} passed, ${failed} failed\n`);
-process.exit(failed > 0 ? 1 : 0);
+(async () => {
+  await runProjectInstallTests();
+  console.log(`\n${passed + failed} tests, ${passed} passed, ${failed} failed\n`);
+  process.exit(failed > 0 ? 1 : 0);
+})();
 
 // ── Helpers ─────────────────────────────────────────────────
 

@@ -62,6 +62,19 @@ The other peer sees it arrive **in their Claude Code context as a real-time `<ch
 
 For cross-network setup (different offices, remote team), see [Cross-network setup](#cross-network-setup-optional) below.
 
+### Advanced: per-project node identity
+
+By default every Claude Code session on a machine shares one mesh identity (set globally in `~/.claude.json`). If you run several Claude Code sessions in parallel from distinct project directories and want each to appear as its own peer on the mesh — e.g. a "research" session and a "strategy" session on the same laptop — install per-project instead:
+
+```bash
+cd path/to/your/project
+SYM_NODE_NAME=claude-myproject-win sym-mesh-channel init --project
+```
+
+This writes `<project>/.mcp.json` and merges `<project>/.claude/settings.local.json` instead of touching `~/.claude.json`. Claude Code loads project-scoped `.mcp.json` on launch and its entries override the global one when you're running from that directory, so each project gets its own `SYM_NODE_NAME` without stepping on siblings. Rerun from each project root with a distinct `SYM_NODE_NAME` to register each one as a separate peer.
+
+Normal one-machine-one-peer usage does **not** need `--project` — the default global install is correct for most users.
+
 ## Requirements
 
 | | macOS | Linux | Windows |

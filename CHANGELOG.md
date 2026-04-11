@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.1.20
+
+### Added
+
+- **`sym-mesh-channel init --project`** — new flag to install the MCP
+  server at project scope (`<cwd>/.mcp.json` + merged
+  `<cwd>/.claude/settings.local.json`) instead of global
+  `~/.claude.json`. Enables multi-identity-per-machine workflows where
+  several Claude Code sessions run in parallel from distinct project
+  directories and each appears as its own peer on the mesh. Project
+  `.mcp.json` entries override the global `mcpServers` entry when
+  Claude Code launches from that directory, so `SYM_NODE_NAME` can
+  differ per project without siblings stepping on each other.
+- Project mode supports the same `--force` semantics as global install:
+  backs up existing `.mcp.json` and `settings.local.json` next to
+  themselves (`*.bak-<timestamp>`), merges `settings.local.json` so
+  unrelated keys (permissions, custom settings) are preserved, atomic
+  writes via tmp+rename, refuses to overwrite an existing
+  `claude-sym-mesh` entry without `--force`.
+- `--postinstall` always runs global install regardless of `--project`
+  (npm postinstall runs from npm's staging dir, not the user's
+  project). Keeps `npm install -g` auto-configure behavior unchanged.
+- **5 new tests** covering project-mode install: writes `.mcp.json`
+  and `settings.local.json`, merge preserves existing keys, refusal
+  path exits 2, `--force` overwrite creates backup, postinstall
+  fallback ignores `--project`. Test suite now 22 tests total.
+
+### Why
+
+Default mode (single mesh identity per machine, global install) is
+correct for most users and unchanged. `--project` exists for the
+small but real set of users who run multiple Claude Code sessions
+in parallel from distinct project directories and want each session
+to show up as its own peer on the mesh. Previously this workflow
+required hand-editing `.mcp.json` and `.claude/settings.local.json`
+per project; now it's one command per project.
+
 ## 0.1.19
 
 ### Added
