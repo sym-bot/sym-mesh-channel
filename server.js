@@ -87,7 +87,8 @@ const mcp = new Server(
       'Mesh events arrive as <channel> notifications in real-time. ' +
       'When you see a message or CMB from another node, respond via the sym_send tool if actionable. ' +
       'Share observations about the user\'s state via sym_observe. ' +
-      'Search mesh memory via sym_recall.',
+      'Search mesh memory via sym_recall. ' +
+      'Messages arrive as compact headers with [mNNN] IDs — use sym_fetch to read the full content when the header is relevant to your current task.',
   },
 );
 
@@ -146,6 +147,15 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       name: 'sym_status',
       description: 'Get mesh node status — relay connection, peer count, memory count.',
       inputSchema: { type: 'object', properties: {} },
+    },
+    {
+      name: 'sym_fetch',
+      description: 'Fetch full content of a mesh message by ID. Use when a compact channel notification needs deeper reading.',
+      inputSchema: {
+        type: 'object',
+        properties: { msg_id: { type: 'string', description: 'Message ID (e.g., m007)' } },
+        required: ['msg_id'],
+      },
     },
   ],
 }));
@@ -210,6 +220,19 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
       return { content: [{ type: 'text', text: `${peers.length} peer(s):\n${lines.join('\n')}` }] };
     }
 
+    case 'sym_fetch': {
+      const entry = MESSAGE_STORE.get(args.msg_id);
+      if (!entry) {
+        return { content: [{ type: 'text', text: `Message ${args.msg_id} not found (expired or invalid ID).` }] };
+      }
+      return {
+        content: [{
+          type: 'text',
+          text: `[${entry.from}] ${new Date(entry.timestamp).toISOString()}\n\n${entry.content}`,
+        }],
+      };
+    }
+
     case 'sym_status': {
       const s = node.status();
       return {
@@ -227,6 +250,50 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
       return { content: [{ type: 'text', text: `Unknown tool: ${name}` }] };
   }
 });
+
+// ── Compact Channel — message store for lazy-load (v0.1) ────
+// Per COO spec cmb_compact_channel_v0.1.md: push compact headers,
+// store full content for on-demand sym_fetch retrieval. ~10% token
+// savings on mesh traffic without context loss.
+const MESSAGE_STORE = new Map();
+let msgSeq = 0;
+const MAX_STORED = 200;
+
+function storeMessage(from, content) {
+  const msgId = `m${String(++msgSeq).padStart(3, '0')}`;
+  MESSAGE_STORE.set(msgId, { from, content, timestamp: Date.now() });
+  while (MESSAGE_STORE.size > MAX_STORED) {
+    const oldest = MESSAGE_STORE.keys().next().value;
+    MESSAGE_STORE.delete(oldest);
+  }
+  return msgId;
+}
+
+function extractCompactHeader(from, content) {
+  const lines = content.split('\n').filter(l => l.trim());
+  const focusMatch = content.match(/focus[=:]\s*([^\n\]]{0,80})/i);
+  const bracketMatch = content.match(/\[([^\]]{0,120})\]/);
+
+  const hasHalt = /\bhalt\b/i.test(content);
+  const hasDirective = /\bdirective\b/i.test(content);
+  const hasResults = /\bresult|complete|landed|done\b/i.test(content);
+  const hasAck = /\back\b/i.test(content);
+
+  let signal = '';
+  if (hasHalt) signal = 'HALT';
+  else if (hasDirective) signal = 'DIRECTIVE';
+  else if (hasResults) signal = 'RESULT';
+  else if (hasAck) signal = 'ACK';
+
+  const parts = [];
+  if (signal) parts.push(signal);
+  if (focusMatch) parts.push(`focus=${focusMatch[1].trim()}`);
+  else if (bracketMatch) parts.push(bracketMatch[1].trim());
+  else if (lines[0]) parts.push(lines[0].slice(0, 100));
+
+  const approxTokens = Math.round(content.length / 4);
+  return parts.join(' | ') + ` (~${approxTokens}tok)`;
+}
 
 // ── Peer Allowlist (optional, defense-in-depth) ─────────────
 // SYM_ALLOWED_PEERS is a comma-separated list of peer node names.
@@ -275,7 +342,11 @@ node.on('message', (from, content) => {
   // Peer allowlist gate
   if (!isPeerAllowed(from)) return;
 
-  pushChannel('message', `[message from ${from}] ${content}`);
+  // Compact channel: store full content, push only header + msg_id.
+  // Agent calls sym_fetch(msg_id) for full content when needed.
+  const msgId = storeMessage(from, content);
+  const header = extractCompactHeader(from, content);
+  pushChannel('message', `[${from}] ${header} [${msgId}]`);
 });
 
 // Peer presence events are intentionally NOT pushed to Claude's context.
