@@ -1,7 +1,7 @@
 # sym-mesh-channel
 
 [![npm](https://img.shields.io/npm/v/@sym-bot/mesh-channel)](https://www.npmjs.com/package/@sym-bot/mesh-channel)
-[![MMP Spec](https://img.shields.io/badge/protocol-MMP_v0.2.2-purple)](https://sym.bot/spec/mmp)
+[![MMP Spec](https://img.shields.io/badge/protocol-MMP_v0.2.3-purple)](https://sym.bot/spec/mmp)
 [![arXiv](https://img.shields.io/badge/arXiv-2604.03955-b31b1b.svg)](https://arxiv.org/abs/2604.03955)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D18-green)](https://nodejs.org)
@@ -181,7 +181,7 @@ See [SECURITY.md](SECURITY.md) for the full security model.
 ## References
 
 - [SVAF paper (arXiv:2604.03955)](https://arxiv.org/abs/2604.03955) — Xu, 2026. Symbolic-Vector Attention Fusion for Collective Intelligence.
-- [MMP spec v0.2.2](https://sym.bot/spec/mmp) — Mesh Memory Protocol specification.
+- [MMP spec v0.2.3](https://sym.bot/spec/mmp) — Mesh Memory Protocol specification.
 - [sym-swift](https://github.com/sym-bot/sym-swift) — iOS/macOS SDK implementing the same protocol.
 - [sym-relay](https://github.com/sym-bot/sym-relay) — WebSocket relay for cross-network mesh.
 
