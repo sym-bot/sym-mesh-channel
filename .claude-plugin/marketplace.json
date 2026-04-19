@@ -1,0 +1,40 @@
+{
+  "name": "sym-mesh-channel",
+  "owner": {
+    "name": "SYM.BOT Ltd",
+    "email": "info@sym.bot"
+  },
+  "metadata": {
+    "description": "Real-time Claude-to-Claude mesh. Peer-to-peer cognitive signals over Bonjour LAN or WebSocket relay.",
+    "version": "0.1.21"
+  },
+  "plugins": [
+    {
+      "name": "sym-mesh-channel",
+      "source": "./",
+      "description": "Real-time Claude-to-Claude mesh. Peer-to-peer cognitive signals over Bonjour LAN or WebSocket relay. Implements the Mesh Memory Protocol (MMP) for structured cognitive state exchange between Claude Code sessions.",
+      "version": "0.1.21",
+      "author": {
+        "name": "Hongwei Xu",
+        "email": "hongwei@sym.bot"
+      },
+      "homepage": "https://sym.bot/spec/mmp",
+      "repository": "https://github.com/sym-bot/sym-mesh-channel",
+      "license": "Apache-2.0",
+      "keywords": [
+        "mesh",
+        "p2p",
+        "mcp",
+        "channel",
+        "agents",
+        "multi-agent",
+        "bonjour",
+        "cognitive",
+        "svaf",
+        "mmp"
+      ],
+      "category": "agents",
+      "tags": ["mesh", "cognitive", "channel", "mcp", "multi-agent"]
+    }
+  ]
+}
