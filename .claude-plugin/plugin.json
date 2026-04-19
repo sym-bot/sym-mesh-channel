@@ -16,14 +16,20 @@
       "server": "claude-sym-mesh",
       "userConfig": {
         "relay_url": {
+          "type": "string",
+          "title": "Relay URL",
           "description": "SYM relay WebSocket URL for cross-network mesh (leave empty for LAN-only via Bonjour)",
           "sensitive": false
         },
         "relay_token": {
+          "type": "string",
+          "title": "Relay Token",
           "description": "Relay authentication token (leave empty for LAN-only)",
           "sensitive": true
         },
         "allowed_peers": {
+          "type": "string",
+          "title": "Allowed Peers",
           "description": "Comma-separated peer node names to accept (leave empty to accept all authenticated peers)",
           "sensitive": false
         }
