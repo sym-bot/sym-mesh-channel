@@ -33,14 +33,7 @@ This MCP server composes two things:
 
 ## Quick start
 
-### Via npm (available now)
-
-```bash
-npm install -g @sym-bot/mesh-channel    # install + auto-configure ~/.claude.json
-claude --dangerously-load-development-channels server:claude-sym-mesh   # launch
-```
-
-### Via Claude Code plugin marketplace (available now)
+### Via Claude Code plugin marketplace (recommended)
 
 Two commands, straight from this repo — no waiting on any external directory:
 
@@ -49,9 +42,20 @@ Two commands, straight from this repo — no waiting on any external directory:
 /plugin install sym-mesh-channel@sym-mesh-channel
 ```
 
-This works today. Claude Code clones this repo, reads `.claude-plugin/marketplace.json`, and installs the plugin into your user scope. See the [Claude Code plugin-marketplaces docs](https://code.claude.com/docs/en/plugin-marketplaces) for the install flow.
+Claude Code clones the repo, reads `.claude-plugin/marketplace.json`, and installs the plugin into your user scope. Launch with:
 
-> **Channels note**: Claude Code Channels are in [research preview](https://code.claude.com/docs/en/channels#research-preview) with an Anthropic-maintained allowlist. The MCP tools (`sym_send`, `sym_peers`, `sym_status`, `sym_recall`, `sym_observe`, `sym_fetch`, `sym_group_info`) work out of the box once installed. The in-conversation `<channel>` push notifications currently require either Anthropic allowlist inclusion or the development flag `--dangerously-load-development-channels plugin:sym-mesh-channel@sym-mesh-channel`. The plugin has been approved on the [Anthropic Plugin Directory](https://claude.ai/settings/plugins/submit); official-marketplace listing propagation and channel-allowlist inclusion are tracked separately.
+```bash
+claude --dangerously-load-development-channels plugin:sym-mesh-channel@sym-mesh-channel
+```
+
+### Via npm
+
+```bash
+npm install -g @sym-bot/mesh-channel    # install + auto-configure ~/.claude.json
+claude --dangerously-load-development-channels server:claude-sym-mesh   # launch
+```
+
+> **Why the dev flag?** Claude Code Channels are in [research preview](https://code.claude.com/docs/en/channels#research-preview) with an Anthropic-maintained allowlist that gates in-conversation `<channel>` push notifications. The MCP tools themselves (`sym_send`, `sym_peers`, `sym_status`, `sym_recall`, `sym_observe`, `sym_fetch`, `sym_group_info`, `sym_invite_info`) work immediately after install without any flag. The `--dangerously-load-development-channels` flag is only needed to enable the async-push behaviour (peer messages arriving mid-turn without a tool call). The plugin is approved on the [Anthropic Plugin Directory](https://claude.ai/settings/plugins/submit); plugin-directory approval and Channels-allowlist inclusion are independent gates.
 
 ---
 
@@ -97,19 +101,22 @@ Normal one-machine-one-peer usage does **not** need `--project` — the default 
 | Claude Code ≥ 2.1.97 (Channels feature) | ✓ | ✓ | ✓ |
 | Bonjour / mDNS for LAN discovery | built-in | install `avahi-daemon` | built-in (Windows 10+) |
 
-The `--dangerously-load-development-channels` flag is required during the review period. Once the plugin is approved on the Anthropic Plugin Directory, this flag is no longer needed — install via `/plugin install` and launch normally.
+The plugin is approved on the Anthropic Plugin Directory. The `--dangerously-load-development-channels` flag remains necessary while Claude Code Channels are in research preview with a separate allowlist that gates the `<channel>` push-notification feature specifically; the MCP tools themselves do not require the flag.
 
 ## What you get
 
-Five MCP tools exposed to Claude Code, namespaced under `mcp__claude-sym-mesh__`:
+Eight MCP tools exposed to Claude Code, namespaced under `mcp__claude-sym-mesh__`:
 
 | Tool | What it does |
 |---|---|
 | `sym_send` | Broadcast a free-text message to all mesh peers. Arrives in receivers' contexts as a `<channel>` notification. |
 | `sym_observe` | Share a structured CAT7 observation: focus, issue, intent, motivation, commitment, perspective, mood. SVAF-gated on the receiving side. |
 | `sym_recall` | Search mesh memory for past CMBs. |
+| `sym_fetch` | Fetch the full content of a single CMB by its compact channel-header ID. Lets receivers pull deep context on demand rather than receiving every field on every push. |
 | `sym_peers` | List discovered peers (via bonjour or relay). |
-| `sym_status` | Node identity, relay state, peer count, memory count. |
+| `sym_status` | Node identity, relay state, peer count, memory count. Includes current mesh group (MMP §5.8). |
+| `sym_group_info` | Report the mesh group this node is in, with service type + group name + peer roster scoped to the group. |
+| `sym_invite_info` | Parse an app-specific mesh invite URL (e.g. `melotune://room/{id}/{name}`) and return service type + group + optional relay token. Read-only; does not switch groups. |
 
 Real-time push is bidirectional: peer events arrive in Claude's context without any tool call, while the session is mid-turn. This is the "Claude thinks with the mesh" property — not "Claude pokes the mesh occasionally."
 
@@ -163,7 +170,12 @@ Both peers must use the same relay URL and token to be on the same channel. The 
 
 Some corporate networks block mDNS multicast — try a hotspot or home wifi to verify. If LAN is blocked, fall back to a relay.
 
-**`<channel>` notifications never arrive even though peers are connected.** Verify Claude Code was launched with `--dangerously-load-development-channels server:claude-sym-mesh`. Without that exact flag, MCP push notifications are silently dropped.
+**`<channel>` notifications never arrive even though peers are connected.** Verify Claude Code was launched with the development-channels flag matching your install path:
+
+* plugin install: `--dangerously-load-development-channels plugin:sym-mesh-channel@sym-mesh-channel`
+* npm install: `--dangerously-load-development-channels server:claude-sym-mesh`
+
+Without the exact flag for your install path, MCP push notifications are silently dropped.
 
 **`sym_status` says "Peers: 0" but `sym_peers` lists peers.** Snapshot timing — both views read the same `_peers` map at slightly different moments. The peer set is dynamic. If counts disagree consistently, file an issue.
 

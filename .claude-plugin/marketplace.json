@@ -6,14 +6,14 @@
   },
   "metadata": {
     "description": "Real-time Claude-to-Claude mesh. Peer-to-peer cognitive signals over Bonjour LAN or WebSocket relay.",
-    "version": "0.1.21"
+    "version": "0.1.22"
   },
   "plugins": [
     {
       "name": "sym-mesh-channel",
       "source": "./",
       "description": "Real-time Claude-to-Claude mesh. Peer-to-peer cognitive signals over Bonjour LAN or WebSocket relay. Implements the Mesh Memory Protocol (MMP) for structured cognitive state exchange between Claude Code sessions.",
-      "version": "0.1.21",
+      "version": "0.1.22",
       "author": {
         "name": "Hongwei Xu",
         "email": "hongwei@sym.bot"

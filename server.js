@@ -185,8 +185,8 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       inputSchema: { type: 'object', properties: {} },
     },
     {
-      name: 'sym_invite_url_parse',
-      description: 'Parse an app-specific mesh invite URL (e.g. melotune://room/{id}/{name}) and return the service type + group + optional relay token. Use this before switching groups. Does NOT switch the current node.',
+      name: 'sym_invite_info',
+      description: 'Return the service type + group + optional relay token encoded in an app-specific mesh invite URL (e.g. melotune://room/{id}/{name}). Read-only inspection; does NOT switch the current node.',
       inputSchema: {
         type: 'object',
         properties: { url: { type: 'string', description: 'Invite URL, e.g. melotune://room/abc123/Kitchen' } },
@@ -303,7 +303,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
       };
     }
 
-    case 'sym_invite_url_parse': {
+    case 'sym_invite_info': {
       const url = args?.url;
       if (!url || typeof url !== 'string') {
         return { content: [{ type: 'text', text: 'Missing required argument: url' }], isError: true };

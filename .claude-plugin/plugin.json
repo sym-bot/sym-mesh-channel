@@ -1,6 +1,6 @@
 {
   "name": "sym-mesh-channel",
-  "version": "0.1.21",
+  "version": "0.1.22",
   "description": "Real-time Claude-to-Claude mesh. Peer-to-peer cognitive signals over Bonjour LAN or WebSocket relay.",
   "author": {
     "name": "Hongwei Xu",

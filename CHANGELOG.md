@@ -1,5 +1,79 @@
 # Changelog
 
+## 0.1.22
+
+### Added
+
+- **Plugin marketplace distribution**: `.claude-plugin/marketplace.json`
+  enables direct install via the Claude Code plugin marketplace without
+  waiting on the Anthropic Plugin Directory propagation pipeline:
+
+  ```
+  /plugin marketplace add sym-bot/sym-mesh-channel
+  /plugin install sym-mesh-channel@sym-mesh-channel
+  ```
+
+  Validates cleanly with `claude plugin validate .` and installs
+  end-to-end with no manual steps.
+
+- **`LICENSE`** file (Apache-2.0). `package.json` already declared
+  Apache-2.0 but no LICENSE text was present in the repo; this
+  aligns the distribution with SPDX expectations.
+
+- **MMP §5.8 mesh-group support** — LAN isolation via Bonjour service
+  type so Claude Code sessions can join app-specific meshes (e.g.
+  MeloTune mood rooms on `_melotune._tcp`) instead of the global
+  `_sym._tcp` mesh. Enables cross-app CMB delivery without cross-app
+  noise: nodes in different groups never discover each other at mDNS.
+
+  Config surface (two equivalent paths):
+  - `SYM_GROUP=<name>`       → service type `_<name>._tcp`
+  - `SYM_SERVICE_TYPE=<st>`  → explicit override (`_foo._tcp` form)
+
+  Default remains `_sym._tcp` / `group=default` — backward compatible.
+
+- **Two new MCP tools for mesh-group operations**:
+  - `sym_group_info` — reports current group + service type + peer
+    roster scoped to this group.
+  - `sym_invite_info` — parses app-specific invite URLs
+    (`melotune://room/{id}/{name}`, `sym://group/{name}`) into service
+    type + group + room name. Read-only inspection; caller opens a
+    new session/env to join.
+
+  `sym_status` output now includes `Group` + service type.
+
+### Fixed
+
+- **`plugin.json` validation failure on install.** The three
+  `channels[0].userConfig` entries (`relay_url`, `relay_token`,
+  `allowed_peers`) were missing the required `type` and `title`
+  fields per the Claude Code plugin schema. Install failed with:
+
+  ```
+  channels.0.userConfig.relay_url.type: Invalid option
+  channels.0.userConfig.relay_url.title: expected string, received undefined
+  ```
+
+  Added `type: "string"` and a human-readable `title` to all three.
+  Likely one of the root causes of the 10 Apr 2026 submission
+  showing "Published" on the Anthropic submissions portal but not
+  propagating to the public `claude-plugins-official` marketplace.
+
+### Changed
+
+- **README**: self-hosted plugin-marketplace install path promoted to
+  the primary install recommendation (works today, independent of
+  Anthropic directory propagation). npm path kept as alternative.
+  Tool table updated 5 → 8 entries to reflect the current surface.
+  Clarified that plugin-directory approval and Channels-allowlist
+  inclusion are independent gates — the MCP tools work without the
+  `--dangerously-load-development-channels` flag; the flag is only
+  needed for the `<channel>` async-push behaviour.
+
+- Pairs with `@sym-bot/sym` ≥ 0.3.78 which added the
+  `discoveryServiceType` and `group` constructor params consumed by
+  the mesh-group tools.
+
 ## 0.1.21
 
 ### Changed
