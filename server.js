@@ -50,11 +50,33 @@ const FIELD_WEIGHTS = {
 // different nodeIds, creating phantom peers that absorbed messages.
 const NODE_NAME = process.env.SYM_NODE_NAME || `claude-${require('os').hostname().toLowerCase().replace(/[^a-z0-9-]/g, '-')}`;
 
+// ── Mesh group (MMP §5.8) ──────────────────────────────────
+//
+// LAN isolation by Bonjour service type. `_sym._tcp` is the default
+// (backward compatible). A named group `<foo>` maps to service type
+// `_foo._tcp`. Passing a full `_foo._tcp` service type explicitly also
+// works. Nodes in different groups never discover each other at mDNS.
+// See MeloTune's MoodRoom model for the per-room pattern
+// (`_melotune-{id}._tcp`).
+function resolveServiceType() {
+  const explicit = process.env.SYM_SERVICE_TYPE;
+  if (explicit) return explicit;
+  const group = process.env.SYM_GROUP;
+  if (group && group !== 'default') return `_${group}._tcp`;
+  return '_sym._tcp';
+}
+const SERVICE_TYPE = resolveServiceType();
+const GROUP = process.env.SYM_GROUP || (SERVICE_TYPE !== '_sym._tcp'
+  ? SERVICE_TYPE.replace(/^_/, '').replace(/\._tcp$/, '')
+  : 'default');
+
 const node = new SymNode({
   name: NODE_NAME,
   cognitiveProfile: 'Engineering node. Code, architecture, debugging, technical decisions.',
   svafFieldWeights: FIELD_WEIGHTS,
   svafFreshnessSeconds: 7200, // 2hr — session-length context
+  discoveryServiceType: SERVICE_TYPE,
+  group: GROUP,
   relay: process.env.SYM_RELAY_URL || null,
   relayToken: process.env.SYM_RELAY_TOKEN || null,
   silent: true,
@@ -157,6 +179,20 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ['msg_id'],
       },
     },
+    {
+      name: 'sym_group_info',
+      description: 'Report the mesh group this node is in (MMP §5.8). Shows service type + group name + peer count.',
+      inputSchema: { type: 'object', properties: {} },
+    },
+    {
+      name: 'sym_invite_url_parse',
+      description: 'Parse an app-specific mesh invite URL (e.g. melotune://room/{id}/{name}) and return the service type + group + optional relay token. Use this before switching groups. Does NOT switch the current node.',
+      inputSchema: {
+        type: 'object',
+        properties: { url: { type: 'string', description: 'Invite URL, e.g. melotune://room/abc123/Kitchen' } },
+        required: ['url'],
+      },
+    },
   ],
 }));
 
@@ -239,9 +275,65 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
         content: [{
           type: 'text',
           text: `Node: ${NODE_NAME} (${node.nodeId?.slice(0, 8) || '?'})\n` +
+            `Group: ${GROUP} (${SERVICE_TYPE})\n` +
             `Relay: ${s.relayConnected ? 'connected' : 'disconnected'}\n` +
             `Peers: ${s.peerCount || 0}\n` +
             `Memories: ${s.memoryCount || 0}`,
+        }],
+      };
+    }
+
+    case 'sym_group_info': {
+      const s = node.status();
+      const peers = typeof node.getPeers === 'function' ? node.getPeers() : [];
+      const peerLines = peers.length
+        ? peers.map(p => `  ${p.name} (${(p.peerId || '').slice(0, 8)}) via ${p.transport || '?'}`).join('\n')
+        : '  (no peers in this group)';
+      return {
+        content: [{
+          type: 'text',
+          text: `Mesh group (MMP §5.8):\n` +
+            `  group: ${GROUP}\n` +
+            `  service type: ${SERVICE_TYPE}\n` +
+            `  node: ${NODE_NAME} (${node.nodeId?.slice(0, 8) || '?'})\n` +
+            `  peers in group: ${s.peerCount || 0}\n` +
+            peerLines + `\n\n` +
+            `To join a different group, restart the sym-mesh-channel MCP server with env var SYM_GROUP=<name> or SYM_SERVICE_TYPE=<_foo._tcp>.`,
+        }],
+      };
+    }
+
+    case 'sym_invite_url_parse': {
+      const url = args?.url;
+      if (!url || typeof url !== 'string') {
+        return { content: [{ type: 'text', text: 'Missing required argument: url' }], isError: true };
+      }
+      // Supported scheme examples:
+      //   melotune://room/{id}/{percent-encoded name}     (per MoodRoom.inviteURL in sym-swift)
+      //   sym://group/{name}
+      const m = url.match(/^([a-z][a-z0-9-]+):\/\/(?:room|group)\/([^/?#]+)(?:\/([^?#]+))?/i);
+      if (!m) {
+        return { content: [{ type: 'text', text: `Unrecognised invite URL: ${url}` }], isError: true };
+      }
+      const appScheme = m[1].toLowerCase();
+      const rawId = decodeURIComponent(m[2]);
+      const rawName = m[3] ? decodeURIComponent(m[3]) : rawId;
+      // Map to service type + group.
+      const serviceType = appScheme === 'sym'
+        ? `_${rawId}._tcp`
+        : `_${appScheme}-${rawId}._tcp`;
+      const group = appScheme === 'sym' ? rawId : `${appScheme}-${rawId}`;
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            app: appScheme,
+            group,
+            service_type: serviceType,
+            room_id: rawId,
+            room_name: rawName,
+            join_hint: `Set env vars: SYM_GROUP=${group} SYM_SERVICE_TYPE=${serviceType} — then restart the MCP server.`,
+          }, null, 2),
         }],
       };
     }
