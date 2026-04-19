@@ -80,6 +80,88 @@ The other peer sees it arrive **in their Claude Code context as a real-time `<ch
 
 For cross-network setup (different offices, remote team), see [Cross-network setup](#cross-network-setup-optional) below.
 
+## Dev-team groups
+
+By default every sym-mesh-channel node joins the global `_sym._tcp` mesh — every peer on the network sees every other peer. For a big company with multiple dev teams, this is too noisy. Mesh groups (MMP §5.8) isolate each team at the mDNS layer so `backend-team` and `frontend-team` can't see each other's CMBs at all.
+
+### LAN dev-team group (same office)
+
+**Team lead creates the group:**
+
+```
+# In Claude Code:
+> sym_invite_create { "group": "backend-team" }
+
+Invite URL (LAN-only (Bonjour)):
+
+    sym://group/backend-team
+
+Share this URL with teammates...
+
+> sym_join_group { "group": "backend-team" }
+
+Hot-swapped from group "default" (_sym._tcp) to "backend-team" (_backend-team._tcp).
+```
+
+**Team lead shares the URL** (Slack, email, however) with teammates.
+
+**Each teammate pastes the URL into their Claude Code session:**
+
+```
+> sym_invite_info { "url": "sym://group/backend-team" }
+
+Parsed invite: sym://group/backend-team
+{ "app": "sym", "group": "backend-team", "service_type": "_backend-team._tcp" }
+
+To join, call sym_join_group:
+    { "group": "backend-team" }
+
+> sym_join_group { "group": "backend-team" }
+
+Hot-swapped from group "default" to "backend-team".
+```
+
+No restart, no `~/.claude.json` editing. Teammates on the same LAN now see each other via Bonjour. `backend-team` and `frontend-team` live in isolated mDNS spaces.
+
+### Cross-network team group (distributed team via relay)
+
+Same story, but the team crosses network boundaries (home ↔ office, coffee shop ↔ client site). You need a relay so members can find each other over the internet. We host one at `wss://sym-relay.onrender.com`; you can run your own from the [sym-relay](https://github.com/sym-bot/sym-relay) repo.
+
+**Team lead creates the relay-backed invite:**
+
+```
+> sym_invite_create {
+    "group": "eng-team",
+    "relay_url": "wss://sym-relay.onrender.com",
+    "relay_token": "a-shared-secret-any-string-teammates-agree-on"
+  }
+
+Invite URL (cross-network (relay)):
+
+    sym://team/eng-team?relay=wss%3A%2F%2Fsym-relay.onrender.com&token=a-shared-secret-...
+
+> sym_join_group {
+    "group": "eng-team",
+    "relay_url": "wss://sym-relay.onrender.com",
+    "relay_token": "a-shared-secret-any-string-teammates-agree-on"
+  }
+```
+
+Teammate pastes the URL, `sym_invite_info` extracts the relay + token from the query string, `sym_join_group` hot-swaps with the same args. All members with the same token share one relay channel — different tokens = different channels on the same relay host.
+
+### Discovering what's out there
+
+```
+> sym_groups_discover
+
+SYM-mesh groups visible on LAN (3):
+  _sym._tcp           group="sym"
+  _backend-team._tcp  group="backend-team"   (← your current group)
+  _frontend-team._tcp group="frontend-team"
+```
+
+Only shows groups with at least one node online right now — there's no central directory of offline-but-known groups (peer-to-peer architecture). For cross-network relay-backed groups, you must know the relay URL + token out of band (someone shares the invite URL).
+
 ### Advanced: per-project node identity
 
 By default every Claude Code session on a machine shares one mesh identity (set globally in `~/.claude.json`). If you run several Claude Code sessions in parallel from distinct project directories and want each to appear as its own peer on the mesh — e.g. a "research" session and a "strategy" session on the same laptop — install per-project instead:
@@ -105,7 +187,7 @@ The plugin is approved on the Anthropic Plugin Directory. The `--dangerously-loa
 
 ## What you get
 
-Eight MCP tools exposed to Claude Code, namespaced under `mcp__claude-sym-mesh__`:
+Eleven MCP tools exposed to Claude Code, namespaced under `mcp__claude-sym-mesh__`:
 
 | Tool | What it does |
 |---|---|
@@ -116,7 +198,10 @@ Eight MCP tools exposed to Claude Code, namespaced under `mcp__claude-sym-mesh__
 | `sym_peers` | List discovered peers (via bonjour or relay). |
 | `sym_status` | Node identity, relay state, peer count, memory count. Includes current mesh group (MMP §5.8). |
 | `sym_group_info` | Report the mesh group this node is in, with service type + group name + peer roster scoped to the group. |
-| `sym_invite_info` | Parse an app-specific mesh invite URL (e.g. `melotune://room/{id}/{name}`) and return service type + group + optional relay token. Read-only; does not switch groups. |
+| `sym_invite_create` | Generate a shareable invite URL for a named group. LAN-only `sym://group/{name}` or cross-network `sym://team/{name}?relay=&token=` flavor. Team leads share this with teammates. |
+| `sym_invite_info` | Parse a mesh invite URL and return group + service type + relay creds + a ready-to-use `sym_join_group` call. Read-only; does not switch groups. |
+| `sym_join_group` | **Hot-swap** this node into a different mesh group at runtime — no Claude Code restart. Works for LAN groups and cross-network relay-backed teams. |
+| `sym_groups_discover` | List SYM-mesh groups currently advertising on the local network via Bonjour / mDNS. Only shows groups with at least one node online right now. |
 
 Real-time push is bidirectional: peer events arrive in Claude's context without any tool call, while the session is mid-turn. This is the "Claude thinks with the mesh" property — not "Claude pokes the mesh occasionally."
 

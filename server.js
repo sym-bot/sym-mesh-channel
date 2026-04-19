@@ -30,6 +30,134 @@ const {
 } = require('@modelcontextprotocol/sdk/types.js');
 const { SymNode } = require('@sym-bot/sym');
 
+// Kebab-case validator shared by group-related tools.
+const KEBAB_CASE_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+// ── Invite URL parsing (shared by sym_invite_info and the internal
+//    validation path for sym_join_group when passed a URL). Exposed as
+//    a module-level function so it's trivially unit-testable and the
+//    same regex doesn't drift between two call sites.
+
+const INVITE_URL_RE = /^([a-z][a-z0-9-]+):\/\/(?:room|group|team)\/([^/?#]+)(?:\/([^?#]+))?(?:\?(.+))?$/i;
+
+function parseInviteURL(url) {
+  const m = INVITE_URL_RE.exec(url);
+  if (!m) {
+    return {
+      error:
+        `Unrecognised invite URL: ${url}\n\n` +
+        `Expected shapes:\n` +
+        `  sym://group/{name}                        (LAN-only)\n` +
+        `  sym://team/{name}?relay=...&token=...     (cross-network via relay)\n` +
+        `  melotune://room/{id}/{name}               (app-specific room)`,
+    };
+  }
+  const appScheme = m[1].toLowerCase();
+  const rawId = decodeURIComponent(m[2]);
+  const rawName = m[3] ? decodeURIComponent(m[3]) : rawId;
+  const queryStr = m[4] || '';
+  const query = Object.fromEntries(
+    queryStr.split('&').filter(Boolean).map(kv => {
+      const [k, v = ''] = kv.split('=');
+      return [decodeURIComponent(k), decodeURIComponent(v)];
+    })
+  );
+  // For sym:// the path element IS the group name. For app-scoped URLs
+  // (melotune://, melomove://, etc.) the path is the room id and the
+  // group is prefixed with the app name to avoid collisions.
+  const serviceType = appScheme === 'sym' ? `_${rawId}._tcp` : `_${appScheme}-${rawId}._tcp`;
+  const group = appScheme === 'sym' ? rawId : `${appScheme}-${rawId}`;
+  return {
+    appScheme,
+    group,
+    serviceType,
+    roomId: rawId,
+    roomName: rawName,
+    relayUrl: query.relay || null,
+    relayToken: query.token || null,
+  };
+}
+
+// ── Bonjour discovery of live SYM-related service types.
+//    Runs `dns-sd -B _services._dns-sd._udp local.` (macOS / Windows with
+//    Bonjour) or `avahi-browse -at` (Linux) for 2 seconds, filters to
+//    service types that look SYM-ish, and reports them. Pure observation,
+//    no node state changes.
+
+async function discoverGroups() {
+  const { spawn } = require('child_process');
+  const platform = process.platform;
+
+  let cmd, argv;
+  if (platform === 'darwin' || platform === 'win32') {
+    cmd = 'dns-sd';
+    argv = ['-B', '_services._dns-sd._udp', 'local.'];
+  } else {
+    cmd = 'avahi-browse';
+    argv = ['-t', '-a', '-p']; // terminate after cache, all services, parseable
+  }
+
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(cmd, argv, { stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (e) {
+      return resolve({
+        isError: true,
+        text:
+          `Could not run discovery command '${cmd}': ${e?.message || e}\n\n` +
+          (platform === 'linux'
+            ? `On Linux, install avahi-utils: sudo apt install avahi-utils`
+            : `Bonjour should be built-in on macOS and Windows 10+.`),
+      });
+    }
+    const out = [];
+    child.stdout.on('data', (chunk) => out.push(chunk));
+    child.on('error', (e) => resolve({ isError: true, text: `Discovery command failed: ${e?.message || e}` }));
+
+    const timer = setTimeout(() => {
+      try { child.kill('SIGTERM'); } catch {}
+    }, 2000);
+    child.on('close', () => {
+      clearTimeout(timer);
+      const text = Buffer.concat(out).toString('utf8');
+      const typeRe = /_([a-z0-9][a-z0-9-]+)\._tcp/gi;
+      const seen = new Set();
+      let m;
+      while ((m = typeRe.exec(text)) !== null) {
+        const full = `_${m[1]}._tcp`;
+        // Filter to the SYM protocol family: global sym, named groups, and
+        // app-scoped rooms (melotune-<id>, melomove-<id>, etc). Anything
+        // that looks like generic infra (_services._dns-sd, _tcp, _udp,
+        // printer protocols, etc.) is ignored.
+        if (/^_(sym|[a-z]+-[a-z0-9]+|[a-z]+-team|.*-team)\._tcp$/i.test(full)) {
+          seen.add(full);
+        }
+      }
+      if (seen.size === 0) {
+        return resolve({
+          text:
+            `No SYM-mesh groups visible on the local network right now.\n\n` +
+            `This only shows groups with at least one node currently online. ` +
+            `Groups you or teammates have used before are not persisted anywhere ` +
+            `(p2p architecture — no central directory).\n\n` +
+            `Your node is on: ${SERVICE_TYPE} (group "${GROUP}").`,
+        });
+      }
+      const lines = [];
+      lines.push(`SYM-mesh groups visible on LAN (${seen.size}):`);
+      for (const st of Array.from(seen).sort()) {
+        const name = st.replace(/^_/, '').replace(/\._tcp$/, '');
+        const isSelf = st === SERVICE_TYPE ? '  (← your current group)' : '';
+        lines.push(`  ${st}   group="${name}"${isSelf}`);
+      }
+      lines.push('');
+      lines.push(`To join one, call sym_join_group with group="<name>".`);
+      resolve({ text: lines.join('\n') });
+    });
+  });
+}
+
 // ── Engineering-domain field weights (SVAF α_f) ──────────────
 
 const FIELD_WEIGHTS = {
@@ -65,35 +193,63 @@ function resolveServiceType() {
   if (group && group !== 'default') return `_${group}._tcp`;
   return '_sym._tcp';
 }
-const SERVICE_TYPE = resolveServiceType();
-const GROUP = process.env.SYM_GROUP || (SERVICE_TYPE !== '_sym._tcp'
+// Mutable so sym_join_group can hot-swap the node at runtime without a
+// Claude Code restart. Declaring as `let` rather than `const` is the
+// smallest change that makes hot-swap possible.
+let SERVICE_TYPE = resolveServiceType();
+let GROUP = process.env.SYM_GROUP || (SERVICE_TYPE !== '_sym._tcp'
   ? SERVICE_TYPE.replace(/^_/, '').replace(/\._tcp$/, '')
   : 'default');
+let RELAY_URL = process.env.SYM_RELAY_URL || null;
+let RELAY_TOKEN = process.env.SYM_RELAY_TOKEN || null;
 
-const node = new SymNode({
+let node = new SymNode({
   name: NODE_NAME,
   cognitiveProfile: 'Engineering node. Code, architecture, debugging, technical decisions.',
   svafFieldWeights: FIELD_WEIGHTS,
   svafFreshnessSeconds: 7200, // 2hr — session-length context
   discoveryServiceType: SERVICE_TYPE,
   group: GROUP,
-  relay: process.env.SYM_RELAY_URL || null,
-  relayToken: process.env.SYM_RELAY_TOKEN || null,
+  relay: RELAY_URL,
+  relayToken: RELAY_TOKEN,
   silent: true,
 });
 
-// Identity collision (added in @sym-bot/sym 0.3.68): the relay told us
-// another process is holding our nodeId. Don't try to reconnect — that
-// caused the peer-flap loop documented in v0.1.2/v0.1.3 commit messages.
-// Exit so Claude Code can decide whether to respawn (with the freshness
-// window now elapsed) or surface the failure to the user.
-node.on('identity-collision', (info) => {
-  process.stderr.write(
-    `sym-mesh-channel: identity collision on relay — another process is holding ` +
-    `nodeId=${info.nodeId} name=${info.name}. Exiting.\n`
-  );
-  process.exit(2);
-});
+// Event handlers are extracted into a single registration function so the
+// hot-swap path in sym_join_group can re-register them on the new node.
+// The function reads module-level `NODE_NAME`, `isPeerAllowed`, `pushChannel`,
+// `storeMessage`, and `extractCompactHeader` via closure; those don't change
+// across swaps.
+function registerNodeHandlers(n) {
+  // Identity collision (added in @sym-bot/sym 0.3.68): the relay told us
+  // another process is holding our nodeId. Don't try to reconnect — that
+  // caused the peer-flap loop documented in v0.1.2/v0.1.3 commit messages.
+  // Exit so Claude Code can decide whether to respawn (with the freshness
+  // window now elapsed) or surface the failure to the user.
+  n.on('identity-collision', (info) => {
+    process.stderr.write(
+      `sym-mesh-channel: identity collision on relay — another process is holding ` +
+      `nodeId=${info.nodeId} name=${info.name}. Exiting.\n`
+    );
+    process.exit(2);
+  });
+
+  n.on('cmb-accepted', (entry) => {
+    if (entry.source === NODE_NAME || entry.cmb?.createdBy === NODE_NAME) return;
+    const source = entry.source || entry.cmb?.createdBy || 'unknown';
+    if (!isPeerAllowed(source)) return;
+    const focus = entry.cmb?.fields?.focus?.text || entry.content || '';
+    const mood = entry.cmb?.fields?.mood?.text || '';
+    pushChannel('cmb', `[${source}] ${focus}${mood && mood !== 'neutral' ? ` (mood: ${mood})` : ''}`);
+  });
+
+  n.on('message', (from, content) => {
+    if (!isPeerAllowed(from)) return;
+    const msgId = storeMessage(from, content);
+    const header = extractCompactHeader(from, content);
+    pushChannel('message', `[${from}] ${header} [${msgId}]`);
+  });
+}
 
 // ── MCP Server ───────────────────────────────────────────────
 
@@ -185,13 +341,44 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       inputSchema: { type: 'object', properties: {} },
     },
     {
-      name: 'sym_invite_info',
-      description: 'Return the service type + group + optional relay token encoded in an app-specific mesh invite URL (e.g. melotune://room/{id}/{name}). Read-only inspection; does NOT switch the current node.',
+      name: 'sym_invite_create',
+      description: 'Generate a shareable invite URL for a named mesh group. Team leads use this to let teammates join their dev-team mesh. LAN-only invite: pass group only, returns sym://group/{name}. Cross-network invite: pass relay_url + relay_token too, returns sym://team/{name}?relay=...&token=... — teammates on different networks join through the relay.',
       inputSchema: {
         type: 'object',
-        properties: { url: { type: 'string', description: 'Invite URL, e.g. melotune://room/abc123/Kitchen' } },
+        properties: {
+          group: { type: 'string', description: 'Kebab-case group name, e.g. "backend-team".' },
+          relay_url: { type: 'string', description: 'Optional WebSocket relay URL, e.g. wss://sym-relay.onrender.com. Include for cross-network teams.' },
+          relay_token: { type: 'string', description: 'Optional relay authentication token (shared secret for this team channel).' },
+        },
+        required: ['group'],
+      },
+    },
+    {
+      name: 'sym_invite_info',
+      description: 'Parse a mesh invite URL and return everything the invitee needs to join: group name, service type, and any relay credentials. Read-only; does NOT switch the current node (use sym_join_group for that). Works on LAN group invites (sym://group/{name}), cross-network team invites (sym://team/{name}?relay=&token=), and app-specific room invites (e.g. melotune://room/{id}/{name}).',
+      inputSchema: {
+        type: 'object',
+        properties: { url: { type: 'string', description: 'Invite URL, e.g. sym://group/backend-team' } },
         required: ['url'],
       },
+    },
+    {
+      name: 'sym_join_group',
+      description: 'Hot-swap this node into a different mesh group at runtime — no Claude Code restart needed. Stops the current SymNode, reconstructs it with the new group (and optional relay credentials), and restarts it. Teammates on the same group/relay will discover this node via Bonjour (LAN) or the relay (cross-network). To leave a group, pass group="default" which reverts to the global _sym._tcp mesh.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          group: { type: 'string', description: 'Kebab-case group name, e.g. "backend-team". Pass "default" to return to the global mesh.' },
+          relay_url: { type: 'string', description: 'Optional WebSocket relay URL for cross-network teams. Leave empty for LAN-only.' },
+          relay_token: { type: 'string', description: 'Optional relay authentication token.' },
+        },
+        required: ['group'],
+      },
+    },
+    {
+      name: 'sym_groups_discover',
+      description: 'List SYM-mesh groups currently advertising on the local network. Uses Bonjour / mDNS to find service types matching the SYM protocol. Only shows groups with at least one node online right now — there is no central directory of offline-but-known groups. macOS and Windows have Bonjour built in; Linux requires avahi-daemon.',
+      inputSchema: { type: 'object', properties: {} },
     },
   ],
 }));
@@ -303,38 +490,170 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
       };
     }
 
+    case 'sym_invite_create': {
+      const group = args?.group;
+      const relayUrl = args?.relay_url;
+      const relayToken = args?.relay_token;
+      if (!group || typeof group !== 'string') {
+        return { content: [{ type: 'text', text: 'Missing required argument: group' }], isError: true };
+      }
+      if (!KEBAB_CASE_RE.test(group)) {
+        return {
+          content: [{
+            type: 'text',
+            text: `Invalid group name: "${group}". Must be kebab-case (lowercase alphanumerics + single hyphens), e.g. "backend-team".`,
+          }],
+          isError: true,
+        };
+      }
+      // LAN-only flavor: sym://group/{name}
+      // Cross-network flavor: sym://team/{name}?relay=...&token=...
+      let url;
+      let flavor;
+      if (relayUrl || relayToken) {
+        if (!relayUrl) return { content: [{ type: 'text', text: 'relay_token requires relay_url' }], isError: true };
+        const params = [`relay=${encodeURIComponent(relayUrl)}`];
+        if (relayToken) params.push(`token=${encodeURIComponent(relayToken)}`);
+        url = `sym://team/${group}?${params.join('&')}`;
+        flavor = 'cross-network (relay)';
+      } else {
+        url = `sym://group/${group}`;
+        flavor = 'LAN-only (Bonjour)';
+      }
+      const youRunning = GROUP === group
+        ? `You're already on this group — teammates who join will see you.`
+        : `You are currently on group "${GROUP}". To be reachable, call sym_join_group with group="${group}" (+ same relay creds if cross-network) before sharing.`;
+      return {
+        content: [{
+          type: 'text',
+          text: `Invite URL (${flavor}):\n\n    ${url}\n\n` +
+            `Share this URL with teammates. Each pastes it into Claude Code and calls sym_join_group (or sym_invite_info for a dry run first).\n\n` +
+            youRunning,
+        }],
+      };
+    }
+
     case 'sym_invite_info': {
       const url = args?.url;
       if (!url || typeof url !== 'string') {
         return { content: [{ type: 'text', text: 'Missing required argument: url' }], isError: true };
       }
-      // Supported scheme examples:
-      //   melotune://room/{id}/{percent-encoded name}     (per MoodRoom.inviteURL in sym-swift)
-      //   sym://group/{name}
-      const m = url.match(/^([a-z][a-z0-9-]+):\/\/(?:room|group)\/([^/?#]+)(?:\/([^?#]+))?/i);
-      if (!m) {
-        return { content: [{ type: 'text', text: `Unrecognised invite URL: ${url}` }], isError: true };
+      const parsed = parseInviteURL(url);
+      if (parsed.error) {
+        return { content: [{ type: 'text', text: parsed.error }], isError: true };
       }
-      const appScheme = m[1].toLowerCase();
-      const rawId = decodeURIComponent(m[2]);
-      const rawName = m[3] ? decodeURIComponent(m[3]) : rawId;
-      // Map to service type + group.
-      const serviceType = appScheme === 'sym'
-        ? `_${rawId}._tcp`
-        : `_${appScheme}-${rawId}._tcp`;
-      const group = appScheme === 'sym' ? rawId : `${appScheme}-${rawId}`;
+      const { appScheme, group, serviceType, roomId, roomName, relayUrl, relayToken } = parsed;
+
+      const out = {
+        app: appScheme,
+        group,
+        service_type: serviceType,
+        room_id: appScheme === 'sym' ? undefined : roomId,
+        room_name: appScheme === 'sym' ? undefined : roomName,
+        relay_url: relayUrl || undefined,
+        relay_token: relayToken || undefined,
+      };
+      for (const k of Object.keys(out)) if (out[k] === undefined) delete out[k];
+
+      const joinCall = {
+        group,
+        ...(relayUrl && { relay_url: relayUrl }),
+        ...(relayToken && { relay_token: relayToken }),
+      };
+
       return {
         content: [{
           type: 'text',
-          text: JSON.stringify({
-            app: appScheme,
-            group,
-            service_type: serviceType,
-            room_id: rawId,
-            room_name: rawName,
-            join_hint: `Set env vars: SYM_GROUP=${group} SYM_SERVICE_TYPE=${serviceType} — then restart the MCP server.`,
-          }, null, 2),
+          text: `Parsed invite: ${url}\n\n` +
+            JSON.stringify(out, null, 2) + `\n\n` +
+            `To join, call sym_join_group:\n\n    ${JSON.stringify(joinCall)}\n\n` +
+            `This hot-swaps your node into the ${relayUrl ? 'relay channel' : 'LAN group'} — no Claude Code restart needed.`,
         }],
+      };
+    }
+
+    case 'sym_join_group': {
+      const group = args?.group;
+      const relayUrl = args?.relay_url || null;
+      const relayToken = args?.relay_token || null;
+      if (!group || typeof group !== 'string') {
+        return { content: [{ type: 'text', text: 'Missing required argument: group' }], isError: true };
+      }
+      if (!KEBAB_CASE_RE.test(group) && group !== 'default') {
+        return {
+          content: [{ type: 'text', text: `Invalid group name: "${group}". Must be kebab-case or "default".` }],
+          isError: true,
+        };
+      }
+
+      const newServiceType = group === 'default' ? '_sym._tcp' : `_${group}._tcp`;
+      const prevGroup = GROUP;
+      const prevServiceType = SERVICE_TYPE;
+
+      // Stop the current node cleanly so peers see us leave, then construct
+      // a fresh one on the new service type. Any failure during restart is
+      // reported; the previous node will already be stopped, so the caller
+      // is in a known-disconnected state and can retry.
+      try {
+        await node.stop();
+      } catch (e) {
+        return {
+          content: [{ type: 'text', text: `Failed to stop current node: ${e?.message || e}` }],
+          isError: true,
+        };
+      }
+
+      const newNode = new SymNode({
+        name: NODE_NAME,
+        cognitiveProfile: 'Engineering node. Code, architecture, debugging, technical decisions.',
+        svafFieldWeights: FIELD_WEIGHTS,
+        svafFreshnessSeconds: 7200,
+        discoveryServiceType: newServiceType,
+        group,
+        relay: relayUrl,
+        relayToken,
+        silent: true,
+      });
+      registerNodeHandlers(newNode);
+
+      try {
+        await newNode.start();
+      } catch (e) {
+        return {
+          content: [{
+            type: 'text',
+            text: `Failed to start new node on group "${group}": ${e?.message || e}\n\n` +
+              `Previous node already stopped. To recover, call sym_join_group with group="${prevGroup}".`,
+          }],
+          isError: true,
+        };
+      }
+
+      // Swap module-level references only after successful start.
+      node = newNode;
+      GROUP = group;
+      SERVICE_TYPE = newServiceType;
+      RELAY_URL = relayUrl;
+      RELAY_TOKEN = relayToken;
+
+      return {
+        content: [{
+          type: 'text',
+          text: `Hot-swapped from group "${prevGroup}" (${prevServiceType}) to "${group}" (${newServiceType}).\n` +
+            (relayUrl ? `Relay: ${relayUrl}\n` : '') +
+            `Discovering peers on the new service type. Call sym_peers in a moment to see who's online.`,
+        }],
+      };
+    }
+
+    case 'sym_groups_discover': {
+      const result = await discoverGroups();
+      return {
+        content: [{
+          type: 'text',
+          text: result.text,
+        }],
+        isError: result.isError || false,
       };
     }
 
@@ -416,30 +735,10 @@ function pushChannel(eventType, data) {
   } catch {}
 }
 
-node.on('cmb-accepted', (entry) => {
-  // Don't echo back our own CMBs
-  if (entry.source === NODE_NAME || entry.cmb?.createdBy === NODE_NAME) return;
-
-  const source = entry.source || entry.cmb?.createdBy || 'unknown';
-
-  // Peer allowlist gate (defense-in-depth, see SECURITY.md)
-  if (!isPeerAllowed(source)) return;
-
-  const focus = entry.cmb?.fields?.focus?.text || entry.content || '';
-  const mood = entry.cmb?.fields?.mood?.text || '';
-  pushChannel('cmb', `[${source}] ${focus}${mood && mood !== 'neutral' ? ` (mood: ${mood})` : ''}`);
-});
-
-node.on('message', (from, content) => {
-  // Peer allowlist gate
-  if (!isPeerAllowed(from)) return;
-
-  // Compact channel: store full content, push only header + msg_id.
-  // Agent calls sym_fetch(msg_id) for full content when needed.
-  const msgId = storeMessage(from, content);
-  const header = extractCompactHeader(from, content);
-  pushChannel('message', `[${from}] ${header} [${msgId}]`);
-});
+// All node.on(...) handlers live in registerNodeHandlers(n) above so the
+// hot-swap path in sym_join_group can attach them to a freshly-constructed
+// SymNode without duplicating logic. This call wires up the initial node.
+registerNodeHandlers(node);
 
 // Peer presence events are intentionally NOT pushed to Claude's context.
 // They're high-frequency, low-signal (peers flap on relay reconnects, daemon

@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.1.23
+
+### Added
+
+- **`sym_join_group(group, relay_url?, relay_token?)`** — hot-swap this
+  node into a different mesh group at runtime, no Claude Code restart.
+  Stops the current SymNode, reconstructs it on the new service type
+  (and optional relay), re-registers event handlers, restarts. The
+  "smooth way to join" that was missing in 0.1.22.
+
+- **`sym_invite_create(group, relay_url?, relay_token?)`** — generate
+  a shareable invite URL for a named group. Two flavors:
+  - LAN-only: `sym://group/{name}` (Bonjour isolation only)
+  - Cross-network: `sym://team/{name}?relay=...&token=...` (routes via
+    a WebSocket relay so teammates on different networks can join).
+  Validates kebab-case group names, rejects token without URL.
+
+- **`sym_invite_info(url)`** extended to parse the new `sym://team/`
+  path and the `relay=` + `token=` query-string parameters.
+  Output now includes a ready-to-paste `sym_join_group` call as JSON.
+
+- **`sym_groups_discover()`** — enumerate SYM-mesh groups currently
+  advertising on the local LAN via Bonjour / mDNS. Shell-outs to
+  `dns-sd` (macOS/Windows) or `avahi-browse` (Linux) with a 2-second
+  timeout, filters to service types matching the SYM protocol family
+  (global `_sym._tcp`, named groups, `{app}-{id}` rooms). Peer-to-peer
+  means only groups with live members right now are visible — no
+  central directory.
+
+- **README — "Dev-team groups" walkthrough** with two concrete scenarios:
+  LAN dev-team group (single office) and cross-network team group via
+  the public `wss://sym-relay.onrender.com` relay. Shows exact tool
+  calls from both the team lead and each teammate.
+
+- **13 new tests** covering invite URL parse, generate, round-trip, and
+  validation (kebab-case, token-requires-URL guard). Test suite now at
+  35 tests total.
+
+### Changed
+
+- Module-level `node`, `GROUP`, `SERVICE_TYPE`, `RELAY_URL`,
+  `RELAY_TOKEN` declared as `let` (was `const`) so the hot-swap path
+  can re-bind them. All node event handlers (`identity-collision`,
+  `cmb-accepted`, `message`) extracted into a single
+  `registerNodeHandlers(n)` function so the hot-swap path re-attaches
+  them without duplicating logic.
+
+- Tool count in README corrected to 11 (was 8 in 0.1.22):
+  + sym_invite_create, sym_join_group, sym_groups_discover.
+
 ## 0.1.22
 
 ### Added

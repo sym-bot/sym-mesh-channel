@@ -330,6 +330,147 @@ function spawnInstaller(args, opts = {}) {
   });
 }
 
+// ── Invite URL parse + create round-trip ─────────────────────
+//
+// Replicates the INVITE_URL_RE + parser logic from server.js so we can
+// unit-test it without spawning the full MCP process. The in-server copy
+// is the authoritative one; this mirror is kept tight and regenerated
+// if the authoritative version changes.
+
+const INVITE_URL_RE = /^([a-z][a-z0-9-]+):\/\/(?:room|group|team)\/([^/?#]+)(?:\/([^?#]+))?(?:\?(.+))?$/i;
+const KEBAB_CASE_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+function parseInviteURL(url) {
+  const m = INVITE_URL_RE.exec(url);
+  if (!m) return { error: 'unrecognised' };
+  const appScheme = m[1].toLowerCase();
+  const rawId = decodeURIComponent(m[2]);
+  const rawName = m[3] ? decodeURIComponent(m[3]) : rawId;
+  const queryStr = m[4] || '';
+  const query = Object.fromEntries(
+    queryStr.split('&').filter(Boolean).map(kv => {
+      const [k, v = ''] = kv.split('=');
+      return [decodeURIComponent(k), decodeURIComponent(v)];
+    })
+  );
+  const serviceType = appScheme === 'sym' ? `_${rawId}._tcp` : `_${appScheme}-${rawId}._tcp`;
+  const group = appScheme === 'sym' ? rawId : `${appScheme}-${rawId}`;
+  return {
+    appScheme, group, serviceType,
+    roomId: rawId, roomName: rawName,
+    relayUrl: query.relay || null, relayToken: query.token || null,
+  };
+}
+
+function buildInviteURL({ group, relayUrl, relayToken }) {
+  if (!KEBAB_CASE_RE.test(group)) throw new Error(`invalid group: ${group}`);
+  if (relayToken && !relayUrl) throw new Error('relay_token requires relay_url');
+  if (!relayUrl && !relayToken) return `sym://group/${group}`;
+  const params = [`relay=${encodeURIComponent(relayUrl)}`];
+  if (relayToken) params.push(`token=${encodeURIComponent(relayToken)}`);
+  return `sym://team/${group}?${params.join('&')}`;
+}
+
+console.log('\nInvite URL — parse:');
+
+test('sym://group/{name} parses to matching group + service type', () => {
+  const p = parseInviteURL('sym://group/backend-team');
+  assert.strictEqual(p.appScheme, 'sym');
+  assert.strictEqual(p.group, 'backend-team');
+  assert.strictEqual(p.serviceType, '_backend-team._tcp');
+  assert.strictEqual(p.relayUrl, null);
+  assert.strictEqual(p.relayToken, null);
+});
+
+test('sym://team/{name}?relay=... parses relay URL + token', () => {
+  const url = 'sym://team/eng-team?relay=wss%3A%2F%2Fsym-relay.onrender.com&token=abc123';
+  const p = parseInviteURL(url);
+  assert.strictEqual(p.group, 'eng-team');
+  assert.strictEqual(p.serviceType, '_eng-team._tcp');
+  assert.strictEqual(p.relayUrl, 'wss://sym-relay.onrender.com');
+  assert.strictEqual(p.relayToken, 'abc123');
+});
+
+test('melotune://room/{id}/{name} prefixes group with app scheme', () => {
+  const p = parseInviteURL('melotune://room/abc123/Kitchen');
+  assert.strictEqual(p.appScheme, 'melotune');
+  assert.strictEqual(p.group, 'melotune-abc123');
+  assert.strictEqual(p.serviceType, '_melotune-abc123._tcp');
+  assert.strictEqual(p.roomName, 'Kitchen');
+});
+
+test('percent-encoded room name decodes correctly', () => {
+  const p = parseInviteURL('melotune://room/xyz/Living%20Room');
+  assert.strictEqual(p.roomName, 'Living Room');
+});
+
+test('relay URL only (no token) parses cleanly', () => {
+  const url = 'sym://team/eng?relay=wss%3A%2F%2Frelay.example.com';
+  const p = parseInviteURL(url);
+  assert.strictEqual(p.relayUrl, 'wss://relay.example.com');
+  assert.strictEqual(p.relayToken, null);
+});
+
+test('non-invite URL returns error', () => {
+  const p = parseInviteURL('https://example.com/foo');
+  assert.ok(p.error, 'expected error on non-invite URL');
+});
+
+test('garbage string returns error', () => {
+  const p = parseInviteURL('not-a-url-at-all');
+  assert.ok(p.error, 'expected error');
+});
+
+console.log('\nInvite URL — create + round-trip:');
+
+test('buildInviteURL(group) returns sym://group/{name}', () => {
+  assert.strictEqual(buildInviteURL({ group: 'backend-team' }), 'sym://group/backend-team');
+});
+
+test('buildInviteURL(group, relay, token) returns sym://team/ with query string', () => {
+  const url = buildInviteURL({
+    group: 'eng-team',
+    relayUrl: 'wss://sym-relay.onrender.com',
+    relayToken: 'shared-secret-xyz',
+  });
+  assert.ok(url.startsWith('sym://team/eng-team?'), 'should be sym://team/ with query');
+  assert.ok(url.includes('relay=wss%3A%2F%2Fsym-relay.onrender.com'), 'relay URL percent-encoded');
+  assert.ok(url.includes('token=shared-secret-xyz'), 'token present');
+});
+
+test('buildInviteURL rejects invalid group name', () => {
+  assert.throws(() => buildInviteURL({ group: 'Bad Group' }), /invalid group/);
+  assert.throws(() => buildInviteURL({ group: 'UPPERCASE' }), /invalid group/);
+  assert.throws(() => buildInviteURL({ group: '-leading-hyphen' }), /invalid group/);
+  assert.throws(() => buildInviteURL({ group: 'trailing-hyphen-' }), /invalid group/);
+});
+
+test('buildInviteURL rejects token without URL', () => {
+  assert.throws(
+    () => buildInviteURL({ group: 'x', relayToken: 'token-only' }),
+    /relay_token requires relay_url/,
+  );
+});
+
+test('round-trip: create LAN → parse → same group back', () => {
+  const url = buildInviteURL({ group: 'my-team' });
+  const p = parseInviteURL(url);
+  assert.strictEqual(p.group, 'my-team');
+  assert.strictEqual(p.serviceType, '_my-team._tcp');
+});
+
+test('round-trip: create relay → parse → same group + relay creds back', () => {
+  const url = buildInviteURL({
+    group: 'cross-net',
+    relayUrl: 'wss://sym-relay.onrender.com',
+    relayToken: 'tok-123',
+  });
+  const p = parseInviteURL(url);
+  assert.strictEqual(p.group, 'cross-net');
+  assert.strictEqual(p.relayUrl, 'wss://sym-relay.onrender.com');
+  assert.strictEqual(p.relayToken, 'tok-123');
+});
+
 // ── Results ─────────────────────────────────────────────────
 
 (async () => {
