@@ -40,13 +40,18 @@ npm install -g @sym-bot/mesh-channel    # install + auto-configure ~/.claude.jso
 claude --dangerously-load-development-channels server:claude-sym-mesh   # launch
 ```
 
-### Via Claude Code plugin (pending Anthropic approval)
+### Via Claude Code plugin marketplace (available now)
+
+Two commands, straight from this repo — no waiting on any external directory:
 
 ```
-/plugin install sym-mesh-channel
+/plugin marketplace add sym-bot/sym-mesh-channel
+/plugin install sym-mesh-channel@sym-mesh-channel
 ```
 
-The plugin has been [submitted to the Anthropic Plugin Directory](https://claude.ai/settings/plugins/submit) and is pending review. Once approved, the `--dangerously-load-development-channels` flag is no longer needed.
+This works today. Claude Code clones this repo, reads `.claude-plugin/marketplace.json`, and installs the plugin into your user scope. See the [Claude Code plugin-marketplaces docs](https://code.claude.com/docs/en/plugin-marketplaces) for the install flow.
+
+> **Channels note**: Claude Code Channels are in [research preview](https://code.claude.com/docs/en/channels#research-preview) with an Anthropic-maintained allowlist. The MCP tools (`sym_send`, `sym_peers`, `sym_status`, `sym_recall`, `sym_observe`, `sym_fetch`, `sym_group_info`) work out of the box once installed. The in-conversation `<channel>` push notifications currently require either Anthropic allowlist inclusion or the development flag `--dangerously-load-development-channels plugin:sym-mesh-channel@sym-mesh-channel`. The plugin has been approved on the [Anthropic Plugin Directory](https://claude.ai/settings/plugins/submit); official-marketplace listing propagation and channel-allowlist inclusion are tracked separately.
 
 ---
 
