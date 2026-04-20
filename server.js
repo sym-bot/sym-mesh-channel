@@ -263,8 +263,9 @@ const mcp = new Server(
     instructions:
       `You are a peer node on the SYM mesh (identity: ${NODE_NAME}). ` +
       'Mesh events arrive as <channel> notifications in real-time. ' +
-      'When you see a message or CMB from another node, respond via the sym_send tool if actionable. ' +
-      'Share observations about the user\'s state via sym_observe. ' +
+      'When you see a CMB from another node, respond via sym_send targeted at that node by name if the reply is for that specific peer (MMP §4.4.4 targeted CMB). ' +
+      'Share observations about your own state with the whole mesh via sym_observe (MMP §9.2 receiver-autonomous SVAF evaluation). ' +
+      'Both sym_send and sym_observe emit CAT7 CMBs; receivers run SVAF and, if admitted, remix-store with lineage pointing back to your CMB. ' +
       'Search mesh memory via sym_recall. ' +
       'Messages arrive as compact headers with [mNNN] IDs — use sym_fetch to read the full content when the header is relevant to your current task.',
   },
@@ -276,16 +277,44 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
       name: 'sym_send',
-      description: 'Send a message to all mesh peers. Stored as a persistent CMB and broadcast via relay.',
+      description:
+        'Send a structured CAT7 CMB to a specific mesh peer (targeted) or to all peers (broadcast, when "to" is omitted). ' +
+        'Receivers evaluate the CMB per-field via SVAF (MMP §9.2) and, if admitted, remix-store it with lineage pointing back to this CMB. ' +
+        'Use sym_send when the CMB is for a specific peer (e.g. a peer-review gating request directed at the reviewer role); ' +
+        'use sym_observe when sharing your own state with the whole mesh.',
       inputSchema: {
         type: 'object',
-        properties: { message: { type: 'string', description: 'Message to broadcast' } },
-        required: ['message'],
+        properties: {
+          focus: { type: 'string', description: 'The task anchor / what this CMB is about. Required.' },
+          issue: { type: 'string' },
+          intent: { type: 'string' },
+          motivation: { type: 'string' },
+          commitment: { type: 'string' },
+          perspective: { type: 'string' },
+          mood: {
+            type: 'object',
+            properties: {
+              text: { type: 'string' },
+              valence: { type: 'number' },
+              arousal: { type: 'number' },
+            },
+          },
+          to: {
+            type: 'string',
+            description:
+              'Target peer: either the peer display name (e.g. "claude-research-win") or the full nodeId. ' +
+              'Call sym_peers first if unsure which peers are connected. Omit to broadcast to all peers.',
+          },
+        },
+        required: ['focus'],
       },
     },
     {
       name: 'sym_observe',
-      description: 'Share a structured CAT7 observation with the mesh. Extract fields from what you observe.',
+      description:
+        'Broadcast a structured CAT7 observation about your own state to all mesh peers. ' +
+        'Receivers run SVAF (MMP §9.2) and admitted CMBs are remix-stored with lineage. ' +
+        'Equivalent to sym_send with "to" omitted — kept as a separate tool because self-observation is the common case and does not need peer selection.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -388,22 +417,60 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   switch (name) {
     case 'sym_send': {
-      // Direct inter-node message — broadcast as type:'message' frame only.
-      // Do NOT also persist as a CMB via node.remember(): that caused
-      // double-delivery on receivers, who saw the same payload arrive once
-      // as event_type='message' (from this broadcast) and again as
-      // event_type='cmb' (from CMB gossip replication). One tool, one job:
-      // sym_send is for ephemeral inter-node messages; sym_observe is for
-      // structured CAT7 CMBs. Hosts that want both should call both.
-      //
-      // Report the actual delivered count (the number of peer transports
-      // that successfully accepted the broadcast), not peers().length.
-      // The two can disagree when peers are in _peers but their transports
-      // are broken — counting peers().length would lie about delivery.
-      // Requires @sym-bot/sym >= 0.3.70 where send() returns the count.
-      const msg = args.message;
-      const delivered = node.send(msg);
-      return { content: [{ type: 'text', text: `Message delivered to ${delivered} peer(s).` }] };
+      // Emit a structured CAT7 CMB per MMP §4.2. When args.to names a peer,
+      // route as a targeted send (§4.4.4); otherwise broadcast. Receivers
+      // run SVAF (§9.2) and remix-store on accept — no separate "message"
+      // frame path, no raw-text channel.
+      const fields = {
+        focus: args.focus || 'directive',
+        issue: args.issue || 'none',
+        intent: args.intent || 'directive',
+        motivation: args.motivation || '',
+        commitment: args.commitment || '',
+        perspective: args.perspective || NODE_NAME,
+        mood: args.mood || { text: 'neutral', valence: 0, arousal: 0 },
+      };
+
+      let targetPeerId = null;
+      if (args.to) {
+        const peers = node.peers();
+        // Exact full-nodeId match first (unambiguous).
+        const byNodeId = peers.filter(p => p.peerId === args.to);
+        // Name match second.
+        const byName = peers.filter(p => p.name === args.to);
+        // Short-id prefix match last (for human-typed 8-char prefixes).
+        const byPrefix = peers.filter(p => p.id === args.to);
+
+        let matches;
+        if (byNodeId.length > 0) matches = byNodeId;
+        else if (byName.length > 0) matches = byName;
+        else if (byPrefix.length > 0) matches = byPrefix;
+        else matches = [];
+
+        if (matches.length === 0) {
+          return {
+            content: [{ type: 'text', text: `Peer "${args.to}" not connected. Call sym_peers to see connected peers.` }],
+            isError: true,
+          };
+        }
+        if (matches.length > 1) {
+          const names = matches.map(p => `${p.name} (${p.peerId})`).join(', ');
+          return {
+            content: [{ type: 'text', text: `Peer "${args.to}" is ambiguous — matches: ${names}. Pass the full nodeId.` }],
+            isError: true,
+          };
+        }
+        targetPeerId = matches[0].peerId;
+      }
+
+      const entry = node.remember(fields, targetPeerId ? { to: targetPeerId } : {});
+      if (!entry) {
+        return { content: [{ type: 'text', text: 'Duplicate — CMB already in memory, not re-broadcast.' }] };
+      }
+      const summary = targetPeerId
+        ? `Sent CMB ${entry.key} to ${args.to}`
+        : `Broadcast CMB ${entry.key} to all peers`;
+      return { content: [{ type: 'text', text: summary }] };
     }
 
     case 'sym_observe': {

@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.2.0
+
+### Breaking
+
+- **`sym_send` tool signature change.** `sym_send` now emits a structured
+  CAT7 CMB (MMP §4.2) instead of a raw-text `type:'message'` frame, and
+  accepts an optional `to` parameter for targeted single-peer delivery
+  per MMP §4.4.4.
+
+  Old signature: `sym_send(message: string)`
+  New signature: `sym_send(focus: string (required), issue?, intent?,
+  motivation?, commitment?, perspective?, mood?, to?)`
+
+  Migration: agents that previously called `sym_send({message: "..."})`
+  should now pass the CAT7 fields explicitly, with `focus` carrying the
+  task anchor for the send. Prior ephemeral text-broadcast behaviour is
+  no longer exposed at the tool surface — `sym_send` and `sym_observe`
+  both emit CMBs now, receivers run SVAF per §9.2, and admitted CMBs are
+  remix-stored with lineage. The low-level `node.send(text)` SDK API is
+  unchanged but no longer surfaced as a tool.
+
+### Added
+
+- **Targeted CMB send.** `sym_send` resolves `to` against connected
+  peers by full nodeId first, then display name, then 8-char prefix.
+  Ambiguous matches return an error asking for the full nodeId; a
+  disconnected target returns an error and suggests `sym_peers`.
+- **Tool descriptions** for `sym_send` and `sym_observe` now explicitly
+  call out the SVAF receive path and lineage semantics, and the MCP
+  server's `instructions` string reflects the new division of labour.
+- **`@sym-bot/sym` dependency bumped to `^0.3.81`** for
+  `remember(fields, {to})` targeted variant and `peers().peerId`.
+
 ## 0.1.23
 
 ### Added
