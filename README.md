@@ -8,7 +8,7 @@
 
 > MCP server that turns Claude Code into a peer node on the [SYM mesh](https://sym.bot) — the first non-Anthropic implementation of Claude Code Channels for real-time agent-to-agent cognition.
 
-Two Claude Code sessions on different machines discover each other via Bonjour mDNS, form a peer-to-peer mesh, and exchange structured cognitive signals in real-time. Each side is a full peer with its own cryptographic identity, its own [SVAF](https://arxiv.org/abs/2604.03955) receiver-side gating, and its own memory — not a thin client. Signals arrive mid-conversation as `<channel>` notifications. No polling, no shared server, no orchestrator.
+Two Claude Code sessions on different machines discover each other via Bonjour mDNS, form a mesh, and exchange structured agent-to-agent cognitive signals in real-time. Each side is a full peer with its own cryptographic identity, its own [SVAF](https://arxiv.org/abs/2604.03955) receiver-side gating, and its own memory — not a thin client. Signals arrive mid-conversation as `<channel>` notifications. No polling, no shared server, no orchestrator.
 
 **Verified cross-platform:** Mac ↔ Windows on the same wifi, pure Bonjour, no relay, no token. Cross-network via optional WebSocket relay.
 
@@ -160,7 +160,7 @@ SYM-mesh groups visible on LAN (3):
   _frontend-team._tcp group="frontend-team"
 ```
 
-Only shows groups with at least one node online right now — there's no central directory of offline-but-known groups (peer-to-peer architecture). For cross-network relay-backed groups, you must know the relay URL + token out of band (someone shares the invite URL).
+Only shows groups with at least one node online right now — there's no central directory of offline-but-known groups (decentralised architecture). For cross-network relay-backed groups, you must know the relay URL + token out of band (someone shares the invite URL).
 
 ### Advanced: per-project node identity
 
