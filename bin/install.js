@@ -24,7 +24,7 @@
  *   - Refuses to overwrite an existing claude-sym-mesh entry without
  *     --force.
  *
- * Copyright (c) 2026 SYM.BOT Ltd. Apache 2.0 License.
+ * Copyright (c) 2026 SYM.BOT. Apache 2.0 License.
  */
 
 const fs = require('fs');

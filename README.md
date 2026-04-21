@@ -291,4 +291,4 @@ See [SECURITY.md](SECURITY.md) for the full security model.
 
 ## License
 
-Apache 2.0 — SYM.BOT Ltd
+Apache 2.0 — SYM.BOT

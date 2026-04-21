@@ -19,7 +19,7 @@ if (process.argv[2] === 'init') {
  * its own relay connection, and its own SVAF evaluation with engineering-domain
  * field weights. Per MMP Section 3: every participant is a peer.
  *
- * Copyright (c) 2026 SYM.BOT Ltd. Apache 2.0 License.
+ * Copyright (c) 2026 SYM.BOT. Apache 2.0 License.
  */
 
 const { Server } = require('@modelcontextprotocol/sdk/server/index.js');
