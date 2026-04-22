@@ -27,6 +27,23 @@
   "engines": {
     "node": ">=18"
   },
+  "keywords": [
+    "claude-code",
+    "claude-plugin",
+    "mcp",
+    "model-context-protocol",
+    "mesh-memory-protocol",
+    "mmp",
+    "cat7",
+    "svaf",
+    "collective-intelligence",
+    "agent-to-agent",
+    "multi-agent",
+    "cognitive-coupling",
+    "sym",
+    "sym-bot",
+    "mesh"
+  ],
   "author": "Hongwei Xu <hongwei@sym.bot> (https://sym.bot)",
   "license": "Apache-2.0"
 }
