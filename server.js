@@ -253,6 +253,35 @@ function registerNodeHandlers(n) {
 
 // ── MCP Server ───────────────────────────────────────────────
 
+// Base instructions shown to the agent at every MCP initialize.
+const BASE_INSTRUCTIONS =
+  `You are a peer node on the SYM mesh (identity: ${NODE_NAME}). ` +
+  'Mesh events arrive as <channel> notifications in real-time. ' +
+  'When you see a CMB from another node, respond via sym_send targeted at that node by name if the reply is for that specific peer (MMP §4.4.4 targeted CMB). ' +
+  'Share observations about your own state with the whole mesh via sym_observe (MMP §9.2 receiver-autonomous SVAF evaluation). ' +
+  'Both sym_send and sym_observe emit CAT7 CMBs; receivers run SVAF and, if admitted, remix-store with lineage pointing back to your CMB. ' +
+  'Search mesh memory via sym_recall. ' +
+  'Messages arrive as compact headers with [mNNN] IDs — use sym_fetch to read the full content when the header is relevant to your current task.';
+
+// Final startup step (MMP §4.2 O2 — rejoin-without-replay). The SymNode
+// constructor builds the memory-store index from disk, so the primer is
+// available synchronously without needing node.start(). Appending it to
+// the MCP instructions payload means a fresh Claude Code session wakes
+// with prior remix memory — own observations plus peer observations
+// admitted by SVAF — already loaded into context, zero first-turn
+// sym_recall overhead.
+//
+// MCP SDK reads `instructions` at Server construction time (storing it in
+// a private field) and emits it only on initialize-response; mutations on
+// the public property after construction are ignored. Compute once, pass in.
+let primerText = '';
+try {
+  const primer = node.buildStartupPrimer();
+  if (primer && primer.count > 0) primerText = `\n\n${primer.text}`;
+} catch (err) {
+  process.stderr.write(`sym-mesh-channel startup primer skipped: ${err?.message || err}\n`);
+}
+
 const mcp = new Server(
   { name: 'sym-mesh', version: '0.1.0' },
   {
@@ -260,14 +289,7 @@ const mcp = new Server(
       tools: {},
       experimental: { 'claude/channel': {} },
     },
-    instructions:
-      `You are a peer node on the SYM mesh (identity: ${NODE_NAME}). ` +
-      'Mesh events arrive as <channel> notifications in real-time. ' +
-      'When you see a CMB from another node, respond via sym_send targeted at that node by name if the reply is for that specific peer (MMP §4.4.4 targeted CMB). ' +
-      'Share observations about your own state with the whole mesh via sym_observe (MMP §9.2 receiver-autonomous SVAF evaluation). ' +
-      'Both sym_send and sym_observe emit CAT7 CMBs; receivers run SVAF and, if admitted, remix-store with lineage pointing back to your CMB. ' +
-      'Search mesh memory via sym_recall. ' +
-      'Messages arrive as compact headers with [mNNN] IDs — use sym_fetch to read the full content when the header is relevant to your current task.',
+    instructions: BASE_INSTRUCTIONS + primerText,
   },
 );
 
@@ -840,23 +862,10 @@ process.on('SIGINT',  () => shutdown('SIGINT'));
 process.on('SIGHUP',  () => shutdown('SIGHUP'));
 
 async function main() {
-  // Start SymNode — connects to relay as a peer
+  // Start SymNode — connects to relay as a peer. The startup primer is
+  // computed at module-load time (see BASE_INSTRUCTIONS above) and is
+  // already embedded in the MCP server's initialize-response payload.
   await node.start();
-
-  // Final startup step: reconstitute this agent's remix memory into the
-  // MCP instructions payload so a fresh Claude Code session wakes with
-  // prior cognitive state already loaded (MMP §4.2 O2 — rejoin-without-
-  // replay). No first-turn sym_recall required.
-  try {
-    const primer = node.buildStartupPrimer();
-    if (primer && primer.count > 0 && typeof mcp.instructions === 'string') {
-      mcp.instructions = `${mcp.instructions}\n\n${primer.text}`;
-    }
-  } catch (err) {
-    // Primer construction must never block startup. Log to stderr
-    // (visible in Claude Code plugin logs) and continue.
-    process.stderr.write(`sym-mesh-channel startup primer skipped: ${err.message}\n`);
-  }
 
   // Start MCP server — communicates with Claude Code via stdio
   const transport = new StdioServerTransport();
