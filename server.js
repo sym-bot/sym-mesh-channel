@@ -843,6 +843,21 @@ async function main() {
   // Start SymNode — connects to relay as a peer
   await node.start();
 
+  // Final startup step: reconstitute this agent's remix memory into the
+  // MCP instructions payload so a fresh Claude Code session wakes with
+  // prior cognitive state already loaded (MMP §4.2 O2 — rejoin-without-
+  // replay). No first-turn sym_recall required.
+  try {
+    const primer = node.buildStartupPrimer();
+    if (primer && primer.count > 0 && typeof mcp.instructions === 'string') {
+      mcp.instructions = `${mcp.instructions}\n\n${primer.text}`;
+    }
+  } catch (err) {
+    // Primer construction must never block startup. Log to stderr
+    // (visible in Claude Code plugin logs) and continue.
+    process.stderr.write(`sym-mesh-channel startup primer skipped: ${err.message}\n`);
+  }
+
   // Start MCP server — communicates with Claude Code via stdio
   const transport = new StdioServerTransport();
   await mcp.connect(transport);

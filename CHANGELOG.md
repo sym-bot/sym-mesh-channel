@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.3.0
+
+### Added
+
+- **Startup remix-memory primer — automates agent memory recall on
+  session/agent restart (MMP §4.2 O2, rejoin-without-replay).** As the
+  final step of plugin initialisation (after `node.start()` and before
+  the MCP transport connects), the plugin calls
+  `node.buildStartupPrimer()` and appends the returned text to the MCP
+  server's `instructions` field. A fresh Claude Code session wakes
+  with the agent's own remix memory — own observations plus peer
+  observations admitted by SVAF — already loaded into context. No
+  first-turn `sym_recall` required; agent acts from prior state
+  immediately.
+
+  Default caps: last 24 hours OR 20 most recent CMBs, whichever is
+  tighter. The primer lists each entry as `[timestamp] source · key —
+  focus` and surfaces a dropped-count line when caps elide older
+  entries. Empty store is a silent no-op.
+
+### Changed
+
+- **`@sym-bot/sym` dep bumped to `^0.5.0`** to pick up the
+  `buildStartupPrimer` helper and to keep every plugin on the
+  sym.day platform pinned to the same substrate SDK version
+  (no drift across mesh-channel / melotune-plugin / future
+  specialised plugins).
+
 ## 0.2.0
 
 ### Breaking
