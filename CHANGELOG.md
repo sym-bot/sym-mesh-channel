@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.3.1
+
+### Fixed
+
+- **Installer no longer silently ships a broken MCP config.** Previously,
+  if `~/.claude.json` already contained a `claude-sym-mesh` entry,
+  `npm install -g @sym-bot/mesh-channel` (via postinstall) and
+  `npx @sym-bot/mesh-channel init` both skipped with "already configured"
+  — even when the entry's `args[0]` server.js path no longer existed on
+  disk (common after moving or reinstalling the repo). Users saw
+  `/mcp` report "Failed to reconnect" with no diagnostic hint.
+
+  The installer now classifies entries whose `args[0]` is missing as
+  **stale** and rewrites them automatically without `--force`, preserving
+  `SYM_NODE_NAME` from the prior entry so mesh identity doesn't drift
+  back to the hostname-based default. Live entries continue to require
+  `--force` for overwrite.
+
+- **Stale project-scoped entries are now healed too.** `~/.claude.json`
+  can carry per-project `mcpServers` overrides under
+  `projects.<dir>.mcpServers`, and Claude Code prefers those over the
+  user-global entry when launched from that directory. A healthy
+  user-global entry was therefore being silently shadowed by stale
+  project entries. `init` now scans every project, rewrites any stale
+  `claude-sym-mesh` entry, and preserves each project's `SYM_NODE_NAME`.
+
+### Added
+
+- **`sym-mesh-channel doctor` subcommand.** Read-only diagnostic that
+  lists every `claude-sym-mesh` entry in `~/.claude.json` (user-global
+  and every project scope) with `[live]` or `[STALE]` plus its
+  `SYM_NODE_NAME` and configured path. Point users here when `/mcp`
+  reports "Failed to reconnect". No writes, safe to run any time.
+
+- **README troubleshooting section** covering the `/mcp` failure path,
+  how to run `doctor`, and when restart is needed after a config change.
+
+### Changed
+
+- `.claude-plugin/plugin.json` version field bumped to `0.3.1` to match
+  `package.json`. Previous drift (`plugin.json` stuck at `0.2.0`, package
+  at `0.3.0`) was caught by the in-repo version-parity test.
+
 ## 0.3.0
 
 ### Added

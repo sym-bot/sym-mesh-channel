@@ -329,6 +329,182 @@ async function runProjectInstallTests() {
     }
   });
 
+  await testAsync('global: heals stale top-level entry without --force, preserves SYM_NODE_NAME', async () => {
+    // Root cause of the "silent broken install" UX bug: prior npm install -g
+    // left ~/.claude.json pointing at a server.js path that no longer exists
+    // (repo moved/renamed/deleted). Subsequent reinstalls silently skipped the
+    // broken entry — users saw npm say "added 148 packages" then /mcp report
+    // "Failed to reconnect" with no explanation. Installer now classifies
+    // entries whose args[0] is missing on disk as STALE and rewrites them
+    // even without --force, preserving SYM_NODE_NAME.
+    const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-home-'));
+    try {
+      const claudeJsonPath = path.join(fakeHome, '.claude.json');
+      fs.writeFileSync(claudeJsonPath, JSON.stringify({
+        mcpServers: {
+          'claude-sym-mesh': {
+            command: 'node',
+            args: ['/nonexistent/stale/path/server.js'],
+            env: { SYM_NODE_NAME: 'claude-canonical', SYM_RELAY_URL: '', SYM_RELAY_TOKEN: '' },
+          },
+        },
+      }));
+      const { code } = await spawnInstaller(['init'], {
+        env: { ...process.env, HOME: fakeHome, USERPROFILE: fakeHome },
+      });
+      assert.strictEqual(code, 0, 'installer should heal stale entry without --force');
+      const after = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf8'));
+      const entry = after.mcpServers['claude-sym-mesh'];
+      assert.ok(fs.existsSync(entry.args[0]), 'rewritten path must exist on disk');
+      assert.strictEqual(entry.env.SYM_NODE_NAME, 'claude-canonical', 'node name must be preserved from the stale entry, not reset to the hostname default');
+    } finally {
+      fs.rmSync(fakeHome, { recursive: true, force: true });
+    }
+  });
+
+  await testAsync('global: refuses to overwrite a LIVE entry without --force', async () => {
+    // Regression guard for stale-heal feature. The stale-path rewrite must
+    // not accidentally stomp on an entry whose server.js is reachable.
+    const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-home-'));
+    try {
+      const claudeJsonPath = path.join(fakeHome, '.claude.json');
+      const liveServerPath = path.join(__dirname, '..', 'server.js');
+      assert.ok(fs.existsSync(liveServerPath), 'sanity: repo server.js must exist');
+      fs.writeFileSync(claudeJsonPath, JSON.stringify({
+        mcpServers: {
+          'claude-sym-mesh': {
+            command: 'node',
+            args: [liveServerPath],
+            env: { SYM_NODE_NAME: 'claude-live', SYM_RELAY_URL: '', SYM_RELAY_TOKEN: '' },
+          },
+        },
+      }));
+      const { code } = await spawnInstaller(['init'], {
+        env: { ...process.env, HOME: fakeHome, USERPROFILE: fakeHome },
+        allowFail: true,
+      });
+      assert.strictEqual(code, 2, 'installer must exit 2 for a live entry without --force');
+    } finally {
+      fs.rmSync(fakeHome, { recursive: true, force: true });
+    }
+  });
+
+  await testAsync('global: postinstall silently heals stale entry (no "already configured" skip)', async () => {
+    // Before the fix, postinstall printed "already configured (skipping)" and
+    // exited 0 even when the existing entry pointed at a dead path. Users ran
+    // `npm install -g @sym-bot/mesh-channel`, postinstall "succeeded", and
+    // the MCP server was still unreachable. This test pins the new behaviour:
+    // stale entry on postinstall triggers a rewrite, not a skip.
+    const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-home-'));
+    try {
+      const claudeJsonPath = path.join(fakeHome, '.claude.json');
+      fs.writeFileSync(claudeJsonPath, JSON.stringify({
+        mcpServers: {
+          'claude-sym-mesh': {
+            command: 'node',
+            args: ['/nonexistent/path/server.js'],
+            env: { SYM_NODE_NAME: 'claude-preserved' },
+          },
+        },
+      }));
+      const { code } = await spawnInstaller(['init', '--postinstall'], {
+        env: { ...process.env, HOME: fakeHome, USERPROFILE: fakeHome },
+      });
+      assert.strictEqual(code, 0);
+      const after = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf8'));
+      assert.ok(fs.existsSync(after.mcpServers['claude-sym-mesh'].args[0]), 'postinstall must heal stale path, not skip');
+      assert.strictEqual(after.mcpServers['claude-sym-mesh'].env.SYM_NODE_NAME, 'claude-preserved');
+    } finally {
+      fs.rmSync(fakeHome, { recursive: true, force: true });
+    }
+  });
+
+  await testAsync('global: heals stale project-scoped entries under claudeJson.projects', async () => {
+    // Project-scoped mcpServers entries under ~/.claude.json's `projects`
+    // key override the user-global entry when Claude Code is launched from
+    // that directory. A stale project entry silently shadows a fresh
+    // user-global heal — the exact bug Hongwei hit on 2026-04-23 where
+    // `~/code` was moved from `~/Documents/dev`. The installer now scans
+    // every project and rewrites stale claude-sym-mesh args, preserving
+    // each project's SYM_NODE_NAME.
+    const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-home-'));
+    try {
+      const claudeJsonPath = path.join(fakeHome, '.claude.json');
+      const liveServerPath = path.join(__dirname, '..', 'server.js');
+      fs.writeFileSync(claudeJsonPath, JSON.stringify({
+        mcpServers: {
+          'claude-sym-mesh': {
+            command: 'node',
+            args: ['/nonexistent/stale/server.js'],
+            env: { SYM_NODE_NAME: 'claude-top' },
+          },
+        },
+        projects: {
+          '/some/project/a': {
+            mcpServers: {
+              'claude-sym-mesh': {
+                command: 'node',
+                args: ['/also/stale/server.js'],
+                env: { SYM_NODE_NAME: 'claude-proj-a' },
+              },
+            },
+          },
+          '/some/project/b': {
+            mcpServers: {
+              'claude-sym-mesh': {
+                command: 'node',
+                args: [liveServerPath],
+                env: { SYM_NODE_NAME: 'claude-proj-b' },
+              },
+            },
+          },
+        },
+      }));
+      const { code } = await spawnInstaller(['init'], {
+        env: { ...process.env, HOME: fakeHome, USERPROFILE: fakeHome },
+      });
+      assert.strictEqual(code, 0);
+      const after = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf8'));
+      const projA = after.projects['/some/project/a'].mcpServers['claude-sym-mesh'];
+      const projB = after.projects['/some/project/b'].mcpServers['claude-sym-mesh'];
+      assert.ok(fs.existsSync(projA.args[0]), 'stale project-scoped entry must be healed');
+      assert.strictEqual(projA.env.SYM_NODE_NAME, 'claude-proj-a', 'stale project entry must preserve its SYM_NODE_NAME');
+      assert.strictEqual(projB.args[0], liveServerPath, 'live project-scoped entry must be left alone');
+      assert.strictEqual(projB.env.SYM_NODE_NAME, 'claude-proj-b');
+    } finally {
+      fs.rmSync(fakeHome, { recursive: true, force: true });
+    }
+  });
+
+  await testAsync('global: doctor reports live + stale entries without writing', async () => {
+    // Diagnostic subcommand for users with broken /mcp. Must be read-only.
+    const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-home-'));
+    try {
+      const claudeJsonPath = path.join(fakeHome, '.claude.json');
+      const before = {
+        mcpServers: {
+          'claude-sym-mesh': {
+            command: 'node',
+            args: ['/nonexistent/server.js'],
+            env: { SYM_NODE_NAME: 'claude-diag' },
+          },
+        },
+      };
+      fs.writeFileSync(claudeJsonPath, JSON.stringify(before));
+      const beforeBytes = fs.readFileSync(claudeJsonPath);
+      const { code, stdout } = await spawnInstallerCapture(['doctor'], {
+        env: { ...process.env, HOME: fakeHome, USERPROFILE: fakeHome },
+      });
+      assert.strictEqual(code, 0);
+      assert.ok(stdout.includes('STALE'), 'doctor must flag the stale entry');
+      assert.ok(stdout.includes('user-global'), 'doctor must label the user-global scope');
+      const afterBytes = fs.readFileSync(claudeJsonPath);
+      assert.ok(beforeBytes.equals(afterBytes), 'doctor must be read-only');
+    } finally {
+      fs.rmSync(fakeHome, { recursive: true, force: true });
+    }
+  });
+
   await testAsync('--project + --postinstall falls back to global install (no .mcp.json written)', async () => {
     // --postinstall always runs global (postinstall runs from npm staging
     // dir, not the user's project). When paired with --project we want
@@ -376,6 +552,31 @@ function spawnInstaller(args, opts = {}) {
         return reject(new Error(`installer exited ${code}: ${stderr}`));
       }
       resolve({ code, stderr });
+    });
+    proc.on('error', reject);
+  });
+}
+
+// spawnInstallerCapture: variant that captures stdout for assertions.
+// Kept separate so the default `spawnInstaller` stays buffer-safe on
+// long output runs.
+function spawnInstallerCapture(args, opts = {}) {
+  return new Promise((resolve, reject) => {
+    const installJs = path.join(__dirname, '..', 'bin', 'install.js');
+    const proc = spawn(process.execPath, [installJs, ...args], {
+      cwd: opts.cwd,
+      env: opts.env || process.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    proc.stdout.on('data', (d) => { stdout += d.toString(); });
+    proc.stderr.on('data', (d) => { stderr += d.toString(); });
+    proc.on('close', (code) => {
+      if (code !== 0 && !opts.allowFail) {
+        return reject(new Error(`installer exited ${code}: ${stderr}`));
+      }
+      resolve({ code, stdout, stderr });
     });
     proc.on('error', reject);
   });

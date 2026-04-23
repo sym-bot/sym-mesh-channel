@@ -21,8 +21,17 @@
  *     any write.
  *   - Validates JSON parses round-trip before writing.
  *   - Atomic via write-to-tmp + rename.
- *   - Refuses to overwrite an existing claude-sym-mesh entry without
- *     --force.
+ *   - Refuses to overwrite a LIVE claude-sym-mesh entry without --force.
+ *     An entry whose args[0] server.js path no longer exists on disk is
+ *     treated as STALE and rewritten in place — a stale entry guarantees
+ *     a broken MCP transport, so "preserving" it is never what the user
+ *     wants. SYM_NODE_NAME from the stale entry is preserved so the
+ *     mesh identity doesn't drift to the hostname-based default.
+ *   - Also scans every project-scoped mcpServers entry and rewrites any
+ *     project entry whose claude-sym-mesh.args[0] path has gone stale,
+ *     again preserving each project's SYM_NODE_NAME. This prevents the
+ *     "ghost project" failure mode where user-global was fixed but
+ *     project-scoped entries silently continue to point at the old path.
  *
  * Copyright (c) 2026 SYM.BOT. Apache 2.0 License.
  */
@@ -37,9 +46,32 @@ const isPostinstall = args.includes('--postinstall');
 const isProject = args.includes('--project');
 const cmd = args.find((a) => !a.startsWith('--')) || 'init';
 
-if (cmd !== 'init') {
-  process.stderr.write(`Unknown command: ${cmd}\nUsage: sym-mesh-channel init [--project] [--force]\n`);
+if (cmd !== 'init' && cmd !== 'doctor') {
+  process.stderr.write(`Unknown command: ${cmd}\nUsage: sym-mesh-channel init [--project] [--force]\n       sym-mesh-channel doctor\n`);
   process.exit(1);
+}
+
+// ── isStaleEntry: a claude-sym-mesh entry whose server.js path is gone ──
+// Returns true when the entry exists but its args[0] path does not resolve
+// to a file on disk. Such an entry can never spawn the MCP server — every
+// launch yields "Failed to reconnect" in /mcp. Treating it as rewritable
+// on postinstall means users who move or uninstall an old copy of the repo
+// get healed automatically on the next `npm install -g @sym-bot/mesh-channel`
+// without needing to know about --force.
+function isStaleEntry(entry) {
+  if (!entry || !Array.isArray(entry.args) || entry.args.length === 0) return false;
+  const p = entry.args[0];
+  if (typeof p !== 'string' || !p) return false;
+  try { return !fs.existsSync(p); } catch { return true; }
+}
+
+// preserveNodeName: return the SYM_NODE_NAME from an existing entry's env
+// so rewrites keep the mesh identity. Falls back to nothing if absent; the
+// caller then uses the computed default.
+function preserveNodeName(entry) {
+  if (!entry || !entry.env || typeof entry.env.SYM_NODE_NAME !== 'string') return null;
+  const n = entry.env.SYM_NODE_NAME.trim();
+  return n || null;
 }
 
 // --postinstall always runs global install (npm postinstall runs from
@@ -106,19 +138,27 @@ if (useProjectMode) {
   mcpJson = mcpJson || {};
   if (!mcpJson.mcpServers) mcpJson.mcpServers = {};
 
-  // Refuse to overwrite an existing claude-sym-mesh entry without --force
-  if (mcpJson.mcpServers['claude-sym-mesh'] && !force) {
+  // Refuse to overwrite a LIVE claude-sym-mesh entry without --force.
+  // Stale entries (args[0] missing on disk) are always rewritable —
+  // see isStaleEntry comment above.
+  const existingProjectEntry = mcpJson.mcpServers['claude-sym-mesh'];
+  const projectEntryIsStale = isStaleEntry(existingProjectEntry);
+  if (existingProjectEntry && !force && !projectEntryIsStale) {
     process.stderr.write(`'claude-sym-mesh' is already configured in ${mcpJsonPath}.\n`);
     process.stderr.write('Re-run with --force to overwrite, or remove the existing entry first.\n');
     process.exit(2);
   }
+
+  // Preserve the prior node name on rewrite so mesh identity doesn't drift
+  // back to the hostname default on every reinstall.
+  const projectNodeName = preserveNodeName(existingProjectEntry) || nodeName;
 
   // Build the MCP entry (identical shape to global mode)
   const projectEntry = {
     command: 'node',
     args: [serverJsPath],
     env: {
-      SYM_NODE_NAME: nodeName,
+      SYM_NODE_NAME: projectNodeName,
       // Explicitly blank relay env vars — see comment on the global
       // install path below for why.
       SYM_RELAY_URL: '',
@@ -195,7 +235,7 @@ if (useProjectMode) {
     '',
     `✓ sym-mesh-channel configured for project: ${projectDir}`,
     '',
-    `  Node name:     ${nodeName}`,
+    `  Node name:     ${projectNodeName}${projectEntryIsStale ? ' (preserved from stale entry)' : ''}`,
     `  Server path:   ${serverJsPath}`,
     `  Wrote:         ${mcpJsonPath}`,
   ];
@@ -258,11 +298,67 @@ fs.copyFileSync(claudeJsonPath, backupPath);
 
 if (!claudeJson.mcpServers) claudeJson.mcpServers = {};
 
-// ── Refuse to overwrite without --force ──────────────────────────
+// ── doctor: report-only scan, no writes ──────────────────────────
+// Surface every claude-sym-mesh entry (user-global + every project-scope)
+// with whether its server.js is reachable and what node name it uses.
+// Useful when /mcp reports "Failed to reconnect" and the user wants to
+// inspect scope conflicts without mutating state.
 
-if (claudeJson.mcpServers['claude-sym-mesh'] && !force) {
+if (cmd === 'doctor') {
+  const rows = [];
+  const topEntry = claudeJson.mcpServers['claude-sym-mesh'];
+  if (topEntry) {
+    rows.push({
+      scope: 'user-global',
+      path: (topEntry.args || [])[0] || '(no path)',
+      node: preserveNodeName(topEntry) || '(no SYM_NODE_NAME)',
+      live: !isStaleEntry(topEntry),
+    });
+  }
+  const projects = claudeJson.projects && typeof claudeJson.projects === 'object' ? claudeJson.projects : {};
+  for (const [projPath, proj] of Object.entries(projects)) {
+    const e = proj && proj.mcpServers && proj.mcpServers['claude-sym-mesh'];
+    if (!e) continue;
+    rows.push({
+      scope: `project ${projPath}`,
+      path: (e.args || [])[0] || '(no path)',
+      node: preserveNodeName(e) || '(no SYM_NODE_NAME)',
+      live: !isStaleEntry(e),
+    });
+  }
+  if (rows.length === 0) {
+    console.log('No claude-sym-mesh entries found in ~/.claude.json.');
+    console.log('Run `sym-mesh-channel init` to configure.');
+    process.exit(0);
+  }
+  console.log('');
+  console.log('claude-sym-mesh entries in ~/.claude.json:');
+  console.log('');
+  for (const r of rows) {
+    console.log(`  [${r.live ? 'live ' : 'STALE'}] ${r.scope}`);
+    console.log(`           node: ${r.node}`);
+    console.log(`           path: ${r.path}`);
+  }
+  const staleCount = rows.filter((r) => !r.live).length;
+  console.log('');
+  if (staleCount > 0) {
+    console.log(`${staleCount} stale entr${staleCount === 1 ? 'y' : 'ies'} — run \`sym-mesh-channel init\` to heal.`);
+  } else {
+    console.log('All entries are live.');
+  }
+  process.exit(0);
+}
+
+// ── Classify the top-level entry ─────────────────────────────────
+
+const existingTopEntry = claudeJson.mcpServers['claude-sym-mesh'];
+const topEntryIsStale = isStaleEntry(existingTopEntry);
+
+// Refuse to overwrite a LIVE entry without --force. A stale entry is
+// always rewritable — see isStaleEntry comment at top of file.
+if (existingTopEntry && !force && !topEntryIsStale) {
   if (isPostinstall) {
-    // During postinstall, silently skip if already configured
+    // During postinstall, silently skip if already configured and live
     console.log('sym-mesh-channel: already configured in ~/.claude.json (skipping)');
     process.exit(0);
   }
@@ -271,13 +367,16 @@ if (claudeJson.mcpServers['claude-sym-mesh'] && !force) {
   process.exit(2);
 }
 
+// Preserve the prior node name on rewrite so mesh identity doesn't drift.
+const topNodeName = preserveNodeName(existingTopEntry) || nodeName;
+
 // ── Build the entry ───────────────────────────────────────────────
 
 const entry = {
   command: 'node',
   args: [serverJsPath],
   env: {
-    SYM_NODE_NAME: nodeName,
+    SYM_NODE_NAME: topNodeName,
     // Explicitly blank the relay vars so the MCP doesn't inherit them
     // from the parent shell (e.g. ~/.zshrc exports). Claude Code's env
     // block is ADDITIVE — omitting a key doesn't remove it from the
@@ -292,6 +391,33 @@ const entry = {
 };
 
 claudeJson.mcpServers['claude-sym-mesh'] = entry;
+
+// ── Heal stale project-scoped entries ─────────────────────────────
+// ~/.claude.json can contain per-project mcpServers overrides under
+// claudeJson.projects[<path>].mcpServers. Claude Code prefers project-scoped
+// over user-global when launched from that directory, so a stale project
+// entry silently shadows a fresh user-global heal. Scan every project,
+// rewrite any claude-sym-mesh entry whose args[0] is missing on disk,
+// preserving the project's SYM_NODE_NAME.
+
+const healedProjects = [];
+const projects = claudeJson.projects && typeof claudeJson.projects === 'object' ? claudeJson.projects : {};
+for (const [projPath, proj] of Object.entries(projects)) {
+  const projEntry = proj && proj.mcpServers && proj.mcpServers['claude-sym-mesh'];
+  if (!projEntry) continue;
+  if (!isStaleEntry(projEntry)) continue;
+  const projNodeName = preserveNodeName(projEntry) || nodeName;
+  proj.mcpServers['claude-sym-mesh'] = {
+    command: 'node',
+    args: [serverJsPath],
+    env: {
+      SYM_NODE_NAME: projNodeName,
+      SYM_RELAY_URL: projEntry.env && typeof projEntry.env.SYM_RELAY_URL === 'string' ? projEntry.env.SYM_RELAY_URL : '',
+      SYM_RELAY_TOKEN: projEntry.env && typeof projEntry.env.SYM_RELAY_TOKEN === 'string' ? projEntry.env.SYM_RELAY_TOKEN : '',
+    },
+  };
+  healedProjects.push({ path: projPath, node: projNodeName });
+}
 
 // ── Atomic write ──────────────────────────────────────────────────
 
@@ -331,13 +457,20 @@ try {
 
 const launchCmd = `claude --dangerously-load-development-channels server:claude-sym-mesh`;
 
+const healedLines = healedProjects.length
+  ? '\n  Healed stale project-scoped entries (now pointing at fresh server.js):\n' +
+    healedProjects.map((p) => `    • ${p.path}  (node: ${p.node})`).join('\n') + '\n'
+  : '';
+
+const nodeNameSuffix = topEntryIsStale ? ' (preserved from stale entry)' : '';
+
 console.log(`
 ✓ sym-mesh-channel configured globally in ~/.claude.json
 
-  Node name:     ${nodeName}
+  Node name:     ${topNodeName}${nodeNameSuffix}
   Server path:   ${serverJsPath}
   Backup:        ${backupPath}
-
+${healedLines}
 Launch Claude Code with the Channels flag:
 
   ${launchCmd}
@@ -347,4 +480,8 @@ Inside Claude Code, verify:
   sym_status   →  node id, relay state, peer count
   sym_peers    →  discovered peers via Bonjour or relay
   sym_send "hello mesh"   →  broadcast to all peers
+
+Troubleshoot a broken install with:
+
+  sym-mesh-channel doctor
 `);
