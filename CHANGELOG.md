@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.2
+
+### Fixed
+
+- **Pulls in `@sym-bot/sym` 0.5.1** — fixes Mac↔Windows peer connections
+  over LAN. Prior releases shipped a Bonjour advertisement whose SRV
+  target was the bare Windows NetBIOS hostname (e.g. `xmesh-hp.`) with
+  no `.local` suffix. macOS mDNSResponder only resolves `.local.` mDNS
+  names, so Macs could discover Windows peers via bonjour browse but
+  failed to open the outbound TCP connection. CMBs targeted at Windows
+  nodes never arrived; no replies came back. Full diagnosis in sym
+  0.5.1 CHANGELOG.
+
+  Upgrade required on both sides to restore Mac↔Windows traffic.
+  Existing Windows identities with a bare hostname are auto-migrated
+  on next node start; no manual config edit needed.
+
 ## 0.3.1
 
 ### Fixed
