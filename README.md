@@ -236,7 +236,7 @@ Clear-eyed about what's not there yet:
 - **Corporate networks often block mDNS multicast.** If LAN discovery fails on the same wifi, fall back to a relay.
 - **No offline directory of known groups.** `sym_groups_discover` only shows groups with at least one node currently online. For cross-network relay-backed groups, invite URLs must be shared out of band.
 - **One mesh identity per process.** Two Claude Code sessions on the same machine with the same `SYM_NODE_NAME` will collide — the second one exits with `EIDENTITYLOCK`. Use distinct `SYM_NODE_NAME`s or install per-project (above).
-- **No end-to-end encryption of CMB payloads.** Transport is authenticated (Ed25519, relay tokens) but relay operators can read message bodies. E2E encryption is on the MMP roadmap.
+- **E2E encryption is per-peer-pair, not universal.** CMB field content is encrypted with Curve25519 key agreement + AES-256-GCM between peers that both advertise an E2E public key on handshake. Peers without E2E support fall back to plaintext for backward compatibility. Outer frame metadata (sender ID, timestamp, lineage) stays plaintext — enough for relay forwarding and SVAF evaluation without seeing bodies.
 
 ## Troubleshooting
 
