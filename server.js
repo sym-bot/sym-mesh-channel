@@ -240,7 +240,15 @@ function registerNodeHandlers(n) {
     if (!isPeerAllowed(source)) return;
     const focus = entry.cmb?.fields?.focus?.text || entry.content || '';
     const mood = entry.cmb?.fields?.mood?.text || '';
-    pushChannel('cmb', `[${source}] ${focus}${mood && mood !== 'neutral' ? ` (mood: ${mood})` : ''}`);
+    const moodSuffix = mood && mood !== 'neutral' ? ` (mood: ${mood})` : '';
+    // Store the rendered CMB body so the agent can sym_fetch it by [mNNN] ID,
+    // matching the contract stated in the MCP instructions and the behaviour
+    // of the raw-text `message` path. Without this, CAT7 CMBs (the primary
+    // traffic — sym_send / sym_observe) arrive as headlines with no
+    // retrievable body, degrading real-time duplex to headline-only.
+    const body = entry.content || focus;
+    const msgId = storeMessage(source, body);
+    pushChannel('cmb', `[${source}] ${focus}${moodSuffix} [${msgId}]`);
   });
 
   n.on('message', (from, content) => {

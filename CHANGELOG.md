@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.3.3
+
+### Fixed
+
+- **Real-time duplex for CAT7 CMBs.** The `cmb-accepted` handler now
+  stores the rendered CMB body under an `[mNNN]` ID and includes that
+  ID in the channel notification, matching the contract stated in the
+  MCP instructions ("Messages arrive as compact headers with [mNNN] IDs
+  — use sym_fetch to read the full content") and the behaviour of the
+  raw-text `message` path.
+
+  Previously only the legacy raw-text `message` event persisted bodies
+  to `MESSAGE_STORE` — the primary `cmb-accepted` event (fired for
+  every structured CMB delivered via `sym_send` / `sym_observe`) pushed
+  a headline with no `[mNNN]` and left no retrievable body. Inbound
+  CMBs were admitted to the SVAF-backed memory store and surfaced by
+  `sym_recall` as compact headlines, but `sym_fetch` could not return
+  their content — the duplex was effectively headline-only for the 99%
+  case of real mesh traffic.
+
+  Symptom: after the 0.3.2 Mac↔Win fix restored bidirectional packet
+  flow, peers' structured replies appeared in `sym_recall` but returned
+  *"expired or invalid ID"* from `sym_fetch` — because `storeMessage()`
+  had never been called for them. Now both the raw-text and CAT7 paths
+  persist bodies identically.
+
 ## 0.3.2
 
 ### Fixed
