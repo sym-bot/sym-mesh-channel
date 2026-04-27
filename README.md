@@ -8,7 +8,7 @@ npm install -g @sym-bot/mesh-channel && claude
 
 [![npm](https://img.shields.io/npm/v/@sym-bot/mesh-channel)](https://www.npmjs.com/package/@sym-bot/mesh-channel)
 [![Plugin Directory](https://img.shields.io/badge/Anthropic_Plugin_Directory-approved-success)](https://claude.ai/settings/plugins/submit)
-[![MMP Spec](https://img.shields.io/badge/protocol-MMP_v0.2.3-purple)](https://sym.bot/spec/mmp)
+[![MMP Spec](https://img.shields.io/badge/protocol-MMP_v1.0-orange)](https://meshcognition.org/spec/mmp)
 [![SVAF arXiv](https://img.shields.io/badge/arXiv-2604.03955-b31b1b.svg)](https://arxiv.org/abs/2604.03955)
 [![MMP arXiv](https://img.shields.io/badge/arXiv-2604.19540-b31b1b.svg)](https://arxiv.org/abs/2604.19540)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
@@ -28,7 +28,7 @@ Verified working: Mac ↔ Windows on the same wifi, pure Bonjour, no relay, no t
 
 - **Small engineering teams** whose Claude Code sessions currently copy-paste findings over Slack. Replace that loop with direct agent-to-agent coordination.
 - **Distributed teams** running Claude Code across offices, home networks, and coffee shops. Isolated team channels via mesh groups, no shared server.
-- **Multi-agent developers** prototyping cognitive architectures — `sym-mesh-channel` is the reference Claude Code host for the [Mesh Memory Protocol](https://sym.bot/spec/mmp).
+- **Multi-agent developers** prototyping cognitive architectures — `sym-mesh-channel` is the reference Claude Code host for the [Mesh Memory Protocol](https://meshcognition.org/spec/mmp).
 - **Not for:** single-user Claude sessions that don't need to coordinate with anyone. You'd get MCP tools but nothing to coordinate with.
 
 ## Quick start
@@ -167,7 +167,7 @@ sym-mesh-channel  ←——  Bonjour mDNS  ——→  sym-mesh-channel
 The plugin composes two open specs:
 
 - **[Claude Code Channels](https://code.claude.com/docs/en/mcp)** (Anthropic, 2026-03-20) — an MCP capability that lets servers push events directly into Claude's conversation context mid-turn via `notifications/claude/channel`. Anthropic built it for the Telegram/Discord/iMessage integrations. We use it for agent-to-agent cognitive coupling.
-- **[MMP — the Mesh Memory Protocol](https://sym.bot/spec/mmp)** — defines *what* gets pushed: typed seven-field cognitive bundles (CAT7: focus, issue, intent, motivation, commitment, perspective, mood), how receivers gate incoming signals ([SVAF](https://arxiv.org/abs/2604.03955)), and how peers maintain identity without a central orchestrator.
+- **[MMP — the Mesh Memory Protocol](https://meshcognition.org/spec/mmp)** — defines *what* gets pushed: typed seven-field cognitive bundles (CAT7: focus, issue, intent, motivation, commitment, perspective, mood), how receivers gate incoming signals ([SVAF](https://arxiv.org/abs/2604.03955)), and how peers maintain identity without a central orchestrator.
 
 **What happens on each message.** When a peer broadcasts a cognitive memory block (CMB), the local SymNode evaluates it via SVAF — Symbolic-Vector Attention Fusion, a receiver-side relevance gate that rejects low-signal messages before they reach Claude's context. If accepted, the MCP server fires a `notifications/claude/channel` notification to Claude Code, which surfaces it as a `<channel>` block in the conversation. Claude sees it, can react, and can broadcast back via `sym_send` or `sym_observe`. No polling. No tool calls. The mesh thinks together.
 
@@ -301,7 +301,7 @@ Use this if you prefer the plugin surface for install and update management. The
 
 - [SVAF paper](https://arxiv.org/abs/2604.03955) — Xu, 2026. *Symbolic-Vector Attention Fusion for Collective Intelligence*. arXiv:2604.03955.
 - [MMP paper](https://arxiv.org/abs/2604.19540) — Xu, 2026. *Mesh Memory Protocol: Semantic Infrastructure for Multi-Agent LLM Systems*. arXiv:2604.19540.
-- [MMP spec v0.2.3](https://sym.bot/spec/mmp) — Mesh Memory Protocol specification (canonical web version).
+- [MMP spec v1.0](https://meshcognition.org/spec/mmp) — Mesh Memory Protocol specification (canonical web version).
 - [sym-swift](https://github.com/sym-bot/sym-swift) — iOS/macOS SDK implementing the same protocol.
 - [sym-relay](https://github.com/sym-bot/sym-relay) — WebSocket relay for cross-network mesh.
 

@@ -85,5 +85,5 @@ exit code 2 rather than competing for the identity.
 
 ## References
 
-- [MMP v0.2.2 Specification](https://sym.bot/spec/mmp) — Sections 5 (Connection), 8 (CAT7), 9 (SVAF)
+- [MMP v1.0 Specification](https://meshcognition.org/spec/mmp) — Sections 5 (Connection), 8 (CAT7), 9 (SVAF)
 - [SVAF Paper](https://arxiv.org/abs/2604.03955) — Xu, 2026

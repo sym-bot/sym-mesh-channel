@@ -7,7 +7,7 @@
     "email": "hongwei@sym.bot",
     "url": "https://sym.bot"
   },
-  "homepage": "https://sym.bot/spec/mmp",
+  "homepage": "https://meshcognition.org/spec/mmp",
   "repository": "https://github.com/sym-bot/sym-mesh-channel",
   "license": "Apache-2.0",
   "keywords": ["mesh", "p2p", "mcp", "channel", "agents", "multi-agent", "bonjour", "cognitive", "svaf", "mmp"],

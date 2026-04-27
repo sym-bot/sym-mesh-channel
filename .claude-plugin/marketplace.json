@@ -18,7 +18,7 @@
         "name": "Hongwei Xu",
         "email": "hongwei@sym.bot"
       },
-      "homepage": "https://sym.bot/spec/mmp",
+      "homepage": "https://meshcognition.org/spec/mmp",
       "repository": "https://github.com/sym-bot/sym-mesh-channel",
       "license": "Apache-2.0",
       "keywords": [
