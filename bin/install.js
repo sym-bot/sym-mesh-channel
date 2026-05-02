@@ -46,10 +46,36 @@ const isPostinstall = args.includes('--postinstall');
 const isProject = args.includes('--project');
 const cmd = args.find((a) => !a.startsWith('--')) || 'init';
 
+// --group <name>: persist a SYM_GROUP env entry into the written .mcp.json /
+// ~/.claude.json so the node joins that group on every Claude Code launch.
+// Without this flag, the env block omits SYM_GROUP and the node falls back
+// to the default _sym._tcp mesh on startup. Runtime sym_join_group hot-swaps
+// only last for the current session — without persistence, peers in named
+// groups silently revert to default and become invisible to teammates.
+const groupArgIdx = args.indexOf('--group');
+const groupArg = groupArgIdx !== -1 ? args[groupArgIdx + 1] : null;
+
 if (cmd !== 'init' && cmd !== 'doctor') {
-  process.stderr.write(`Unknown command: ${cmd}\nUsage: sym-mesh-channel init [--project] [--force]\n       sym-mesh-channel doctor\n`);
+  process.stderr.write(`Unknown command: ${cmd}\nUsage: sym-mesh-channel init [--project] [--force] [--group <name>]\n       sym-mesh-channel doctor\n`);
   process.exit(1);
 }
+
+const KEBAB_CASE_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+function validateGroupValue(value, source) {
+  if (!value) return;
+  if (value === 'default') return;
+  if (!KEBAB_CASE_RE.test(value)) {
+    process.stderr.write(`ERROR: ${source} "${value}" must be kebab-case (e.g. backend-team) or "default".\n`);
+    process.exit(1);
+  }
+}
+validateGroupValue(groupArg, '--group');
+// Apply the same gate to the env-var path. Pre-0.3.4-followup, a malformed
+// SYM_GROUP=' ' or SYM_GROUP=Backend_Team value flowed through unvalidated
+// and got written into the .mcp.json env block as-is, producing an mDNS
+// service type the SymNode would silently fail to register on. Now both
+// inputs share the validator with the same error message shape.
+validateGroupValue(process.env.SYM_GROUP, 'SYM_GROUP');
 
 // ── isStaleEntry: a claude-sym-mesh entry whose server.js path is gone ──
 // Returns true when the entry exists but its args[0] path does not resolve
@@ -74,6 +100,17 @@ function preserveNodeName(entry) {
   return n || null;
 }
 
+// preserveGroup: return the SYM_GROUP from an existing entry's env so
+// rewrites keep the mesh group. Same shape as preserveNodeName — without
+// this, healing a stale entry would drop a previously-persisted group
+// and silently downgrade the node to the default _sym._tcp mesh,
+// stranding teammates who stay in the named group.
+function preserveGroup(entry) {
+  if (!entry || !entry.env || typeof entry.env.SYM_GROUP !== 'string') return null;
+  const g = entry.env.SYM_GROUP.trim();
+  return g || null;
+}
+
 // --postinstall always runs global install (npm postinstall runs from
 // npm's staging directory, not the user's project dir). If both flags
 // are passed, the --project flag is ignored during postinstall.
@@ -88,6 +125,39 @@ const defaultNodeName = `claude-${os.hostname().toLowerCase().replace(/[^a-z0-9-
 
 // SYM_NODE_NAME from env wins over default
 const nodeName = process.env.SYM_NODE_NAME || defaultNodeName;
+
+// Capture the user's *explicit* group intent for this install, distinct
+// from "user didn't ask, use existing or default":
+//   null            → user didn't pass --group or SYM_GROUP
+//   'default'       → user explicitly wants the global _sym._tcp mesh
+//                     (escape hatch: revert from a named group, with --force)
+//   '<kebab-name>'  → user explicitly wants this named group
+const explicitGroup = groupArg !== null ? groupArg
+                    : (process.env.SYM_GROUP || null);
+
+// resolveGroup: per-scope group resolution that respects both the user's
+// explicit intent AND the existing entry's persisted state.
+//
+//   With --force AND an explicit value: flag/env wins. The user is
+//     deliberately overriding state. `--force --group new-team` switches
+//     groups; `--force --group default` reverts to the global mesh.
+//
+//   Without --force, OR with --force but no explicit value: preserve
+//     from the existing entry (heal-path job is to NOT lose user state).
+//     Falls back to the explicit value, then to none.
+//
+// Returns the SYM_GROUP value to write, or null to omit the key entirely
+// (which the caller maps to "leave SYM_GROUP out of the env block, node
+// uses default _sym._tcp on launch").
+function resolveGroup(existingEntry) {
+  const preserved = preserveGroup(existingEntry);
+  if (force && explicitGroup !== null) {
+    return explicitGroup === 'default' ? null : explicitGroup;
+  }
+  if (preserved) return preserved;
+  if (explicitGroup && explicitGroup !== 'default') return explicitGroup;
+  return null;
+}
 
 // ── Resolve server.js path ────────────────────────────────────────
 
@@ -153,6 +223,11 @@ if (useProjectMode) {
   // back to the hostname default on every reinstall.
   const projectNodeName = preserveNodeName(existingProjectEntry) || nodeName;
 
+  // Group resolution priority — see resolveGroup() at top of file.
+  // Summary: --force + explicit flag/env wins; otherwise preserve, then
+  // explicit, then omit. `--group default` with --force = revert to mesh.
+  const projectGroup = resolveGroup(existingProjectEntry);
+
   // Build the MCP entry (identical shape to global mode)
   const projectEntry = {
     command: 'node',
@@ -165,6 +240,11 @@ if (useProjectMode) {
       SYM_RELAY_TOKEN: '',
     },
   };
+  // SYM_GROUP is only written when explicitly set. Omitting it (rather than
+  // writing an empty string) keeps the JSON file minimal for the common
+  // single-team case AND avoids the "default group accidentally pinned"
+  // failure mode where a blank value masks the server.js fallback.
+  if (projectGroup) projectEntry.env.SYM_GROUP = projectGroup;
 
   // Backup existing .mcp.json if present
   let mcpBackupPath = null;
@@ -236,6 +316,7 @@ if (useProjectMode) {
     `✓ sym-mesh-channel configured for project: ${projectDir}`,
     '',
     `  Node name:     ${projectNodeName}${projectEntryIsStale ? ' (preserved from stale entry)' : ''}`,
+    `  Mesh group:    ${projectGroup || 'default (global _sym._tcp mesh)'}`,
     `  Server path:   ${serverJsPath}`,
     `  Wrote:         ${mcpJsonPath}`,
   ];
@@ -312,6 +393,7 @@ if (cmd === 'doctor') {
       scope: 'user-global',
       path: (topEntry.args || [])[0] || '(no path)',
       node: preserveNodeName(topEntry) || '(no SYM_NODE_NAME)',
+      group: preserveGroup(topEntry) || 'default',
       live: !isStaleEntry(topEntry),
     });
   }
@@ -323,6 +405,7 @@ if (cmd === 'doctor') {
       scope: `project ${projPath}`,
       path: (e.args || [])[0] || '(no path)',
       node: preserveNodeName(e) || '(no SYM_NODE_NAME)',
+      group: preserveGroup(e) || 'default',
       live: !isStaleEntry(e),
     });
   }
@@ -336,15 +419,33 @@ if (cmd === 'doctor') {
   console.log('');
   for (const r of rows) {
     console.log(`  [${r.live ? 'live ' : 'STALE'}] ${r.scope}`);
-    console.log(`           node: ${r.node}`);
-    console.log(`           path: ${r.path}`);
+    console.log(`           node:  ${r.node}`);
+    console.log(`           group: ${r.group}`);
+    console.log(`           path:  ${r.path}`);
   }
   const staleCount = rows.filter((r) => !r.live).length;
+
+  // Heuristic: if multiple entries reference the same Claude identity
+  // (same machine) but disagree on group, peers will see each other as
+  // disconnected — same incident pattern that cost ~24h of duplex outage
+  // at SYM.BOT (CMO=default vs COO=sym-bot-team, 2026-05-02). Surface as
+  // a warning so users can spot the mismatch before reaching for the
+  // troubleshooting section.
+  const groups = new Set(rows.map((r) => r.group));
+  const groupMismatch = rows.length > 1 && groups.size > 1;
+
   console.log('');
   if (staleCount > 0) {
     console.log(`${staleCount} stale entr${staleCount === 1 ? 'y' : 'ies'} — run \`sym-mesh-channel init\` to heal.`);
   } else {
     console.log('All entries are live.');
+  }
+  if (groupMismatch) {
+    console.log('');
+    console.log(`⚠ Group mismatch across entries: ${Array.from(groups).join(', ')}.`);
+    console.log('  Nodes in different groups cannot discover each other on Bonjour.');
+    console.log('  If teammates expect to see each other, align the SYM_GROUP env var.');
+    console.log('  See README "Team mesh groups → Persisting your group across restarts".');
   }
   process.exit(0);
 }
@@ -370,6 +471,11 @@ if (existingTopEntry && !force && !topEntryIsStale) {
 // Preserve the prior node name on rewrite so mesh identity doesn't drift.
 const topNodeName = preserveNodeName(existingTopEntry) || nodeName;
 
+// Resolve SYM_GROUP for the global entry — see resolveGroup() at top.
+// Heal-path default preserves; --force lets the user explicitly switch
+// groups (or back to default mesh) in one command.
+const topGroup = resolveGroup(existingTopEntry);
+
 // ── Build the entry ───────────────────────────────────────────────
 
 const entry = {
@@ -389,6 +495,9 @@ const entry = {
     SYM_RELAY_TOKEN: '',
   },
 };
+// SYM_GROUP only emitted when explicitly chosen — see project-mode comment
+// for the rationale. Omitted = node uses the global _sym._tcp default.
+if (topGroup) entry.env.SYM_GROUP = topGroup;
 
 claudeJson.mcpServers['claude-sym-mesh'] = entry;
 
@@ -407,7 +516,11 @@ for (const [projPath, proj] of Object.entries(projects)) {
   if (!projEntry) continue;
   if (!isStaleEntry(projEntry)) continue;
   const projNodeName = preserveNodeName(projEntry) || nodeName;
-  proj.mcpServers['claude-sym-mesh'] = {
+  // Preserve SYM_GROUP on stale-heal — same reason as preserveNodeName.
+  // The user explicitly chose this group at some prior install; healing a
+  // path issue must not silently revert their group membership.
+  const projGroupName = preserveGroup(projEntry);
+  const healedEntry = {
     command: 'node',
     args: [serverJsPath],
     env: {
@@ -416,7 +529,9 @@ for (const [projPath, proj] of Object.entries(projects)) {
       SYM_RELAY_TOKEN: projEntry.env && typeof projEntry.env.SYM_RELAY_TOKEN === 'string' ? projEntry.env.SYM_RELAY_TOKEN : '',
     },
   };
-  healedProjects.push({ path: projPath, node: projNodeName });
+  if (projGroupName) healedEntry.env.SYM_GROUP = projGroupName;
+  proj.mcpServers['claude-sym-mesh'] = healedEntry;
+  healedProjects.push({ path: projPath, node: projNodeName, group: projGroupName });
 }
 
 // ── Atomic write ──────────────────────────────────────────────────
@@ -459,7 +574,7 @@ const launchCmd = `claude --dangerously-load-development-channels server:claude-
 
 const healedLines = healedProjects.length
   ? '\n  Healed stale project-scoped entries (now pointing at fresh server.js):\n' +
-    healedProjects.map((p) => `    • ${p.path}  (node: ${p.node})`).join('\n') + '\n'
+    healedProjects.map((p) => `    • ${p.path}  (node: ${p.node}${p.group ? `, group: ${p.group}` : ''})`).join('\n') + '\n'
   : '';
 
 const nodeNameSuffix = topEntryIsStale ? ' (preserved from stale entry)' : '';
@@ -468,6 +583,7 @@ console.log(`
 ✓ sym-mesh-channel configured globally in ~/.claude.json
 
   Node name:     ${topNodeName}${nodeNameSuffix}
+  Mesh group:    ${topGroup || 'default (global _sym._tcp mesh)'}
   Server path:   ${serverJsPath}
   Backup:        ${backupPath}
 ${healedLines}

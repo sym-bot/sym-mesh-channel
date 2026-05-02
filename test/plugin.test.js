@@ -505,6 +505,205 @@ async function runProjectInstallTests() {
     }
   });
 
+  await testAsync('--project --group <name> persists SYM_GROUP into .mcp.json env', async () => {
+    // SYM_GROUP must be first-class at install time so a teammate's group
+    // membership survives Claude Code restarts. Pre-0.3.4, the only way to
+    // persist a group was to hand-edit ~/.claude.json after running
+    // sym_join_group at runtime — which the README never told users to do.
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-proj-'));
+    try {
+      const { code } = await spawnInstaller(['init', '--project', '--group', 'backend-team'], {
+        cwd: tmpDir,
+        env: { ...process.env, SYM_NODE_NAME: 'claude-test-grp' },
+      });
+      assert.strictEqual(code, 0);
+      const mcp = JSON.parse(fs.readFileSync(path.join(tmpDir, '.mcp.json'), 'utf8'));
+      assert.strictEqual(mcp.mcpServers['claude-sym-mesh'].env.SYM_GROUP, 'backend-team');
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  await testAsync('--project without --group omits SYM_GROUP (default mesh)', async () => {
+    // Omitting SYM_GROUP from the env block (rather than writing an empty
+    // value) lets the server.js fallback select the global _sym._tcp mesh.
+    // An empty SYM_GROUP would shadow the fallback and pin the node to a
+    // nameless service type — silent failure mode.
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-proj-'));
+    try {
+      const { code } = await spawnInstaller(['init', '--project'], {
+        cwd: tmpDir,
+        env: { ...process.env, SYM_NODE_NAME: 'claude-no-grp' },
+      });
+      assert.strictEqual(code, 0);
+      const mcp = JSON.parse(fs.readFileSync(path.join(tmpDir, '.mcp.json'), 'utf8'));
+      const env = mcp.mcpServers['claude-sym-mesh'].env;
+      assert.ok(!('SYM_GROUP' in env), 'SYM_GROUP must be omitted when not requested');
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  await testAsync('global: heal preserves SYM_GROUP across stale-entry rewrite', async () => {
+    // The 2026-05-02 SYM.BOT incident root cause: pre-0.3.4 healing dropped
+    // SYM_GROUP silently, reverting the node to default mesh on next launch
+    // and stranding teammates who stayed in the named group. The fix copies
+    // both SYM_NODE_NAME and SYM_GROUP from the prior entry into the rewrite.
+    const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-home-'));
+    try {
+      const claudeJsonPath = path.join(fakeHome, '.claude.json');
+      fs.writeFileSync(claudeJsonPath, JSON.stringify({
+        mcpServers: {
+          'claude-sym-mesh': {
+            command: 'node',
+            args: ['/nonexistent/stale/server.js'],
+            env: {
+              SYM_NODE_NAME: 'claude-team-member',
+              SYM_GROUP: 'sym-bot-team',
+              SYM_RELAY_URL: '',
+              SYM_RELAY_TOKEN: '',
+            },
+          },
+        },
+      }));
+      const { code } = await spawnInstaller(['init'], {
+        env: { ...process.env, HOME: fakeHome, USERPROFILE: fakeHome },
+      });
+      assert.strictEqual(code, 0);
+      const after = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf8'));
+      const env = after.mcpServers['claude-sym-mesh'].env;
+      assert.strictEqual(env.SYM_NODE_NAME, 'claude-team-member', 'node name must be preserved');
+      assert.strictEqual(env.SYM_GROUP, 'sym-bot-team', 'group must be preserved on heal');
+    } finally {
+      fs.rmSync(fakeHome, { recursive: true, force: true });
+    }
+  });
+
+  await testAsync('global: --force --group <name> overrides preserved SYM_GROUP', async () => {
+    // CTO PR review note 1: --force is the "I am explicitly overriding state"
+    // signal. With --force, an explicit --group should win over the preserved
+    // value so users can switch groups in a single command. Without --force,
+    // preserve still wins (heal path must not lose state) — covered by the
+    // separate stale-heal test above.
+    const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-home-'));
+    try {
+      const claudeJsonPath = path.join(fakeHome, '.claude.json');
+      const liveServerPath = path.join(__dirname, '..', 'server.js');
+      fs.writeFileSync(claudeJsonPath, JSON.stringify({
+        mcpServers: {
+          'claude-sym-mesh': {
+            command: 'node',
+            args: [liveServerPath],
+            env: {
+              SYM_NODE_NAME: 'claude-mover',
+              SYM_GROUP: 'old-team',
+              SYM_RELAY_URL: '',
+              SYM_RELAY_TOKEN: '',
+            },
+          },
+        },
+      }));
+      const { code } = await spawnInstaller(['init', '--force', '--group', 'new-team'], {
+        env: { ...process.env, HOME: fakeHome, USERPROFILE: fakeHome },
+      });
+      assert.strictEqual(code, 0);
+      const after = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf8'));
+      assert.strictEqual(after.mcpServers['claude-sym-mesh'].env.SYM_GROUP, 'new-team',
+        '--force + explicit --group must override preserved SYM_GROUP (one-command switch)');
+    } finally {
+      fs.rmSync(fakeHome, { recursive: true, force: true });
+    }
+  });
+
+  await testAsync('global: --force --group default reverts to global mesh (omits SYM_GROUP)', async () => {
+    // The escape hatch documented in the README. `--group default` must
+    // remove the persisted SYM_GROUP entirely (not write the literal string
+    // "default" into the env block, which would map to a `_default._tcp`
+    // service type). Equivalent: revert to `_sym._tcp` global mesh.
+    const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-home-'));
+    try {
+      const claudeJsonPath = path.join(fakeHome, '.claude.json');
+      const liveServerPath = path.join(__dirname, '..', 'server.js');
+      fs.writeFileSync(claudeJsonPath, JSON.stringify({
+        mcpServers: {
+          'claude-sym-mesh': {
+            command: 'node',
+            args: [liveServerPath],
+            env: { SYM_NODE_NAME: 'claude-r', SYM_GROUP: 'team-x' },
+          },
+        },
+      }));
+      const { code } = await spawnInstaller(['init', '--force', '--group', 'default'], {
+        env: { ...process.env, HOME: fakeHome, USERPROFILE: fakeHome },
+      });
+      assert.strictEqual(code, 0);
+      const env = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf8'))
+        .mcpServers['claude-sym-mesh'].env;
+      assert.ok(!('SYM_GROUP' in env), '--force --group default must omit SYM_GROUP entirely');
+    } finally {
+      fs.rmSync(fakeHome, { recursive: true, force: true });
+    }
+  });
+
+  await testAsync('init rejects malformed SYM_GROUP env var with kebab-case error', async () => {
+    // CTO PR review note 2: KEBAB_CASE_RE must apply to SYM_GROUP env var,
+    // not just the --group CLI flag. Pre-fix, SYM_GROUP=Backend_Team flowed
+    // through unvalidated and got written into the entry as-is, producing
+    // an mDNS service type the SymNode would silently fail to register.
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-proj-'));
+    try {
+      const { code, stderr } = await spawnInstaller(['init', '--project'], {
+        cwd: tmpDir,
+        env: { ...process.env, SYM_GROUP: 'Backend_Team' },
+        allowFail: true,
+      });
+      assert.strictEqual(code, 1, 'malformed SYM_GROUP must exit 1');
+      assert.ok(stderr.includes('SYM_GROUP'), 'error must name the env var, not just --group');
+      assert.ok(stderr.includes('kebab-case'), 'error must explain the constraint');
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  await testAsync('global: doctor reports group per entry and warns on mismatch', async () => {
+    // doctor surfaces SYM_GROUP for every entry so users can spot the
+    // failure mode without first reading the troubleshooting section.
+    const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-home-'));
+    try {
+      const claudeJsonPath = path.join(fakeHome, '.claude.json');
+      const liveServerPath = path.join(__dirname, '..', 'server.js');
+      fs.writeFileSync(claudeJsonPath, JSON.stringify({
+        mcpServers: {
+          'claude-sym-mesh': {
+            command: 'node',
+            args: [liveServerPath],
+            env: { SYM_NODE_NAME: 'claude-a', SYM_GROUP: 'team-x' },
+          },
+        },
+        projects: {
+          '/some/project': {
+            mcpServers: {
+              'claude-sym-mesh': {
+                command: 'node',
+                args: [liveServerPath],
+                env: { SYM_NODE_NAME: 'claude-b', SYM_GROUP: 'team-y' },
+              },
+            },
+          },
+        },
+      }));
+      const { code, stdout } = await spawnInstallerCapture(['doctor'], {
+        env: { ...process.env, HOME: fakeHome, USERPROFILE: fakeHome },
+      });
+      assert.strictEqual(code, 0);
+      assert.ok(stdout.includes('group: team-x'), 'doctor must show team-x');
+      assert.ok(stdout.includes('group: team-y'), 'doctor must show team-y');
+      assert.ok(stdout.includes('Group mismatch'), 'doctor must flag mismatch across entries');
+    } finally {
+      fs.rmSync(fakeHome, { recursive: true, force: true });
+    }
+  });
+
   await testAsync('--project + --postinstall falls back to global install (no .mcp.json written)', async () => {
     // --postinstall always runs global (postinstall runs from npm staging
     // dir, not the user's project). When paired with --project we want

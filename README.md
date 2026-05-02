@@ -63,6 +63,14 @@ To customise your mesh identity, set `SYM_NODE_NAME` before running init:
 SYM_NODE_NAME=claude-alice npx @sym-bot/mesh-channel init --force
 ```
 
+To pin this node into a named team group at install time so the membership survives Claude Code restarts, pass `--group <name>` (or set `SYM_GROUP=<name>` in the environment):
+
+```bash
+SYM_NODE_NAME=claude-alice npx @sym-bot/mesh-channel init --force --group backend-team
+```
+
+Without `--group`, the node joins the global `_sym._tcp` mesh on every launch — runtime hot-swaps via `sym_join_group` only last for the current session and revert on restart. See [Team mesh groups](#team-mesh-groups) for the full story.
+
 **Real-time push is a separate upgrade.** The command above gives you all 11 MCP tools immediately. To additionally have peer messages *appear in Claude's context mid-turn without a tool call* (the "Claude thinks with the mesh" experience), launch Claude Code with the Channels flag:
 
 ```bash
@@ -121,7 +129,37 @@ Parsed invite: sym://group/backend-team
 Hot-swapped from group "default" to "backend-team".
 ```
 
-No restart. No `~/.claude.json` editing. Teammates on the same LAN now see each other; `backend-team` and `frontend-team` live in isolated mDNS spaces.
+No restart needed for the current session. Teammates on the same LAN now see each other; `backend-team` and `frontend-team` live in isolated mDNS spaces.
+
+> **`sym_join_group` is runtime-only.** On the next Claude Code launch, the node restarts from its `~/.claude.json` config — if `SYM_GROUP` isn't persisted there, it reverts to the global mesh and your teammates' peer count silently drops to zero. Persist your membership before closing the session (see below).
+
+### Persisting your group across restarts
+
+The hot-swap above is convenient for trying a group, but a real team setup needs the group baked into the MCP env block so every Claude Code launch joins automatically. Two paths:
+
+```bash
+# (a) Reinstall with the --group flag — preserves SYM_NODE_NAME from the
+#     existing entry, adds SYM_GROUP, atomically rewrites ~/.claude.json:
+npx @sym-bot/mesh-channel init --force --group backend-team
+
+# (b) For a project-scoped install (multi-project laptop):
+cd path/to/project
+SYM_NODE_NAME=claude-myproject npx @sym-bot/mesh-channel init --project --group backend-team
+```
+
+After either path, restart Claude Code once; subsequent sessions auto-join the group. To switch groups on a live entry use `--force` together with `--group`:
+
+```bash
+# Switch from one named group to another (one command):
+npx @sym-bot/mesh-channel init --force --group new-team
+
+# Revert to the global mesh (escape hatch):
+npx @sym-bot/mesh-channel init --force --group default
+```
+
+Without `--force`, an existing persisted `SYM_GROUP` always wins over a flag — the heal path's job is to never lose user state on a routine reinstall. With `--force`, the flag is the explicit override and takes precedence.
+
+Run `npx @sym-bot/mesh-channel doctor` any time to see which group each `claude-sym-mesh` entry is configured for. The doctor flags group mismatches across user-global and project-scoped entries — the most common cause of "we're on the same wifi but my teammate's node never appears in `sym_peers`".
 
 ### Distributed team (via relay)
 
@@ -257,6 +295,19 @@ npx -y @sym-bot/mesh-channel init
 ```
 
 `init` preserves each entry's `SYM_NODE_NAME` so your mesh identity doesn't drift. Live entries are left alone; `--force` is only needed to overwrite a live entry deliberately. Restart Claude Code after healing — MCP servers are spawned at session start and won't pick up config changes mid-session.
+
+### Peers connect (Claude Code starts cleanly) but never appear in `sym_peers`
+
+Almost always a **mesh group mismatch** — Bonjour scopes discovery by service type (`_<group>._tcp`), so `default` and `backend-team` nodes on the same wifi are invisible to each other. Two diagnostics:
+
+```
+> sym_status         # shows: Group: <name> (<service-type>)
+> sym_groups_discover  # shows every group currently advertising on the LAN
+```
+
+If your teammate's node is on a different group, align via `sym_join_group` (this session) and persist via `init --group <name>` (future sessions). Run `npx @sym-bot/mesh-channel doctor` to confirm the persisted group on every entry — the doctor explicitly flags mismatches across user-global and project-scoped configs.
+
+This is the failure pattern where every other indicator looks healthy: `sym_status` says `Peers: 0` but the underlying SymNode is fine, the mDNS service is registered, and the relay (if any) is connected — they're just announced on a service type your peer isn't browsing.
 
 ### Peers don't see each other on the same wifi
 

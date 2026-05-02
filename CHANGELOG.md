@@ -1,5 +1,62 @@
 # Changelog
 
+## 0.3.4
+
+### Added
+
+- **`SYM_GROUP` is now first-class in the installer.** `init` accepts a
+  `--group <name>` flag and reads the `SYM_GROUP` env var; both paths
+  persist the chosen group into the `~/.claude.json` (or project
+  `.mcp.json`) env block so every Claude Code launch auto-joins the
+  named group instead of the global `_sym._tcp` mesh.
+
+  Resolution order is `--force`-aware:
+    - With `--force` and an explicit `--group`/`SYM_GROUP`: flag/env wins
+      (one-command group switch on a live entry).
+    - Without `--force`, or with `--force` but no explicit value:
+      preserved value from any existing entry > explicit > none (omit).
+
+  `--force --group default` (or `SYM_GROUP=default`) is the explicit
+  escape hatch to revert a node from a named group back to the global
+  mesh — removes `SYM_GROUP` from the env block entirely rather than
+  writing the literal string "default".
+
+  Both `--group` and `SYM_GROUP` env values are validated against the
+  same kebab-case regex; malformed values exit with a clear error
+  before any file write.
+
+- **`doctor` now reports the persisted group per entry** and warns when
+  user-global and project-scoped entries disagree on `SYM_GROUP`.
+  Group-mismatch is the most common cause of "peers never appear in
+  `sym_peers`" with no other failure signal — surfacing it inline saves
+  the diagnostic walk that motivated this release.
+
+- **README** gains a "Persisting your group across restarts" subsection
+  under Team mesh groups, plus a troubleshooting entry covering the
+  group-mismatch failure mode. Quick-start shows the `--group` flag.
+
+### Fixed
+
+- **Stale-entry heal preserves `SYM_GROUP` alongside `SYM_NODE_NAME`.**
+  Previously, healing a stale `claude-sym-mesh` entry (args[0] points at
+  a missing server.js) silently dropped any persisted `SYM_GROUP`,
+  reverting the node to the default mesh on next launch and stranding
+  teammates who stayed in the named group. The heal path now copies
+  both fields from the prior entry into the rewrite.
+
+  Same fix applied to project-scoped entry healing under
+  `claudeJson.projects[<path>].mcpServers`.
+
+### Why this matters
+
+Before 0.3.4, the only way to persist a group was to hand-edit
+`~/.claude.json`. The README pitched `sym_join_group` as the team-mesh
+UX, but that tool is runtime-only — the next Claude Code launch reverted
+the node to the default mesh, peer count dropped to zero, and the user
+saw no diagnostic signal. The 2026-05-02 SYM.BOT incident (CMO in
+`default`, COO in `sym-bot-team`, ~24h of silent duplex outage) traced
+directly to this gap.
+
 ## 0.3.3
 
 ### Fixed
