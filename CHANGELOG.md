@@ -10,8 +10,20 @@
   `.mcp.json`) env block so every Claude Code launch auto-joins the
   named group instead of the global `_sym._tcp` mesh.
 
-  Resolution order: `--group <name>` > `SYM_GROUP` env > preserved value
-  from any existing entry > none (omit; node uses default).
+  Resolution order is `--force`-aware:
+    - With `--force` and an explicit `--group`/`SYM_GROUP`: flag/env wins
+      (one-command group switch on a live entry).
+    - Without `--force`, or with `--force` but no explicit value:
+      preserved value from any existing entry > explicit > none (omit).
+
+  `--force --group default` (or `SYM_GROUP=default`) is the explicit
+  escape hatch to revert a node from a named group back to the global
+  mesh — removes `SYM_GROUP` from the env block entirely rather than
+  writing the literal string "default".
+
+  Both `--group` and `SYM_GROUP` env values are validated against the
+  same kebab-case regex; malformed values exit with a clear error
+  before any file write.
 
 - **`doctor` now reports the persisted group per entry** and warns when
   user-global and project-scoped entries disagree on `SYM_GROUP`.

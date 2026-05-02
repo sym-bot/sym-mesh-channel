@@ -147,7 +147,17 @@ cd path/to/project
 SYM_NODE_NAME=claude-myproject npx @sym-bot/mesh-channel init --project --group backend-team
 ```
 
-After either path, restart Claude Code once; subsequent sessions auto-join the group. To leave a group, re-run with `--group default` (which removes the persisted SYM_GROUP and reverts to the global `_sym._tcp` mesh).
+After either path, restart Claude Code once; subsequent sessions auto-join the group. To switch groups on a live entry use `--force` together with `--group`:
+
+```bash
+# Switch from one named group to another (one command):
+npx @sym-bot/mesh-channel init --force --group new-team
+
+# Revert to the global mesh (escape hatch):
+npx @sym-bot/mesh-channel init --force --group default
+```
+
+Without `--force`, an existing persisted `SYM_GROUP` always wins over a flag — the heal path's job is to never lose user state on a routine reinstall. With `--force`, the flag is the explicit override and takes precedence.
 
 Run `npx @sym-bot/mesh-channel doctor` any time to see which group each `claude-sym-mesh` entry is configured for. The doctor flags group mismatches across user-global and project-scoped entries — the most common cause of "we're on the same wifi but my teammate's node never appears in `sym_peers`".
 

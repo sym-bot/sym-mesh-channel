@@ -61,10 +61,21 @@ if (cmd !== 'init' && cmd !== 'doctor') {
 }
 
 const KEBAB_CASE_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-if (groupArg && !KEBAB_CASE_RE.test(groupArg) && groupArg !== 'default') {
-  process.stderr.write(`ERROR: --group "${groupArg}" must be kebab-case (e.g. backend-team) or "default".\n`);
-  process.exit(1);
+function validateGroupValue(value, source) {
+  if (!value) return;
+  if (value === 'default') return;
+  if (!KEBAB_CASE_RE.test(value)) {
+    process.stderr.write(`ERROR: ${source} "${value}" must be kebab-case (e.g. backend-team) or "default".\n`);
+    process.exit(1);
+  }
 }
+validateGroupValue(groupArg, '--group');
+// Apply the same gate to the env-var path. Pre-0.3.4-followup, a malformed
+// SYM_GROUP=' ' or SYM_GROUP=Backend_Team value flowed through unvalidated
+// and got written into the .mcp.json env block as-is, producing an mDNS
+// service type the SymNode would silently fail to register on. Now both
+// inputs share the validator with the same error message shape.
+validateGroupValue(process.env.SYM_GROUP, 'SYM_GROUP');
 
 // ── isStaleEntry: a claude-sym-mesh entry whose server.js path is gone ──
 // Returns true when the entry exists but its args[0] path does not resolve
@@ -115,15 +126,38 @@ const defaultNodeName = `claude-${os.hostname().toLowerCase().replace(/[^a-z0-9-
 // SYM_NODE_NAME from env wins over default
 const nodeName = process.env.SYM_NODE_NAME || defaultNodeName;
 
-// Resolution order for the new install's SYM_GROUP value:
-//   1. --group <name> CLI flag
-//   2. SYM_GROUP env var
-//   3. nothing (env block omits SYM_GROUP; node uses default _sym._tcp)
-// The "preserve from existing entry" path is handled separately below
-// per scope, so a re-install/heal never silently drops a configured group.
-const groupName = (groupArg && groupArg !== 'default') ? groupArg
-                : (process.env.SYM_GROUP && process.env.SYM_GROUP !== 'default') ? process.env.SYM_GROUP
-                : null;
+// Capture the user's *explicit* group intent for this install, distinct
+// from "user didn't ask, use existing or default":
+//   null            → user didn't pass --group or SYM_GROUP
+//   'default'       → user explicitly wants the global _sym._tcp mesh
+//                     (escape hatch: revert from a named group, with --force)
+//   '<kebab-name>'  → user explicitly wants this named group
+const explicitGroup = groupArg !== null ? groupArg
+                    : (process.env.SYM_GROUP || null);
+
+// resolveGroup: per-scope group resolution that respects both the user's
+// explicit intent AND the existing entry's persisted state.
+//
+//   With --force AND an explicit value: flag/env wins. The user is
+//     deliberately overriding state. `--force --group new-team` switches
+//     groups; `--force --group default` reverts to the global mesh.
+//
+//   Without --force, OR with --force but no explicit value: preserve
+//     from the existing entry (heal-path job is to NOT lose user state).
+//     Falls back to the explicit value, then to none.
+//
+// Returns the SYM_GROUP value to write, or null to omit the key entirely
+// (which the caller maps to "leave SYM_GROUP out of the env block, node
+// uses default _sym._tcp on launch").
+function resolveGroup(existingEntry) {
+  const preserved = preserveGroup(existingEntry);
+  if (force && explicitGroup !== null) {
+    return explicitGroup === 'default' ? null : explicitGroup;
+  }
+  if (preserved) return preserved;
+  if (explicitGroup && explicitGroup !== 'default') return explicitGroup;
+  return null;
+}
 
 // ── Resolve server.js path ────────────────────────────────────────
 
@@ -189,11 +223,10 @@ if (useProjectMode) {
   // back to the hostname default on every reinstall.
   const projectNodeName = preserveNodeName(existingProjectEntry) || nodeName;
 
-  // Group resolution priority for project-mode rewrite:
-  //   1. existing entry's SYM_GROUP (preserve across reinstalls/heals)
-  //   2. --group flag or SYM_GROUP env (user-provided this run)
-  //   3. nothing (omit SYM_GROUP; node falls back to default _sym._tcp)
-  const projectGroup = preserveGroup(existingProjectEntry) || groupName;
+  // Group resolution priority — see resolveGroup() at top of file.
+  // Summary: --force + explicit flag/env wins; otherwise preserve, then
+  // explicit, then omit. `--group default` with --force = revert to mesh.
+  const projectGroup = resolveGroup(existingProjectEntry);
 
   // Build the MCP entry (identical shape to global mode)
   const projectEntry = {
@@ -438,12 +471,10 @@ if (existingTopEntry && !force && !topEntryIsStale) {
 // Preserve the prior node name on rewrite so mesh identity doesn't drift.
 const topNodeName = preserveNodeName(existingTopEntry) || nodeName;
 
-// Preserve a previously-persisted SYM_GROUP across reinstalls/heals.
-// Without this, healing a stale entry would silently drop the configured
-// group and downgrade the node to the default _sym._tcp mesh — peers in
-// the named group would no longer see this node, and the user would have
-// no diagnostic signal beyond "they vanished from sym_peers".
-const topGroup = preserveGroup(existingTopEntry) || groupName;
+// Resolve SYM_GROUP for the global entry — see resolveGroup() at top.
+// Heal-path default preserves; --force lets the user explicitly switch
+// groups (or back to default mesh) in one command.
+const topGroup = resolveGroup(existingTopEntry);
 
 // ── Build the entry ───────────────────────────────────────────────
 
