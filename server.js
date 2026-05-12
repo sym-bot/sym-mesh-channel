@@ -241,14 +241,25 @@ function registerNodeHandlers(n) {
     const focus = entry.cmb?.fields?.focus?.text || entry.content || '';
     const mood = entry.cmb?.fields?.mood?.text || '';
     const moodSuffix = mood && mood !== 'neutral' ? ` (mood: ${mood})` : '';
-    // Store the rendered CMB body so the agent can sym_fetch it by [mNNN] ID,
-    // matching the contract stated in the MCP instructions and the behaviour
-    // of the raw-text `message` path. Without this, CAT7 CMBs (the primary
-    // traffic — sym_send / sym_observe) arrive as headlines with no
-    // retrievable body, degrading real-time duplex to headline-only.
-    const body = entry.content || focus;
+    // Store the rendered CMB body so the agent can sym_fetch it by [mNNN] ID.
+    // When the CMB carries an opaque payload alongside CAT7 fields, append a
+    // PAYLOAD section to the stored body so sym_fetch returns it intact;
+    // header gains a [+payload Nb] indicator so the receiver knows there's
+    // structured data beyond CAT7 and should sym_fetch to consume it.
+    const payload = entry.cmb?.payload;
+    const hasPayload = payload !== undefined && payload !== null;
+    let body = entry.content || focus;
+    let payloadSuffix = '';
+    if (hasPayload) {
+      const serialized = (() => {
+        try { return JSON.stringify(payload, null, 2); }
+        catch { return String(payload); }
+      })();
+      body = `${body}\n\n---PAYLOAD---\n${serialized}`;
+      payloadSuffix = ` [+payload ${serialized.length}b]`;
+    }
     const msgId = storeMessage(source, body);
-    pushChannel('cmb', `[${source}] ${focus}${moodSuffix} [${msgId}]`);
+    pushChannel('cmb', `[${source}] ${focus}${moodSuffix}${payloadSuffix} [${msgId}]`);
   });
 
   n.on('message', (from, content) => {
@@ -335,6 +346,14 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
               'Target peer: either the peer display name (e.g. "claude-research-win") or the full nodeId. ' +
               'Call sym_peers first if unsure which peers are connected. Omit to broadcast to all peers.',
           },
+          payload: {
+            description:
+              'Optional opaque payload riding alongside CAT7 fields. Use when carrying data beyond ' +
+              'CAT7 — e.g. an LLM request/response substrate protocol puts the prompt + request_id ' +
+              'in `payload` rather than smuggling JSON through `motivation` (which is reserved for ' +
+              'CAT7 semantics). Receivers see the payload via sym_fetch on the channel notification. ' +
+              'Any JSON-serializable value.',
+          },
         },
         required: ['focus'],
       },
@@ -361,6 +380,12 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
               valence: { type: 'number' },
               arousal: { type: 'number' },
             },
+          },
+          payload: {
+            description:
+              'Optional opaque payload riding alongside CAT7 fields. Use when broadcasting data ' +
+              'beyond CAT7 (e.g. llm-capability-advertise carrying served_capabilities). ' +
+              'Any JSON-serializable value.',
           },
         },
         required: ['focus'],
@@ -493,7 +518,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
         targetPeerId = matches[0].peerId;
       }
 
-      const entry = node.remember(fields, targetPeerId ? { to: targetPeerId } : {});
+      const sendOpts = {};
+      if (targetPeerId) sendOpts.to = targetPeerId;
+      if (args.payload !== undefined && args.payload !== null) sendOpts.payload = args.payload;
+      const entry = node.remember(fields, sendOpts);
       if (!entry) {
         return { content: [{ type: 'text', text: 'Duplicate — CMB already in memory, not re-broadcast.' }] };
       }
@@ -513,7 +541,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
         perspective: args.perspective || NODE_NAME,
         mood: args.mood || { text: 'neutral', valence: 0, arousal: 0 },
       };
-      const entry = node.remember(fields);
+      const observeOpts = {};
+      if (args.payload !== undefined && args.payload !== null) observeOpts.payload = args.payload;
+      const entry = node.remember(fields, observeOpts);
       return { content: [{ type: 'text', text: entry ? `Observed: ${entry.key}` : 'Duplicate — already in memory.' }] };
     }
 
