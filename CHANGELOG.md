@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.3.5
+
+### Added
+
+- **Opaque payload on `sym_send` / `sym_observe`.** Both tools accept
+  an optional `payload` argument carrying data beyond CAT7 — any
+  JSON-serializable value. Forwarded to `SymNode.remember(fields, {
+  payload, … })` (requires `@sym-bot/sym` ≥ 0.5.8) and rides the wire
+  frame to peers. Used by substrate-level protocols that need to carry
+  structured data alongside CAT7 (e.g. LLM request/response, where the
+  prompt + request_id ride in `payload` rather than getting smuggled
+  through `motivation`).
+- **Channel notifications surface payload-bearing CMBs.** When an
+  incoming peer CMB carries `cmb.payload`, the header gains a
+  `[+payload Nb]` indicator and the body stored by `sym_fetch`
+  includes a `---PAYLOAD---` section with the serialized payload.
+  Receivers learn from the header that there's structured data beyond
+  CAT7 and call `sym_fetch` to consume it.
+- Base MCP instructions now teach agents to recognise the
+  `[+payload Nb]` header and to pass structured responses via the
+  `payload` argument when emitting substrate-level CMBs.
+
+### Compatibility
+
+- Omitting `payload` produces a v0.3.4-shaped CAT7 CMB byte-for-byte.
+- Old peers (without `cmb.payload`) surface unchanged headers — no
+  `[+payload …]` indicator, no PAYLOAD section in the body.
+
 ## 0.3.4
 
 ### Added
