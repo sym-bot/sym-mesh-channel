@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.6
+
+### Added
+
+- **Group discovery beacon.** This MCP node now advertises its mesh group on a shared `_symgroups._tcp` service (group name in TXT) via the pure-JS `bonjour-service` — published on start, re-published on `sym_join_group` hot-swap, torn down on shutdown. Makes the Claude/MCP node discoverable by the `sym` CLI's `sym groups` command **cross-platform, including Windows** (where Apple's `dns-sd` is absent), so CLI-daemon and Claude/MCP nodes list together. Discovery-only — comms stay isolated on the group's own `_<group>._tcp`. `bonjour-service` pinned as a direct dependency. Validated on Windows 11.
+- **Operational note:** a session started before 0.3.6 must restart to begin beaconing.
+
 ## 0.3.5
 
 ### Added

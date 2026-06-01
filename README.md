@@ -103,6 +103,8 @@ With the Channels flag enabled, real-time push is bidirectional: peer events arr
 
 By default every `sym-mesh-channel` node joins the global `_sym._tcp` mesh — every peer on the network sees every other peer. For a company with multiple teams, that's too noisy. Mesh groups (MMP §5.8) isolate each team at the mDNS layer so `backend-team` and `frontend-team` can't see each other's signals at all.
 
+> **Discoverable by the `sym` CLI (since 0.3.6).** This node advertises its group on a shared `_symgroups._tcp` discovery beacon, so the [`sym` CLI](https://www.npmjs.com/package/@sym-bot/sym)'s `sym groups` lists this Claude/MCP node alongside CLI-daemon nodes — cross-platform, including Windows (where Apple's `dns-sd` is absent). Discovery-only; comms stay isolated on the group's own service type. *(A restart is needed for sessions started before 0.3.6 to begin beaconing.)*
+
 ### Same office (LAN)
 
 **Team lead creates the group from any Claude Code session:**
