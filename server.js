@@ -763,6 +763,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
       RELAY_URL = relayUrl;
       RELAY_TOKEN = relayToken;
 
+      publishGroupBeacon();   // re-advertise the new group on _symgroups._tcp
+
       return {
         content: [{
           type: 'text',
@@ -887,6 +889,7 @@ let shuttingDown = false;
 async function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
+  stopGroupBeacon();
   try {
     await node.stop();
   } catch {
@@ -899,11 +902,36 @@ process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT',  () => shutdown('SIGINT'));
 process.on('SIGHUP',  () => shutdown('SIGHUP'));
 
+// ── Group discovery beacon (MMP §5.8) ──────────────────────────
+// Mirror the sym CLI daemon: advertise this node's group on the shared
+// `_symgroups._tcp` service (group name in TXT) via the pure-JS bonjour-service,
+// so `sym groups` lists this Claude/MCP node cross-platform alongside
+// CLI-daemon nodes. Discovery-only — comms stay on the group's own
+// `_<group>._tcp`. Re-published on group hot-swap; torn down on shutdown.
+let groupBeacon = null;
+function publishGroupBeacon() {
+  try {
+    const { Bonjour } = require('bonjour-service');
+    if (groupBeacon) { try { groupBeacon.unpublishAll(); groupBeacon.destroy(); } catch {} groupBeacon = null; }
+    groupBeacon = new Bonjour();
+    groupBeacon.publish({ name: NODE_NAME, type: 'symgroups', port: (node && node._port) || 7777, txt: { group: GROUP, node: NODE_NAME } });
+  } catch (e) {
+    process.stderr.write(`group beacon unavailable: ${e?.message || e}\n`);
+  }
+}
+function stopGroupBeacon() {
+  if (!groupBeacon) return;
+  try { groupBeacon.unpublishAll(() => { try { groupBeacon.destroy(); } catch {} }); } catch {}
+  groupBeacon = null;
+}
+
 async function main() {
   // Start SymNode — connects to relay as a peer. The startup primer is
   // computed at module-load time (see BASE_INSTRUCTIONS above) and is
   // already embedded in the MCP server's initialize-response payload.
   await node.start();
+
+  publishGroupBeacon();
 
   // Start MCP server — communicates with Claude Code via stdio
   const transport = new StdioServerTransport();
