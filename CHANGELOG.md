@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.7
+
+### Changed
+
+- **Bumped `@sym-bot/sym` dependency `^0.5.8` → `^0.7.4`** to track the current sym stack. The range had drifted: sym moved through 0.6.x/0.7.x (mesh groups, Windows portability) while this wrapper still declared `^0.5.8`, so an installed sym ≥0.6 showed as `invalid` and a reinstall could nest a stale 0.5.x that shadows the global. Pinning `^0.7.4` makes the dependency honest and, in particular, **requires the loopback-capable sym (≥0.7.4)** — co-resident nodes mesh over `127.0.0.1` with no network interface (Wi-Fi off). No code change in this package; dependency-range correctness only.
+
 ## 0.3.6
 
 ### Added
