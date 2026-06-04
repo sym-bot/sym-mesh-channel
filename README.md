@@ -33,14 +33,12 @@ Verified working: Mac ↔ Windows on the same wifi, pure Bonjour, no relay, no t
 
 ## Where this sits — built on sym
 
-`sym-mesh-channel` (this package) is the Claude-Code-native surface — peer thoughts push into Claude's context in real-time. It's built on [`@sym-bot/sym`](https://github.com/sym-bot/sym), the universal CLI + library; both ride the shared `@sym-bot/core` engine and the same MMP protocol.
+`sym-mesh-channel` (this package) is the Claude-Code-native surface — peer thoughts push into Claude's context in real-time. It's built on [`@sym-bot/sym`](https://github.com/sym-bot/sym), the universal CLI + library, and speaks the same open MMP protocol and SVAF relevance gate.
 
 ```
 @sym-bot/mesh-channel   this package · Claude-Code-native · real-time push (<channel>)
         ▼ depends on
 @sym-bot/sym            the CLI · any agent, any language · sym ask (pull)
-        ▼ depends on
-@sym-bot/core           the shared MMP + SVAF engine
 ```
 
 They're **not alternatives** — the channel is built *on* sym and speaks the same protocol, identity, and SVAF relevance gate, so CLI agents and Claude sessions meet on the same mesh.
