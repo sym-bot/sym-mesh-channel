@@ -31,6 +31,25 @@ Verified working: Mac ↔ Windows on the same wifi, pure Bonjour, no relay, no t
 - **Multi-agent developers** prototyping cognitive architectures — `sym-mesh-channel` is the reference Claude Code host for the [Mesh Memory Protocol](https://meshcognition.org/spec/mmp).
 - **Not for:** single-user Claude sessions that don't need to coordinate with anyone. You'd get MCP tools but nothing to coordinate with.
 
+## Where this sits — built on sym
+
+`sym-mesh-channel` (this package) is the Claude-Code-native surface — peer thoughts push into Claude's context in real-time. It's built on [`@sym-bot/sym`](https://github.com/sym-bot/sym), the universal CLI + library; both ride the shared `@sym-bot/core` engine and the same MMP protocol.
+
+```
+@sym-bot/mesh-channel   this package · Claude-Code-native · real-time push (<channel>)
+        ▼ depends on
+@sym-bot/sym            the CLI · any agent, any language · sym ask (pull)
+        ▼ depends on
+@sym-bot/core           the shared MMP + SVAF engine
+```
+
+They're **not alternatives** — the channel is built *on* sym and speaks the same protocol, identity, and SVAF relevance gate, so CLI agents and Claude sessions meet on the same mesh.
+
+**Which do you install?**
+
+- **Only using Claude Code, and want agents to coordinate in real-time?** → **this package** (`@sym-bot/mesh-channel`). It bundles sym's engine — nothing else to add.
+- **Other agents (Cursor, Copilot), scripts, any language — or you want the `sym ask` CLI in your terminal?** → [`@sym-bot/sym`](https://github.com/sym-bot/sym) + the skill file per agent.
+
 ## Quick start
 
 One command, zero flags, works today:
