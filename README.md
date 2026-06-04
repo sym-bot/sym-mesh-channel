@@ -15,6 +15,7 @@ npm install -g @sym-bot/mesh-channel && claude --dangerously-load-development-ch
 [![MMP arXiv](https://img.shields.io/badge/arXiv-2604.19540-b31b1b.svg)](https://arxiv.org/abs/2604.19540)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D18-green)](https://nodejs.org)
+[![中文](https://img.shields.io/badge/lang-%E4%B8%AD%E6%96%87-red)](README_zh.md)
 
 ---
 
