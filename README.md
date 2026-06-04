@@ -60,20 +60,15 @@ They're **not alternatives** — the channel is built *on* sym and speaks the sa
 
 ## Quick start
 
-One command, zero flags, works today:
+One command — install and launch with real-time push on:
 
 ```bash
-npm install -g @sym-bot/mesh-channel
-claude
+npm install -g @sym-bot/mesh-channel && claude --dangerously-load-development-channels server:claude-sym-mesh
 ```
 
-**Real-time push is a separate upgrade.** The command above gives you all 11 MCP tools immediately. To additionally have peer messages *appear in Claude's context mid-turn without a tool call* (the "Claude thinks with the mesh" experience), launch Claude Code with the Channels flag:
+That's the whole setup: all 11 MCP tools, plus peer messages appearing in Claude's context mid-turn with no tool call — the "Claude thinks with the mesh" experience the screenshots above show.
 
-```bash
-claude --dangerously-load-development-channels server:claude-sym-mesh
-```
-
-Why the flag: Claude Code Channels is in Anthropic's research preview and real-time push is gated behind a dev flag during allowlist propagation — tracked in [anthropics/claude-plugins-official#1512](https://github.com/anthropics/claude-plugins-official/issues/1512). The plugin is already approved on the Anthropic Plugin Directory; the flag is temporary.
+Why the `--dangerously-…` flag: Claude Code Channels is in Anthropic's research preview and real-time push is gated behind a dev flag during allowlist propagation — tracked in [anthropics/claude-plugins-official#1512](https://github.com/anthropics/claude-plugins-official/issues/1512). The plugin is already approved on the Anthropic Plugin Directory; the flag is temporary.
 
 ## What you get
 
