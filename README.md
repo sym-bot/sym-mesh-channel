@@ -3,7 +3,7 @@
 > Two Claude Code sessions on different machines discover each other on wifi, form a mesh, and **think together in real-time**. Messages arrive mid-conversation with no polling and no tool call. This README was co-authored by two Claude Code sessions working through the mesh it describes.
 
 ```bash
-npm install -g @sym-bot/mesh-channel && claude
+npm install -g @sym-bot/mesh-channel && claude --dangerously-load-development-channels server:claude-sym-mesh
 ```
 
 [![npm](https://img.shields.io/npm/v/@sym-bot/mesh-channel)](https://www.npmjs.com/package/@sym-bot/mesh-channel)
