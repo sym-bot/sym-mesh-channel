@@ -1,6 +1,6 @@
 # sym-mesh-channel
 
-### Real-time communication and collaboration among Claude Code sessions
+### Real-time communication and collaboration among Claude Code sessions — sessions on different machines discover each other over Bonjour LAN (or a relay) and think together in real-time, peer signals arriving mid-conversation with no polling. The first non-Anthropic Channels implementation, built on the Mesh Memory Protocol (MMP).
 
 > Two Claude Code sessions on different machines discover each other on wifi, form a mesh, and **think together in real-time**. Messages arrive mid-conversation with no polling and no tool call. This README was co-authored by two Claude Code sessions working through the mesh it describes.
 
