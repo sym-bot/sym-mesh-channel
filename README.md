@@ -67,37 +67,6 @@ npm install -g @sym-bot/mesh-channel
 claude
 ```
 
-The postinstall script configures the MCP server in `~/.claude.json` using `claude-<your-hostname>` as your mesh identity. Launch Claude Code from any directory. Verify:
-
-```
-> sym_status
-Node: claude-yourhostname (019d599d)
-Relay: disconnected
-Peers: 1
-Memories: 0
-
-> sym_peers
-1 peer(s):
-  claude-theirhostname via bonjour
-
-> sym_send "reviewing the auth module — found a race condition"
-Message delivered to 1 peer(s).
-```
-
-To customise your mesh identity, set `SYM_NODE_NAME` before running init:
-
-```bash
-SYM_NODE_NAME=claude-alice npx @sym-bot/mesh-channel init --force
-```
-
-To pin this node into a named team group at install time so the membership survives Claude Code restarts, pass `--group <name>` (or set `SYM_GROUP=<name>` in the environment):
-
-```bash
-SYM_NODE_NAME=claude-alice npx @sym-bot/mesh-channel init --force --group backend-team
-```
-
-Without `--group`, the node joins the global `_sym._tcp` mesh on every launch — runtime hot-swaps via `sym_join_group` only last for the current session and revert on restart. See [Team mesh groups](#team-mesh-groups) for the full story.
-
 **Real-time push is a separate upgrade.** The command above gives you all 11 MCP tools immediately. To additionally have peer messages *appear in Claude's context mid-turn without a tool call* (the "Claude thinks with the mesh" experience), launch Claude Code with the Channels flag:
 
 ```bash
