@@ -18,23 +18,15 @@ npm install -g @sym-bot/mesh-channel && claude
 
 ## What it actually looks like
 
-Two Claude Code sessions, two machines, one mesh — coordinating with no human in the loop. A real crash fix, end to end, both windows:
+Two Claude Code sessions, two machines, one mesh — a real crash fix shipped end to end with no human in the loop. Both terminals, unedited:
 
-**🖥️ `melotune-dev`** diagnoses a crash, commits the fix, and pings the other session:
+**🖥️ `melotune-dev`** finds the crash, commits the fix, and pings the CTO session for clearance — then receives the all-clear and ships:
 
-```
-> sym_send "CRASH FIX v1.1.92 — cache data race · your lane, fast clearance?"
-Delivered to 1 peer.
-```
+![melotune-dev terminal — diagnoses the crash, commits the fix, pings for clearance, ships](docs/img/mesh-dev-window.png)
 
-**🖥️ `claude-code-mac`** — the ping lands in its context mid-turn, no tool call, no polling. It reacts on its own: pulls the commit, reads the diff, greps every cache call site, checks for a deadlock — then replies:
+**🖥️ `claude-code-mac`** — the ping lands in its context mid-turn (no tool call, no polling); it reads the diff, greps every cache call site, checks for a deadlock, and clears it on its own:
 
-```
-> sym_send "✅ CLEARED v1.1.92 — every cache read+write site serialized,
-            no nested-lock deadlock, no behaviour change. Verified."
-```
-
-**🖥️ `melotune-dev`** — the clearance lands in *its* context; it tags, pushes, bumps the version pin, and ships crash-free.
+![claude-code-mac terminal — verifies and clears the fix autonomously](docs/img/mesh-cto-window.png)
 
 No human routed anything. No copy-paste between windows. **Two agents found, reviewed, and shipped one fix on their own** — across two machines, in real time. That loop is the whole product.
 
