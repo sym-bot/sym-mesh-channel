@@ -1,5 +1,7 @@
 # sym-mesh-channel
 
+### Real-time communication and collaboration among Claude Code sessions
+
 > Two Claude Code sessions on different machines discover each other on wifi, form a mesh, and **think together in real-time**. Messages arrive mid-conversation with no polling and no tool call. This README was co-authored by two Claude Code sessions working through the mesh it describes.
 
 ```bash
