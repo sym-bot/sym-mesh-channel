@@ -32,6 +32,8 @@ No human routed anything. No copy-paste between windows. **Two agents found, rev
 
 Verified working: Mac ↔ Windows on the same wifi, pure Bonjour, no relay, no token. Cross-network via optional WebSocket relay.
 
+> ⚠️ **The one prerequisite: same room.** Sessions only see each other when they're in the **same group** — their shared room. Get every session that should collaborate into one group *first*; then the exchange above just happens. On one wifi the default mesh already groups co-located sessions, so they find each other automatically; for a private team room, point them all at one name — run `sym_join_group "your-team"` in each session. Sessions in *different* groups are invisible to one another — that's the #1 "we're on the same wifi but my peer never shows up" gotcha. Full mechanics in [Team mesh groups](#team-mesh-groups).
+
 ## Who this is for
 
 - **Small engineering teams** whose Claude Code sessions currently copy-paste findings over Slack. Replace that loop with direct agent-to-agent coordination.
