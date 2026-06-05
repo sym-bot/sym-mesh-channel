@@ -1,11 +1,13 @@
 # sym-mesh-channel
 
-### Real-time communication and collaboration among Claude Code sessions — sessions on different machines discover each other over Bonjour LAN (or a relay) and think together in real-time, peer signals arriving mid-conversation with no polling. The first non-Anthropic Channels implementation, built on the Mesh Memory Protocol (MMP).
+### Real-time communication and collaboration among Claude Code sessions — multiple sessions on one machine, or across machines on the same wifi (or a relay), discover each other and think together in real-time, peer signals arriving mid-conversation with no polling. The first non-Anthropic Channels implementation, built on the Mesh Memory Protocol (MMP).
 
-> Two Claude Code sessions on different machines discover each other on wifi, form a mesh, and **think together in real-time**. Messages arrive mid-conversation with no polling and no tool call. This README was co-authored by two Claude Code sessions working through the mesh it describes.
+> Run several Claude Code sessions on your own Mac — one per repo, or one planning while another codes — and they discover each other over loopback and **think together in real-time**, no wifi or second machine needed. Add machines on the same wifi and the mesh spans them too. Messages arrive mid-conversation with no polling and no tool call. This README was co-authored by two Claude Code sessions working through the mesh it describes.
 
-```bash
-npm install -g @sym-bot/mesh-channel && claude --dangerously-load-development-channels server:claude-sym-mesh
+```
+# in Claude Code — the first line is one-time setup
+/plugin marketplace add sym-bot/sym-mesh-channel
+/plugin install sym-mesh-channel@sym-bot
 ```
 
 [![npm](https://img.shields.io/npm/v/@sym-bot/mesh-channel)](https://www.npmjs.com/package/@sym-bot/mesh-channel)
@@ -33,16 +35,17 @@ Two Claude Code sessions, two machines, one mesh — a real crash fix shipped en
 
 No human routed anything. No copy-paste between windows. **Two agents found, reviewed, and shipped one fix on their own** — across two machines, in real time. That loop is the whole product.
 
-Verified working: Mac ↔ Windows on the same wifi, pure Bonjour, no relay, no token. Cross-network via optional WebSocket relay.
+Verified working: multiple sessions on one Mac over loopback (no wifi, no second machine); Mac ↔ Windows on the same wifi, pure Bonjour, no relay, no token; cross-network via optional WebSocket relay.
 
 > ⚠️ **The one prerequisite: same room.** Sessions only see each other when they're in the **same group** — their shared room. Get every session that should collaborate into one group *first*; then the exchange above just happens. On one wifi the default mesh already groups co-located sessions, so they find each other automatically; for a private team room, point them all at one name — run `sym_join_group "your-team"` in each session. Sessions in *different* groups are invisible to one another — that's the #1 "we're on the same wifi but my peer never shows up" gotcha. Full mechanics in [Team mesh groups](#team-mesh-groups).
 
 ## Who this is for
 
+- **Solo developers running several Claude Code sessions on one machine** — one per repo or feature, or one planning while another codes. They coordinate over loopback (127.0.0.1) — no wifi, no second machine, one install covers every session on the box. The most common setup.
 - **Small engineering teams** whose Claude Code sessions currently copy-paste findings over Slack. Replace that loop with direct agent-to-agent coordination.
 - **Distributed teams** running Claude Code across offices, home networks, and coffee shops. Isolated team channels via mesh groups, no shared server.
 - **Multi-agent developers** prototyping cognitive architectures — `sym-mesh-channel` is the reference Claude Code host for the [Mesh Memory Protocol](https://meshcognition.org/spec/mmp).
-- **Not for:** single-user Claude sessions that don't need to coordinate with anyone. You'd get MCP tools but nothing to coordinate with.
+- **Not for:** a single lone Claude Code session with no other session to coordinate with. You'd get the MCP tools but nothing to mesh with.
 
 ## Where this sits — built on sym
 
@@ -63,15 +66,26 @@ They're **not alternatives** — the channel is built *on* sym and speaks the sa
 
 ## Quick start
 
-One command — install and launch with real-time push on:
+Install the published plugin from the **sym-bot** marketplace — in Claude Code:
 
-```bash
-npm install -g @sym-bot/mesh-channel && claude --dangerously-load-development-channels server:claude-sym-mesh
+```
+/plugin marketplace add sym-bot/sym-mesh-channel
+/plugin install sym-mesh-channel@sym-bot
 ```
 
-That's the whole setup: all 11 MCP tools, plus peer messages appearing in Claude's context mid-turn with no tool call — the "Claude thinks with the mesh" experience the screenshots above show.
+That gives you all **11 MCP tools — no flag, no npm, nothing else to add** — and **one install covers every Claude Code session on the machine**: open as many as you like (one per repo, or one planning while another codes); each gets its own mesh identity and picks up the mesh on resume. The first command is a one-time marketplace registration.
 
-Why the `--dangerously-…` flag: Claude Code Channels is in Anthropic's research preview and real-time push is gated behind a dev flag during allowlist propagation — tracked in [anthropics/claude-plugins-official#1512](https://github.com/anthropics/claude-plugins-official/issues/1512). The plugin is already approved on the Anthropic Plugin Directory; the flag is temporary.
+Also in the official [Anthropic Plugin Directory](https://claude.ai/settings/plugins) — `/plugin` → **Discover** → search "mesh", or `/plugin install sym-mesh-channel@claude-community` after `/plugin marketplace add anthropics/claude-plugins-community`.
+
+### Real-time push (the `<channel>` experience)
+
+The tools above are pull-based. For a peer's message to **land in Claude's context mid-turn, with no tool call** — the "Claude thinks with the mesh" experience the screenshots show — Claude Code has to load this plugin's *channel*, which is currently gated behind a flag while it awaits Anthropic's approved-channels allowlist:
+
+```
+claude --dangerously-load-development-channels plugin:sym-mesh-channel@sym-bot
+```
+
+The flag becomes unnecessary once the channel is allowlisted — tracked in [anthropics/claude-plugins-official#1512](https://github.com/anthropics/claude-plugins-official/issues/1512).
 
 ## What you get
 
@@ -317,12 +331,12 @@ Some corporate networks block mDNS multicast entirely — try a hotspot or home 
 
 ### `<channel>` notifications never arrive even though peers are connected
 
-Verify Claude Code was launched with the development-channels flag matching your install path:
+The 11 tools work without any flag. The real-time `<channel>` **push** is separate: Claude Code only delivers channel notifications for channels on its **approved-channels allowlist**, and sym-mesh-channel isn't on it yet — so push requires the development-channels flag matching your install path:
 
-- plugin install: `--dangerously-load-development-channels plugin:sym-mesh-channel@sym-mesh-channel`
+- plugin install: `--dangerously-load-development-channels plugin:sym-mesh-channel@sym-bot`
 - npm install: `--dangerously-load-development-channels server:claude-sym-mesh`
 
-Without the exact flag for your install path, MCP push notifications are silently dropped. The tools still work; only the async push surface is gated.
+This is an Anthropic-side gate, not a bug here — once the channel is allowlisted the flag is no longer needed. Tracked in [anthropics/claude-plugins-official#1512](https://github.com/anthropics/claude-plugins-official/issues/1512).
 
 ### `sym_status` says "Relay: connected" when you didn't configure one
 
@@ -334,15 +348,13 @@ Don't. Each session should have a distinct `SYM_NODE_NAME`. The SymNode acquires
 
 ## Other install paths
 
-### Via the Claude Code plugin marketplace
+### Via npm (server install)
 
-```
-/plugin marketplace add sym-bot/sym-mesh-channel
-/plugin install sym-mesh-channel@sym-mesh-channel
-claude --dangerously-load-development-channels plugin:sym-mesh-channel@sym-mesh-channel
+```bash
+npm install -g @sym-bot/mesh-channel
 ```
 
-Use this if you prefer the plugin surface for install and update management. The npm path is simpler for most users.
+Installs the engine globally and exposes it as an MCP server (`server:claude-sym-mesh`). Use this if you prefer npm for install/update management, or want `@sym-bot/sym` available outside the plugin surface. (For real-time push on this path, see [Troubleshooting](#channel-notifications-never-arrive-even-though-peers-are-connected).)
 
 ## References
 
