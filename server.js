@@ -7,6 +7,25 @@ if (process.argv[2] === 'init') {
   return;
 }
 
+// ── stdout discipline (v0.3.9) ──────────────────────────────────────────────
+// MCP frames JSON-RPC on stdout. Any non-JSON write there — ours or, far more
+// often, a dependency's load banner (e.g. "[encoder] Semantic encoder ready"
+// from the semantic model) — corrupts the stream and makes Claude Code drop the
+// connection (-32000) or log "Ignoring non-JSON line on stdout". Guard it: lines
+// that look like JSON-RPC (start with '{') pass through to the real stdout;
+// everything else is redirected to stderr. Installed before any require so it
+// catches dependency output at load time.
+const __realStdoutWrite = process.stdout.write.bind(process.stdout);
+process.stdout.write = function (chunk, ...rest) {
+  try {
+    const s = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
+    if (s.trimStart().startsWith('{')) return __realStdoutWrite(chunk, ...rest);
+    return process.stderr.write(chunk, ...rest);
+  } catch {
+    return __realStdoutWrite(chunk, ...rest);
+  }
+};
+
 /**
  * sym-mesh-channel — MCP server that makes Claude Code a peer node on the SYM mesh.
  *
