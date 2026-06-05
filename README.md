@@ -7,7 +7,7 @@
 ```
 # in Claude Code — the first line is one-time setup
 /plugin marketplace add sym-bot/sym-mesh-channel
-/plugin install sym-mesh-channel@sym-bot
+/plugin install sym-mesh-channel@sym-mesh-channel
 ```
 
 [![npm](https://img.shields.io/npm/v/@sym-bot/mesh-channel)](https://www.npmjs.com/package/@sym-bot/mesh-channel)
@@ -66,11 +66,11 @@ They're **not alternatives** — the channel is built *on* sym and speaks the sa
 
 ## Quick start
 
-Install the published plugin from the **sym-bot** marketplace — in Claude Code:
+Install the published plugin — in Claude Code:
 
 ```
 /plugin marketplace add sym-bot/sym-mesh-channel
-/plugin install sym-mesh-channel@sym-bot
+/plugin install sym-mesh-channel@sym-mesh-channel
 ```
 
 That gives you all **11 MCP tools — no flag, no npm, nothing else to add** — and **one install covers every Claude Code session on the machine**: open as many as you like (one per repo, or one planning while another codes); each gets its own mesh identity and picks up the mesh on resume. The first command is a one-time marketplace registration.
@@ -82,7 +82,7 @@ Also in the official [Anthropic Plugin Directory](https://claude.ai/settings/plu
 The tools above are pull-based. For a peer's message to **land in Claude's context mid-turn, with no tool call** — the "Claude thinks with the mesh" experience the screenshots show — Claude Code has to load this plugin's *channel*, which is currently gated behind a flag while it awaits Anthropic's approved-channels allowlist:
 
 ```
-claude --dangerously-load-development-channels plugin:sym-mesh-channel@sym-bot
+claude --dangerously-load-development-channels plugin:sym-mesh-channel@sym-mesh-channel
 ```
 
 The flag becomes unnecessary once the channel is allowlisted — tracked in [anthropics/claude-plugins-official#1512](https://github.com/anthropics/claude-plugins-official/issues/1512).
@@ -333,7 +333,7 @@ Some corporate networks block mDNS multicast entirely — try a hotspot or home 
 
 The 11 tools work without any flag. The real-time `<channel>` **push** is separate: Claude Code only delivers channel notifications for channels on its **approved-channels allowlist**, and sym-mesh-channel isn't on it yet — so push requires the development-channels flag matching your install path:
 
-- plugin install: `--dangerously-load-development-channels plugin:sym-mesh-channel@sym-bot`
+- plugin install: `--dangerously-load-development-channels plugin:sym-mesh-channel@sym-mesh-channel`
 - npm install: `--dangerously-load-development-channels server:claude-sym-mesh`
 
 This is an Anthropic-side gate, not a bug here — once the channel is allowlisted the flag is no longer needed. Tracked in [anthropics/claude-plugins-official#1512](https://github.com/anthropics/claude-plugins-official/issues/1512).

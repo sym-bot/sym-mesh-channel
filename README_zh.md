@@ -4,8 +4,10 @@
 
 > 两台不同设备上的 Claude Code 会话通过 Wi-Fi 自动发现、组建网格，**实时协同思考**。消息无需工具调用、无需轮询，即可在对话中途即时送达。本 README 正是由两个通过该网格协同工作的 Claude Code 会话共同撰写完成。
 
-```bash
-npm install -g @sym-bot/mesh-channel && claude --dangerously-load-development-channels server:claude-sym-mesh
+```
+# Claude Code 中执行 —— 第一行为一次性市场注册
+/plugin marketplace add sym-bot/sym-mesh-channel
+/plugin install sym-mesh-channel@sym-mesh-channel
 ```
 
 🌐 [English](README.md)
@@ -71,16 +73,24 @@ npm install -g @sym-bot/mesh-channel && claude --dangerously-load-development-ch
 
 ## 快速开始
 
-一条命令完成安装并启用实时推送：
+通过插件市场安装（Claude Code 中执行）：
 
-```bash
-npm install -g @sym-bot/mesh-channel && claude --dangerously-load-development-channels server:claude-sym-mesh
+```
+/plugin marketplace add sym-bot/sym-mesh-channel
+/plugin install sym-mesh-channel@sym-mesh-channel
 ```
 
-> 这就是全部配置：11 项 MCP 工具即刻可用，且对等消息可在 Claude 对话中途无工具调用即时送达 —— 即上文截图所示的「Claude 与网格协同思考」体验。
+即可获得全部 **11 项 MCP 工具 —— 无需标志、无需 npm、无需其他配置**，且**一次安装覆盖本机所有 Claude Code 会话**：每个会话自动获得独立身份，随时加入网格。第一行命令为一次性市场注册。
 
-🔹 **为何需要 `--dangerously-…` 标志？**  
-Claude Code Channels 目前处于 Anthropic 研究预览阶段，实时推送功能在允许名单传播期间需通过开发标志启用（详见 [anthropics/claude-plugins-official#1512](https://github.com/anthropics/claude-plugins-official/issues/1512)）。本插件已获 Anthropic 插件目录批准，该标志仅为临时要求。
+### 实时推送（`<channel>` 体验）
+
+上述工具为拉取模式。若要实现**对等消息在对话中途无工具调用即时送达** —— 即上文截图所示的「Claude 与网格协同思考」体验 —— 还需在启动时附加以下标志（目前 Anthropic 频道允许名单审核中）：
+
+```bash
+claude --dangerously-load-development-channels plugin:sym-mesh-channel@sym-mesh-channel
+```
+
+🔹 标志为临时要求，待频道通过 Anthropic 允许名单审核后即可去除（详见 [anthropics/claude-plugins-official#1512](https://github.com/anthropics/claude-plugins-official/issues/1512)）。
 
 ---
 
@@ -398,11 +408,7 @@ npx -y @sym-bot/mesh-channel init
 
 ### 同一机器上多个 Claude Code 会话希望共享身份
 
-❌ **不建议**。每个会话应使用独立 `SYM_NODE_NAME`。  
-SymNode 会对其身份目录（`~/.sym/nodes/<name>/lock.pid`）获取独占文件锁，拒绝启动同名第二进程。若遇 `EIDENTITYLOCK`：
-- 方案 1：终止占用进程  
-- 方案 2：为新会话指定不同名称  
-- 方案 3：采用 [项目级安装](#进阶项目级节点身份) 为并行会话分配独立身份
+每个会话应使用独立身份 —— 这也是默认行为。自 v0.3.10 起，若检测到同名活跃进程，节点名称会自动追加后缀（如 `-2`、`-3`），无需手动干预，不再出现 `EIDENTITYLOCK` 错误。若需固定名称，请通过 `SYM_NODE_NAME` 环境变量为每个会话指定不同的名称，或采用 [项目级安装](#进阶项目级节点身份) 为并行会话分配独立身份。
 
 ---
 
