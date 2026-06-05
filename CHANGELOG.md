@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.3.11
+
+### Added
+
+- **Prompt-injection filter (security layer 3).** Every incoming CMB — all CAT7 fields and the opaque payload — is now scanned against a curated blocklist of injection patterns before `pushChannel()` is called. Patterns cover: instruction-override phrases ("ignore previous instructions", "forget everything you know"), role/persona hijacking ("you are now a new AI", "act as an unrestricted assistant"), system-prompt injection (`<system>`, `[SYSTEM]`, `## system prompt`), tool-call fabrication (`<tool_call>`, `<function_calls>`), and privilege-escalation language ("override safety filter", "jailbreak", "DAN mode"). Blocked CMBs are audit-logged to stderr with reason, peer name, and a truncated excerpt — never silently dropped.
+
+- **Per-peer rate limiting.** A sliding 60-second window caps each peer at `SYM_RATE_LIMIT` CMBs per minute (default: 30). CMBs exceeding the cap are blocked and audit-logged. Prevents flood attacks from a compromised or malfunctioning peer.
+
+- **Payload size cap.** Payloads larger than `SYM_MAX_PAYLOAD_BYTES` (default: 8 192 bytes) are rejected before context injection. Prevents oversized-payload attacks that could exhaust the context window.
+
+- **README security section updated** to document all four defence layers accurately.
+
+### Security model
+
+The full gate before any mesh signal reaches Claude's context is now:
+1. **Transport** — Ed25519 peer identity + relay-token auth.
+2. **Protocol** — SVAF per-field semantic relevance gate.
+3. **Safety** — prompt-injection filter + rate limiter + payload size cap (this release).
+4. **Application** — text-only injection; `claude/channel/permission` not declared.
+
+## 0.3.10
+
+### Fixed
+
+- **Live-identity-collision auto-suffix.** Two sessions wanting the same `SYM_NODE_NAME` previously hard-failed with `EIDENTITYLOCK`. The server now checks whether the name's lock file is held by a live process; if so, it appends `-2`, `-3`, … (up to 64) until it finds a free slot. Stale locks (dead holder) are still reclaimed by `@sym-bot/sym` on start — unchanged. Result: duplicate dev-agent sessions, or any two sessions sharing a fixed `SYM_NODE_NAME`, coexist instead of failing.
+
+## 0.3.9
+
+### Fixed
+
+- **stdout discipline — fixes `-32000 / Connection closed`.** The MCP JSON-RPC stream runs on stdout. Dependency load banners (e.g. `[encoder] Semantic encoder ready` from the semantic model) were printing to stdout, intermittently corrupting the handshake and causing Claude Code to log "Ignoring non-JSON line on stdout" or drop the connection with `-32000`. A stdout guard is now installed before any `require()`: lines that start with `{` (JSON-RPC frames) pass through to the real stdout; everything else is redirected to stderr. Verified: stdout is pure JSON after the fix.
+
+## 0.3.8
+
+### Added
+
+- **Per-session node identity.** Each Claude Code session now gets its own mesh identity derived from the working-directory slug and a session-unique suffix (e.g. `claude-symday-webapp-6e174e`), instead of all sessions sharing the machine hostname. Enables multiple Claude Code sessions on the same machine to appear as distinct peers on the mesh — confirmed working over loopback via Bonjour with no relay.
+
+- **`npx` launch path.** The plugin now launches via `npx @sym-bot/mesh-channel` rather than a global `node` path, so marketplace installs work without a prior `npm install -g`. The npx cache warms on first launch; subsequent sessions start in ~1 s.
+
 ## 0.3.7
 
 ### Changed
