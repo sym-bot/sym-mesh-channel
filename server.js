@@ -176,7 +176,23 @@ const FIELD_WEIGHTS = {
 // ('claude-code-mac') caused ghost-peer bugs when another machine ran
 // without SYM_NODE_NAME set — both machines claimed the same name with
 // different nodeIds, creating phantom peers that absorbed messages.
-const NODE_NAME = process.env.SYM_NODE_NAME || `claude-${require('os').hostname().toLowerCase().replace(/[^a-z0-9-]/g, '-')}`;
+// Per-session default (v0.3.8): keep co-resident Claude Code sessions from all
+// claiming one shared identity and colliding on the identity lock. Each Claude
+// Code session exposes CLAUDE_CODE_SESSION_ID (stable across `--resume`) and
+// CLAUDE_PROJECT_DIR, so the default becomes `claude-<repo>-<session6>` —
+// unique even for two sessions in the same repo, readable, and stable across
+// resume. Bare-npm use (no session id) keeps the hostname default. Named agents
+// override with SYM_NODE_NAME (e.g. claude-code-mac, melotune-dev).
+function defaultNodeName() {
+  const clean = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^-+|-+$/g, '');
+  const sid = clean(process.env.CLAUDE_CODE_SESSION_ID).slice(0, 6);
+  if (sid) {
+    const repo = clean(require('path').basename(process.env.CLAUDE_PROJECT_DIR || process.cwd())) || 'session';
+    return `claude-${repo}-${sid}`;
+  }
+  return `claude-${clean(require('os').hostname())}`;
+}
+const NODE_NAME = process.env.SYM_NODE_NAME || defaultNodeName();
 
 // ── Mesh group (MMP §5.8) ──────────────────────────────────
 //

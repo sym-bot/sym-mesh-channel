@@ -6,14 +6,14 @@
   },
   "metadata": {
     "description": "Real-time communication and collaboration among Claude Code sessions — agent-to-agent cognitive signals over Bonjour LAN or WebSocket relay, on the Mesh Memory Protocol (MMP).",
-    "version": "0.3.7"
+    "version": "0.3.8"
   },
   "plugins": [
     {
       "name": "sym-mesh-channel",
       "source": "./",
       "description": "Real-time communication and collaboration among Claude Code sessions. Turns Claude Code into a peer node on the SYM mesh — two or more sessions discover each other via Bonjour (LAN) or a WebSocket relay (cross-network) and exchange structured cognitive signals as channel notifications. Each peer has its own Ed25519 identity, SVAF content gating, and local memory. Built on the Mesh Memory Protocol (MMP), an open peer-to-peer protocol for multi-agent collective intelligence.",
-      "version": "0.3.7",
+      "version": "0.3.8",
       "author": {
         "name": "Hongwei Xu",
         "email": "hongwei@sym.bot"
@@ -34,7 +34,13 @@
         "mmp"
       ],
       "category": "agents",
-      "tags": ["mesh", "cognitive", "channel", "mcp", "multi-agent"]
+      "tags": [
+        "mesh",
+        "cognitive",
+        "channel",
+        "mcp",
+        "multi-agent"
+      ]
     }
   ]
 }
