@@ -211,7 +211,26 @@ function defaultNodeName() {
   }
   return `claude-${clean(require('os').hostname())}`;
 }
-const NODE_NAME = process.env.SYM_NODE_NAME || defaultNodeName();
+// Live-collision auto-suffix (v0.3.10): @sym-bot/sym already reclaims STALE locks
+// (dead holder), so crashed sessions self-heal. But two LIVE sessions wanting the
+// same name — a duplicate dev agent, or two sessions sharing a fixed SYM_NODE_NAME
+// — would hard-fail with EIDENTITYLOCK. Resolve the name up front: if the base is
+// held by a live process, append -2/-3/… so the second session coexists instead of
+// failing. A dead or absent holder keeps the base name (sym reclaims it on start).
+function resolveNodeName(base) {
+  const fs = require('fs'), os = require('os'), path = require('path');
+  const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
+  for (let i = 0; i < 64; i++) {
+    const name = i === 0 ? base : `${base}-${i + 1}`;
+    try {
+      const pid = parseInt(fs.readFileSync(path.join(os.homedir(), '.sym', 'nodes', name, 'lock.pid'), 'utf8').trim(), 10);
+      if (pid && alive(pid)) continue; // live holder → try the next suffix
+    } catch { /* no lock file → name is free */ }
+    return name; // free, or a stale lock sym will reclaim on start()
+  }
+  return base;
+}
+const NODE_NAME = resolveNodeName(process.env.SYM_NODE_NAME || defaultNodeName());
 
 // ── Mesh group (MMP §5.8) ──────────────────────────────────
 //
