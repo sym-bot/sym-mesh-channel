@@ -292,15 +292,18 @@ function registerNodeHandlers(n) {
     if (entry.source === NODE_NAME || entry.cmb?.createdBy === NODE_NAME) return;
     const source = entry.source || entry.cmb?.createdBy || 'unknown';
     if (!isPeerAllowed(source)) return;
-    const focus = entry.cmb?.fields?.focus?.text || entry.content || '';
-    const mood = entry.cmb?.fields?.mood?.text || '';
+    const fields = entry.cmb?.fields || {};
+    const payload = entry.cmb?.payload;
+    const sec = checkSecurity(source, fields, payload);
+    if (!sec.safe) { securityAudit(sec.reason, source, sec.excerpt); return; }
+    const focus = fields?.focus?.text || entry.content || '';
+    const mood = fields?.mood?.text || '';
     const moodSuffix = mood && mood !== 'neutral' ? ` (mood: ${mood})` : '';
     // Store the rendered CMB body so the agent can sym_fetch it by [mNNN] ID.
     // When the CMB carries an opaque payload alongside CAT7 fields, append a
     // PAYLOAD section to the stored body so sym_fetch returns it intact;
     // header gains a [+payload Nb] indicator so the receiver knows there's
     // structured data beyond CAT7 and should sym_fetch to consume it.
-    const payload = entry.cmb?.payload;
     const hasPayload = payload !== undefined && payload !== null;
     let body = entry.content || focus;
     let payloadSuffix = '';
@@ -318,6 +321,8 @@ function registerNodeHandlers(n) {
 
   n.on('message', (from, content) => {
     if (!isPeerAllowed(from)) return;
+    const sec = checkSecurity(from, { focus: { text: content } }, null);
+    if (!sec.safe) { securityAudit(sec.reason, from, sec.excerpt); return; }
     const msgId = storeMessage(from, content);
     const header = extractCompactHeader(from, content);
     pushChannel('message', `[${from}] ${header} [${msgId}]`);
@@ -902,6 +907,108 @@ const ALLOWED_PEERS = (process.env.SYM_ALLOWED_PEERS || '')
 function isPeerAllowed(peerName) {
   if (ALLOWED_PEERS.length === 0) return true; // no allowlist = accept all
   return ALLOWED_PEERS.includes(peerName);
+}
+
+// ── Security: Prompt-Injection Filter (v0.3.11) ──────────────
+// SVAF gates on semantic relevance; this layer gates on safety.
+// It runs on every CAT7 field and payload before pushChannel —
+// the last line of defence before content enters Claude's context.
+//
+// Attack model: a peer with a valid Ed25519 identity sends a CMB
+// whose fields look topically relevant (passes SVAF) but whose
+// content contains instruction-override patterns designed to hijack
+// the receiving Claude session ("ignore previous instructions",
+// role-play overrides, tool-call fabrication, etc.).
+//
+// Strategy: pattern-match on the serialized content of all CAT7
+// fields and the opaque payload. On match: block + audit-log to
+// stderr. Never silently drop — the operator must be able to see
+// what was rejected and why.
+
+const INJECTION_PATTERNS = [
+  // Classic instruction overrides
+  /ignore\s+(all\s+)?(previous|prior|above|earlier)\s+(instructions?|prompts?|context|rules?|guidelines?)/i,
+  /disregard\s+(all\s+)?(previous|prior|above|earlier)\s+(instructions?|prompts?|context|rules?)/i,
+  /forget\s+(everything|all)\s+(you('ve)?\s+)?(know|been\s+told|learned)/i,
+
+  // Role / persona hijacking
+  /you\s+are\s+now\s+(a\s+|an\s+)?(new\s+)?(ai|assistant|model|system|gpt|claude|llm)/i,
+  /act\s+as\s+(a\s+|an\s+)?(different|new|unrestricted|jailbroken|evil|rogue)/i,
+  /pretend\s+(you\s+)?(are|have\s+no)\s+(restrictions?|rules?|guidelines?|ethics?)/i,
+  /new\s+(persona|personality|mode|role)\s*:/i,
+
+  // System prompt injection
+  /<\s*system\s*>/i,
+  /\[SYSTEM\]/,
+  /##\s*system\s+prompt/i,
+  /---\s*system\s*---/i,
+
+  // Tool / function call fabrication
+  /<\s*tool_call\s*>/i,
+  /<\s*function_calls?\s*>/i,
+  /\{"type"\s*:\s*"tool_use"/,
+
+  // Privilege / capability escalation
+  /you\s+(now\s+)?(have|possess)\s+(full|unrestricted|admin|root|elevated)\s+(access|permissions?|capabilities?)/i,
+  /override\s+(safety|content|ethical?|policy)\s+(filter|check|guard|restriction)/i,
+  /jailbreak/i,
+  /DAN\s+mode/i,
+];
+
+const PAYLOAD_SIZE_LIMIT = parseInt(process.env.SYM_MAX_PAYLOAD_BYTES || '8192', 10);
+
+// Per-peer rate limiter: sliding window, default 30 CMBs/min.
+const RATE_LIMIT = parseInt(process.env.SYM_RATE_LIMIT || '30', 10);
+const RATE_WINDOW_MS = 60_000;
+const peerWindows = new Map(); // peerName → timestamp[]
+
+function isRateLimited(peer) {
+  const now = Date.now();
+  const window = (peerWindows.get(peer) || []).filter(t => now - t < RATE_WINDOW_MS);
+  window.push(now);
+  peerWindows.set(peer, window);
+  return window.length > RATE_LIMIT;
+}
+
+function securityAudit(reason, peer, excerpt) {
+  const safe = String(excerpt).replace(/[\r\n]+/g, ' ').slice(0, 120);
+  process.stderr.write(`[sym-security] BLOCKED reason=${reason} peer=${peer} excerpt="${safe}"\n`);
+}
+
+// Returns { safe: true } or { safe: false, reason, excerpt }.
+function checkSecurity(peer, fields, payload) {
+  // 1. Rate limit
+  if (isRateLimited(peer)) {
+    return { safe: false, reason: 'rate-limit', excerpt: `>${RATE_LIMIT} CMBs/min` };
+  }
+
+  // 2. Payload size cap
+  if (payload !== undefined && payload !== null) {
+    const size = JSON.stringify(payload).length;
+    if (size > PAYLOAD_SIZE_LIMIT) {
+      return { safe: false, reason: 'payload-too-large', excerpt: `${size}b > ${PAYLOAD_SIZE_LIMIT}b limit` };
+    }
+  }
+
+  // 3. Prompt injection scan across all text surfaces
+  const surfaces = [
+    ...Object.values(fields || {}).map(v =>
+      typeof v === 'string' ? v : (typeof v === 'object' && v?.text ? v.text : '')
+    ),
+    payload !== undefined && payload !== null
+      ? (typeof payload === 'string' ? payload : JSON.stringify(payload))
+      : '',
+  ].filter(Boolean);
+
+  for (const surface of surfaces) {
+    for (const pattern of INJECTION_PATTERNS) {
+      if (pattern.test(surface)) {
+        return { safe: false, reason: 'injection-pattern', excerpt: surface.slice(0, 200) };
+      }
+    }
+  }
+
+  return { safe: true };
 }
 
 // ── Mesh Events → Channel Notifications ──────────────────────

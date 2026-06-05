@@ -258,13 +258,14 @@ Both peers must use the same relay URL and token to land on the same channel. Th
 
 ## Security
 
-Defence in depth. Three layers, all must pass before a mesh signal reaches Claude's context:
+Four layers, all must pass before a mesh signal reaches Claude's context:
 
 1. **Transport.** Ed25519 peer identity on LAN + relay-token authentication on cross-network. Unauthenticated sources cannot reach `pushChannel()`.
 2. **Protocol.** [SVAF](https://arxiv.org/abs/2604.03955) per-field content gating — evaluates each incoming CMB across 7 semantic dimensions and rejects irrelevant signals before they enter cognitive state.
-3. **Application.** Text-only context injection, no code execution, no permission relay (`claude/channel/permission` is explicitly not declared).
+3. **Safety.** Prompt-injection filter — pattern-matches every CAT7 field and payload against a curated blocklist of instruction-override, role-hijacking, system-prompt injection, tool-call fabrication, and privilege-escalation patterns. Matched CMBs are blocked and audit-logged to stderr; no silent drops. Per-peer rate limiting (default 30 CMBs/min, configurable via `SYM_RATE_LIMIT`) and a payload size cap (`SYM_MAX_PAYLOAD_BYTES`, default 8 KB) prevent flood and oversized-payload attacks.
+4. **Application.** Text-only context injection, no code execution, no permission relay (`claude/channel/permission` is explicitly not declared).
 
-**Optional peer allowlist.** Set `SYM_ALLOWED_PEERS=claude-mac,claude-win` to restrict which authenticated peers can push to Claude's context. When empty (default), all authenticated peers are accepted.
+**Optional peer allowlist.** Set `SYM_ALLOWED_PEERS=claude-mac,claude-win` to restrict which authenticated peers can push to Claude's context. When empty (default), all authenticated peers pass layers 1–4.
 
 See [SECURITY.md](SECURITY.md) for the full threat model.
 
