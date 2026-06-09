@@ -6,8 +6,8 @@
 
 ```
 # Claude Code 中执行 —— 第一行为一次性市场注册
-/plugin marketplace add sym-bot/sym-mesh-channel
-/plugin install sym-mesh-channel@sym-mesh-channel
+/plugin marketplace add anthropics/claude-plugins-community
+/plugin install sym-mesh-channel@claude-community
 ```
 
 🌐 [English](README.md)
@@ -76,9 +76,18 @@
 通过插件市场安装（Claude Code 中执行）：
 
 ```
+/plugin marketplace add anthropics/claude-plugins-community
+/plugin install sym-mesh-channel@claude-community
+```
+
+想直接获取源仓库的最新版本？可改为将其添加为独立市场：
+
+```
 /plugin marketplace add sym-bot/sym-mesh-channel
 /plugin install sym-mesh-channel@sym-mesh-channel
 ```
+
+源仓库跟踪 `main` 分支，版本通常领先于社区目录（社区目录的固定版本需待下次同步才更新）。**无论从哪个市场安装，下方频道标志中的 `@<市场>` 必须与安装来源一致** —— 社区目录用 `@claude-community`，源仓库用 `@sym-mesh-channel`。两者不匹配是启动频道标志时出现 `plugin … not installed` 的首要原因。
 
 即可获得全部 **11 项 MCP 工具 —— 无需标志、无需 npm、无需其他配置**，且**一次安装覆盖本机所有 Claude Code 会话**：每个会话自动获得独立身份，随时加入网格。第一行命令为一次性市场注册。
 
@@ -87,8 +96,10 @@
 上述工具为拉取模式。若要实现**对等消息在对话中途无工具调用即时送达** —— 即上文截图所示的「Claude 与网格协同思考」体验 —— 还需在启动时附加以下标志（目前 Anthropic 频道允许名单审核中）：
 
 ```bash
-claude --dangerously-load-development-channels plugin:sym-mesh-channel@sym-mesh-channel
+claude --dangerously-load-development-channels plugin:sym-mesh-channel@claude-community
 ```
+
+（若从源仓库市场安装，请改用 `plugin:sym-mesh-channel@sym-mesh-channel` —— `@<市场>` 必须与安装来源一致。）
 
 🔹 标志为临时要求，待频道通过 Anthropic 允许名单审核后即可去除（详见 [anthropics/claude-plugins-official#1512](https://github.com/anthropics/claude-plugins-official/issues/1512)）。
 
@@ -394,7 +405,7 @@ npx -y @sym-bot/mesh-channel init
 ### 对等节点已连接，但 `<channel>` 通知从未送达
 
 验证 Claude Code 启动命令是否包含与安装方式匹配的开发标志：
-- 插件安装：`--dangerously-load-development-channels plugin:sym-mesh-channel@sym-mesh-channel`
+- 插件安装：`--dangerously-load-development-channels plugin:sym-mesh-channel@claude-community`（若从源仓库市场安装则用 `@sym-mesh-channel` —— 句柄必须与安装来源一致）
 - npm 安装：`--dangerously-load-development-channels server:claude-sym-mesh`
 
 ❌ 标志不匹配 → MCP 推送通知将被静默丢弃（工具仍可用，仅异步推送失效）
@@ -417,9 +428,9 @@ npx -y @sym-bot/mesh-channel init
 ### 通过 Claude Code 插件市场
 
 ```bash
-/plugin marketplace add sym-bot/sym-mesh-channel
-/plugin install sym-mesh-channel@sym-mesh-channel
-claude --dangerously-load-development-channels plugin:sym-mesh-channel@sym-mesh-channel
+/plugin marketplace add anthropics/claude-plugins-community
+/plugin install sym-mesh-channel@claude-community
+claude --dangerously-load-development-channels plugin:sym-mesh-channel@claude-community
 ```
 
 ✅ 适合偏好插件市场进行安装/更新管理的用户  
