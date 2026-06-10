@@ -151,19 +151,26 @@ if (cmd === 'start') {
 
   // Is the scope Claude Code will actually read already configured with a
   // LIVE entry?  --project → <cwd>/.mcp.json ; otherwise → ~/.claude.json
-  function liveEntryInScope() {
+  // Reconcile identity against the persisted entry whether or not its
+  // server.js path is stale. npx rotates the cached server.js path on every
+  // version resolve (…/_npx/<hash>/…), so the entry is routinely stale yet
+  // still carries the node's name/group. Comparing only against a *live*
+  // entry let an explicit --name lose to the stale name on the heal path:
+  // start saw no live entry, pushed no --force, and init's non-force
+  // precedence (preserve-over-request) kept the old identity.
+  function rawEntryInScope() {
     try {
       const p = isProject
         ? path.join(launchDir, '.mcp.json')
         : path.join(os.homedir(), '.claude.json');
       if (!fs.existsSync(p)) return null;
       const j = JSON.parse(fs.readFileSync(p, 'utf8'));
-      const e = j && j.mcpServers && j.mcpServers['claude-sym-mesh'];
-      return e && !isStaleEntry(e) ? e : null;
+      return (j && j.mcpServers && j.mcpServers['claude-sym-mesh']) || null;
     } catch { return null; }
   }
 
-  const existing = liveEntryInScope();
+  const existing = rawEntryInScope();
+  const stale = existing ? isStaleEntry(existing) : false;
   const wantName = nameArg || null;
   const wantGroup = groupArg || null;
   const mismatch = !!existing && (
@@ -171,13 +178,19 @@ if (cmd === 'start') {
     (wantGroup && (preserveGroup(existing) || 'default') !== wantGroup)
   );
 
-  // Configure only when there's nothing live yet, an explicit --name/--group
-  // differs from the current entry, or --force was passed. Otherwise launch
-  // straight away — `start` stays cheap to run every session.
-  if (!existing || mismatch || force) {
+  // Configure when there's nothing persisted yet, the persisted server.js
+  // path is stale (heal), an explicit --name/--group differs, or --force.
+  // Otherwise launch straight away — `start` stays cheap to run every
+  // session.
+  if (!existing || stale || mismatch || force) {
     const initArgs = ['init'];
     if (isProject) initArgs.push('--project');
     if (groupArg) initArgs.push('--group', groupArg);
+    // --force makes init honor the explicit --name/--group over the
+    // persisted value. Required on the rename path AND on stale-heal with
+    // an explicit --name, where init would otherwise preserve the old name
+    // and silently drop the request. Force alone never clobbers an
+    // unspecified group: resolveGroup() still preserves when no --group.
     if (existing && (mismatch || force)) initArgs.push('--force');
     const childEnv = Object.assign({}, process.env);
     if (nameArg) childEnv.SYM_NODE_NAME = nameArg;
