@@ -72,8 +72,14 @@ test('.mcp.json has mcpServers with claude-sym-mesh', () => {
   assert.ok(mcp.mcpServers, 'mcpServers field is missing');
   assert.ok(mcp.mcpServers['claude-sym-mesh'], 'claude-sym-mesh server not defined');
   const server = mcp.mcpServers['claude-sym-mesh'];
-  assert.strictEqual(server.command, 'node', 'command should be node');
+  // Launch migrated to npx in 0.3.8 (per-session identity + npx launch);
+  // the server is no longer spawned via a bundled `node server.js` path.
+  assert.strictEqual(server.command, 'npx', 'command should be npx');
   assert.ok(Array.isArray(server.args), 'args should be an array');
+  assert.ok(
+    server.args.some((a) => a.includes('@sym-bot/mesh-channel')),
+    'args should launch the @sym-bot/mesh-channel package'
+  );
 });
 
 test('plugin.json declares channels with userConfig', () => {
