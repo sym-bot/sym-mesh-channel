@@ -66,37 +66,37 @@ They're **not alternatives** — the channel is built *on* sym and speaks the sa
 
 ## Quick start
 
-Install the published plugin — in Claude Code:
+**One install path — the plugin. It's what everyone should use.** In Claude Code:
 
 ```
-/plugin marketplace add anthropics/claude-plugins-community
+/plugin marketplace add anthropics/claude-plugins-community   # one-time
 /plugin install sym-mesh-channel@claude-community
 ```
 
-That gives you all **11 MCP tools — no flag, no npm, nothing else to add** — and **one install covers every Claude Code session on the machine**: open as many as you like (one per repo, or one planning while another codes); each gets its own mesh identity and picks up the mesh on resume. The first command is a one-time marketplace registration.
+That gives you all **11 MCP tools — no flag, no npm, nothing else to add** — and **one install covers every Claude Code session on the machine**: open as many as you like (one per repo, or one planning while another codes); each session automatically becomes its own mesh peer and picks up the mesh on resume. Also discoverable via `/plugin` → **Discover** → search "mesh".
 
-Discoverable in Claude Code too — `/plugin` → **Discover** → search "mesh".
+### Turn on real-time push
 
-Want the always-latest build straight from the source repo? Add it as its own marketplace instead:
+The tools above are pull-based. For a peer's message to **land in Claude's context mid-turn, with no tool call** — the "Claude thinks with the mesh" experience the screenshots show — launch each session with the channel flag:
+
+```
+claude --dangerously-load-development-channels plugin:sym-mesh-channel@claude-community
+```
+
+That's the whole setup. The flag is a temporary Anthropic-side gate while the channel awaits the approved-channels allowlist ([anthropics/claude-plugins-official#1512](https://github.com/anthropics/claude-plugins-official/issues/1512)); once it lands, `/plugin install` alone gives you real-time push with no flag.
+
+### Want a newer build than the directory has?
+
+The community directory pins a build that can lag a few versions behind `main` until the next sync. To run the **latest** release, add this repo as its own marketplace and install the same plugin from there:
 
 ```
 /plugin marketplace add sym-bot/sym-mesh-channel
 /plugin install sym-mesh-channel@sym-mesh-channel
 ```
 
-This tracks `main`, so it can be a few versions ahead of the community listing (whose pinned build lags until the next directory sync). **Whichever marketplace you install from, the channel flag below must use that same `@<marketplace>` handle** — `@claude-community` for the directory install above, `@sym-mesh-channel` for this source-repo install. Mismatching them is the #1 cause of `plugin … not installed` when launching with the channel flag.
+It's the identical plugin — just tracking `main` instead of the directory's pinned build. One catch: the channel flag's `@<marketplace>` handle must match wherever you installed from, so on this path it's `plugin:sym-mesh-channel@sym-mesh-channel` (not `@claude-community`). Mismatching the handle is the #1 cause of `plugin … not installed` at launch.
 
-### Real-time push (the `<channel>` experience)
-
-The tools above are pull-based. For a peer's message to **land in Claude's context mid-turn, with no tool call** — the "Claude thinks with the mesh" experience the screenshots show — Claude Code has to load this plugin's *channel*, which is currently gated behind a flag while it awaits Anthropic's approved-channels allowlist:
-
-```
-claude --dangerously-load-development-channels plugin:sym-mesh-channel@claude-community
-```
-
-(If you installed from the source-repo marketplace instead, use `plugin:sym-mesh-channel@sym-mesh-channel` — the `@<marketplace>` must match wherever you installed from.)
-
-The flag becomes unnecessary once the channel is allowlisted — tracked in [anthropics/claude-plugins-official#1512](https://github.com/anthropics/claude-plugins-official/issues/1512).
+> **Either way, that's all most users need.** Want persistent *named* agents (a stable identity in mesh memory), team config committed to a repo, or the `sym` CLI in your terminal? That's the [npm / MCP-server install](#advanced-named-agents-teams--the-cli) — an advanced path, not a second thing to learn here.
 
 ## What you get
 
@@ -234,7 +234,9 @@ The plugin composes two open specs:
 
 ## Advanced: per-project node identity
 
-By default every Claude Code session on a machine shares one mesh identity (set globally in `~/.claude.json`). If you run several Claude Code sessions in parallel from distinct project directories and want each to appear as its own peer on the mesh — e.g. a "research" session and a "strategy" session on the same laptop — install per-project instead:
+*(npm / MCP-server install only — plugin sessions already get a distinct peer identity each.)*
+
+With the global npm install, every Claude Code session on the machine shares one mesh identity (set in `~/.claude.json`). To give each project directory its own stable peer name instead — e.g. a "research" session and a "strategy" session on the same laptop — install per-project:
 
 ```bash
 cd path/to/your/project
@@ -358,15 +360,25 @@ Your shell profile (`~/.zshrc`, `~/.bashrc`) exports `SYM_RELAY_URL`. Claude Cod
 
 Don't. Each session should have a distinct `SYM_NODE_NAME`. The SymNode acquires an exclusive lockfile on its identity (`~/.sym/nodes/<name>/lock.pid`) and refuses to start a second process with the same name. If you see `EIDENTITYLOCK`, kill the other process or pick a different name. For multiple parallel sessions with their own identities, use the per-project install above.
 
-## Other install paths
+## Advanced: named agents, teams & the CLI
 
-### Via npm (server install)
+Everything above uses the plugin — all most users need. Install the engine as an npm package / MCP server instead **only** when you want one of these:
+
+- **A persistent, *named* agent.** The plugin auto-names each session (`claude-myrepo-3f9a`); the server install lets you pin `SYM_NODE_NAME=cto` so the node always appears under the same name in `sym_peers`, mesh memory, and CMB lineage — a durable agent identity, not an anonymous session.
+- **Team config committed to a repo.** Config lives in a project `.mcp.json`, so you can commit `SYM_GROUP=backend-team` (plus relay URL/token) into the repo — anyone who opens it in Claude Code auto-joins the team room with zero per-person setup.
+- **The `sym` CLI and non-Claude agents.** This also installs [`@sym-bot/sym`](https://github.com/sym-bot/sym), giving you `sym ask` / `sym groups` in your terminal and an engine that other agents, scripts, and languages can share.
 
 ```bash
 npm install -g @sym-bot/mesh-channel
 ```
 
-Installs the engine globally and exposes it as an MCP server (`server:claude-sym-mesh`). Use this if you prefer npm for install/update management, or want `@sym-bot/sym` available outside the plugin surface. (For real-time push on this path, see [Troubleshooting](#channel-notifications-never-arrive-even-though-peers-are-connected).)
+This registers a raw MCP server keyed `claude-sym-mesh`. Because it's a server (not a plugin), its real-time channel handle is **`server:claude-sym-mesh`** — so launch with:
+
+```bash
+claude --dangerously-load-development-channels server:claude-sym-mesh
+```
+
+Pin a fixed per-session identity with [per-project node identity](#advanced-per-project-node-identity); set relay credentials in the env block per [cross-network setup](#cross-network-setup-own-hosted-relay).
 
 ## References
 
