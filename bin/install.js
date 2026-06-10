@@ -188,7 +188,17 @@ if (cmd === 'start') {
   }
 
   console.log(`\n▶ Launching Claude Code on the SYM mesh — real-time push on.\n  (channel: ${handle}; the dev flag is temporary until Anthropic allowlists it)\n`);
-  const run = spawnSync('claude', claudeArgs, { stdio: 'inherit', cwd: launchDir });
+  // On Windows the `claude` CLI is a `.cmd`/`.ps1` shim (npm) or `.exe`
+  // (native installer). Node's spawn does an exact-filename lookup that
+  // ignores PATHEXT, so bare `spawnSync('claude', …)` returns ENOENT even
+  // when `claude` runs fine in the user's shell. Route through a shell on
+  // Windows so PATHEXT resolution kicks in; quote args that contain spaces
+  // since shell:true forwards the args unquoted.
+  const isWindows = process.platform === 'win32';
+  const spawnArgs = isWindows
+    ? claudeArgs.map((a) => (/\s/.test(a) ? `"${a}"` : a))
+    : claudeArgs;
+  const run = spawnSync('claude', spawnArgs, { stdio: 'inherit', cwd: launchDir, shell: isWindows });
   if (run.error && run.error.code === 'ENOENT') {
     process.stderr.write('ERROR: `claude` was not found on your PATH.\n');
     process.stderr.write('Install Claude Code (https://claude.com/code), make sure `claude` runs in your terminal, then re-run `sym-mesh-channel start`.\n');
