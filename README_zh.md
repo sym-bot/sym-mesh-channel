@@ -73,35 +73,37 @@
 
 ## 快速开始
 
-通过插件市场安装（Claude Code 中执行）：
+**唯一的安装路径——插件。这是所有用户都应使用的方式。** 在 Claude Code 中执行：
 
 ```
-/plugin marketplace add anthropics/claude-plugins-community
+/plugin marketplace add anthropics/claude-plugins-community   # 一次性注册
 /plugin install sym-mesh-channel@claude-community
 ```
 
-想直接获取源仓库的最新版本？可改为将其添加为独立市场：
+即可获得全部 **11 项 MCP 工具——无需标志、无需 npm、无需其他配置**，且**一次安装覆盖本机所有 Claude Code 会话**：随心开启任意数量的会话（每个仓库一个，或一个负责规划、另一个负责编码），每个会话自动成为独立的网格对等节点，恢复时自动接入网格。也可通过 `/plugin` → **Discover** 搜索「mesh」发现本插件。
+
+### 开启实时推送
+
+上述工具为拉取模式。若要实现**对等消息在对话中途无工具调用即时送达**——即上文截图所示的「Claude 与网格协同思考」体验——请在启动每个会话时附加频道标志：
+
+```
+claude --dangerously-load-development-channels plugin:sym-mesh-channel@claude-community
+```
+
+这就是全部配置。该标志是 Anthropic 侧的临时门控，待频道通过「已批准频道」名单审核后即可去除（[anthropics/claude-plugins-official#1512](https://github.com/anthropics/claude-plugins-official/issues/1512)）；届时仅需 `/plugin install` 即可获得实时推送，无需标志。
+
+### 想要比目录更新的版本？
+
+社区目录固定的版本可能落后 `main` 分支若干个版本，需待下次同步才更新。若要跟踪**最新**发布版本，请添加 SYM.BOT 市场并从中安装：
 
 ```
 /plugin marketplace add sym-bot/marketplace
 /plugin install sym-mesh-channel@sym-bot
 ```
 
-源仓库跟踪 `main` 分支，版本通常领先于社区目录（社区目录的固定版本需待下次同步才更新）。**无论从哪个市场安装，下方频道标志中的 `@<市场>` 必须与安装来源一致** —— 社区目录用 `@claude-community`，源仓库用 `@sym-bot`。两者不匹配是启动频道标志时出现 `plugin … not installed` 的首要原因。
+`sym-bot/marketplace` 是 [SYM.BOT 自有插件目录](https://github.com/sym-bot/marketplace)，跟踪各插件的 `main` 分支。安装格式为 `<插件>@<市场>`，因此 `@sym-bot` 是市场句柄。一个注意点：频道标志中的 `@<市场>` 句柄必须与安装来源一致，因此此路径用 `plugin:sym-mesh-channel@sym-bot`（而非 `@claude-community`）。两者不匹配是启动时出现 `plugin … not installed` 的首要原因。
 
-即可获得全部 **11 项 MCP 工具 —— 无需标志、无需 npm、无需其他配置**，且**一次安装覆盖本机所有 Claude Code 会话**：每个会话自动获得独立身份，随时加入网格。第一行命令为一次性市场注册。
-
-### 实时推送（`<channel>` 体验）
-
-上述工具为拉取模式。若要实现**对等消息在对话中途无工具调用即时送达** —— 即上文截图所示的「Claude 与网格协同思考」体验 —— 还需在启动时附加以下标志（目前 Anthropic 频道允许名单审核中）：
-
-```bash
-claude --dangerously-load-development-channels plugin:sym-mesh-channel@claude-community
-```
-
-（若从源仓库市场安装，请改用 `plugin:sym-mesh-channel@sym-bot` —— `@<市场>` 必须与安装来源一致。）
-
-🔹 标志为临时要求，待频道通过 Anthropic 允许名单审核后即可去除（详见 [anthropics/claude-plugins-official#1512](https://github.com/anthropics/claude-plugins-official/issues/1512)）。
+> **无论哪种方式，这都是大多数用户所需的全部。** 需要持久化的**命名**智能体（在网格记忆中拥有稳定身份）、将团队配置提交至仓库、或在终端使用 `sym` CLI？那属于 [npm / MCP 服务器安装](#进阶命名智能体团队与-cli)——一条进阶路径，并非另一套需要学习的东西。
 
 ---
 
@@ -269,7 +271,9 @@ sym-mesh-channel  ←——  Bonjour mDNS  ——→  sym-mesh-channel
 
 ## 进阶：项目级节点身份
 
-默认情况下，同一设备上的所有 Claude Code 会话共享一个网格身份（全局配置于 `~/.claude.json`）。若您需在同一笔记本上并行运行多个项目会话（如「研究」与「策略」会话），且希望它们在网格中呈现为独立对等节点，可采用项目级安装：
+*（仅限 npm / MCP 服务器安装方式——插件会话本就为每个会话分配独立身份。）*
+
+使用全局 npm 安装时，同一设备上的所有 Claude Code 会话共享一个网格身份（配置于 `~/.claude.json`）。若希望每个项目目录拥有自己稳定的对等节点名称（如同一笔记本上的「研究」会话与「策略」会话），可采用项目级安装：
 
 ```bash
 cd path/to/your/project
@@ -423,18 +427,25 @@ npx -y @sym-bot/mesh-channel init
 
 ---
 
-## 其他安装方式
+## 进阶：命名智能体、团队与 CLI
 
-### 通过 Claude Code 插件市场
+以上全部基于插件——这是大多数用户所需的全部。**仅当**您需要以下能力之一时，才改为将引擎安装为 npm 包 / MCP 服务器：
+
+- **持久化的*命名*智能体。** 插件会为每个会话自动命名（如 `claude-myrepo-3f9a`）；而服务器安装允许您固定 `SYM_NODE_NAME=cto`，使该节点在 `sym_peers`、网格记忆与 CMB 血缘中始终以同一名称出现——这是持久的智能体身份，而非匿名会话。
+- **提交至仓库的团队配置。** 配置存于项目 `.mcp.json` 中，因此您可将 `SYM_GROUP=backend-team`（及中继 URL / 令牌）提交进仓库——任何在 Claude Code 中打开该仓库的人都会自动加入团队房间，无需任何人工配置。
+- **`sym` CLI 与非 Claude 智能体。** 此方式同时安装 [`@sym-bot/sym`](https://github.com/sym-bot/sym)，让您在终端使用 `sym ask` / `sym groups`，并提供一个可供其他智能体、脚本与多语言环境共享的引擎。
 
 ```bash
-/plugin marketplace add anthropics/claude-plugins-community
-/plugin install sym-mesh-channel@claude-community
-claude --dangerously-load-development-channels plugin:sym-mesh-channel@claude-community
+npm install -g @sym-bot/mesh-channel
 ```
 
-✅ 适合偏好插件市场进行安装/更新管理的用户  
-✅ 对大多数用户，npm 路径更简洁直接
+此方式注册一个键为 `claude-sym-mesh` 的原生 MCP 服务器。由于它是服务器（而非插件），其实时频道句柄为 **`server:claude-sym-mesh`**——因此启动时使用：
+
+```bash
+claude --dangerously-load-development-channels server:claude-sym-mesh
+```
+
+如需固定的会话级身份，参见 [项目级节点身份](#进阶项目级节点身份)；中继凭据请按 [跨网络部署](#跨网络部署自建中继) 在 env 块中设置。
 
 ---
 
