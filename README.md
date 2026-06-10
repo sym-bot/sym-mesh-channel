@@ -91,10 +91,10 @@ The community directory pins a build that can lag a few versions behind `main` u
 
 ```
 /plugin marketplace add sym-bot/sym-mesh-channel
-/plugin install sym-mesh-channel@sym-mesh-channel
+/plugin install sym-mesh-channel@sym-bot
 ```
 
-It's the identical plugin — just tracking `main` instead of the directory's pinned build. One catch: the channel flag's `@<marketplace>` handle must match wherever you installed from, so on this path it's `plugin:sym-mesh-channel@sym-mesh-channel` (not `@claude-community`). Mismatching the handle is the #1 cause of `plugin … not installed` at launch.
+It's the identical plugin — just tracking `main` instead of the directory's pinned build. (`@sym-bot` is the marketplace handle; the install form is `<plugin>@<marketplace>`.) One catch: the channel flag's `@<marketplace>` handle must match wherever you installed from, so on this path it's `plugin:sym-mesh-channel@sym-bot` (not `@claude-community`). Mismatching the handle is the #1 cause of `plugin … not installed` at launch.
 
 > **Either way, that's all most users need.** Want persistent *named* agents (a stable identity in mesh memory), team config committed to a repo, or the `sym` CLI in your terminal? That's the [npm / MCP-server install](#advanced-named-agents-teams--the-cli) — an advanced path, not a second thing to learn here.
 
@@ -347,7 +347,7 @@ Some corporate networks block mDNS multicast entirely — try a hotspot or home 
 
 The 11 tools work without any flag. The real-time `<channel>` **push** is separate: Claude Code only delivers channel notifications for channels on its **approved-channels allowlist**, and sym-mesh-channel isn't on it yet — so push requires the development-channels flag matching your install path:
 
-- plugin install: `--dangerously-load-development-channels plugin:sym-mesh-channel@claude-community` (or `@sym-mesh-channel` if you installed from the source-repo marketplace — the handle must match your install source)
+- plugin install: `--dangerously-load-development-channels plugin:sym-mesh-channel@claude-community` (or `@sym-bot` if you installed from the source-repo marketplace — the handle must match your install source)
 - npm install: `--dangerously-load-development-channels server:claude-sym-mesh`
 
 This is an Anthropic-side gate, not a bug here — once the channel is allowlisted the flag is no longer needed. Tracked in [anthropics/claude-plugins-official#1512](https://github.com/anthropics/claude-plugins-official/issues/1512).
