@@ -83,7 +83,7 @@
 想直接获取源仓库的最新版本？可改为将其添加为独立市场：
 
 ```
-/plugin marketplace add sym-bot/sym-mesh-channel
+/plugin marketplace add sym-bot/marketplace
 /plugin install sym-mesh-channel@sym-bot
 ```
 

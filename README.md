@@ -87,14 +87,14 @@ That's the whole setup. The flag is a temporary Anthropic-side gate while the ch
 
 ### Want a newer build than the directory has?
 
-The community directory pins a build that can lag a few versions behind `main` until the next sync. To run the **latest** release, add this repo as its own marketplace and install the same plugin from there:
+The community directory pins a build that can lag a few versions behind `main` until the next sync. To track the **latest** release, add the SYM.BOT marketplace and install from there:
 
 ```
-/plugin marketplace add sym-bot/sym-mesh-channel
+/plugin marketplace add sym-bot/marketplace
 /plugin install sym-mesh-channel@sym-bot
 ```
 
-It's the identical plugin — just tracking `main` instead of the directory's pinned build. (`@sym-bot` is the marketplace handle; the install form is `<plugin>@<marketplace>`.) One catch: the channel flag's `@<marketplace>` handle must match wherever you installed from, so on this path it's `plugin:sym-mesh-channel@sym-bot` (not `@claude-community`). Mismatching the handle is the #1 cause of `plugin … not installed` at launch.
+`sym-bot/marketplace` is [SYM.BOT's own plugin catalog](https://github.com/sym-bot/marketplace), which tracks each plugin's `main`. The install form is `<plugin>@<marketplace>`, so `@sym-bot` is the marketplace handle. One catch: the channel flag's `@<marketplace>` handle must match wherever you installed from, so on this path it's `plugin:sym-mesh-channel@sym-bot` (not `@claude-community`). Mismatching the handle is the #1 cause of `plugin … not installed` at launch.
 
 > **Either way, that's all most users need.** Want persistent *named* agents (a stable identity in mesh memory), team config committed to a repo, or the `sym` CLI in your terminal? That's the [npm / MCP-server install](#advanced-named-agents-teams--the-cli) — an advanced path, not a second thing to learn here.
 
