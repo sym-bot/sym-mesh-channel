@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.15
+
+### Fixed
+
+- **`start` now finds `claude` on Windows.** The launch used `spawnSync('claude', …)` with no shell, which does an exact-filename lookup that ignores Windows `PATHEXT` — so `start` failed with `ENOENT` even when `claude` ran fine in the shell (there it resolves a `.cmd`/`.ps1` shim or `.exe`, never bare `claude`). The launch now routes through a shell on Windows so `PATHEXT` resolution applies; whitespace args are quoted since `shell: true` forwards them unquoted. The POSIX launch path is unchanged.
+- **`start --name` no longer silently reverts identity on a stale entry.** `start` auto-injected `--force` only on a *live* entry mismatch, but `npx` rotates its cached `server.js` path on every version resolve, so the persisted entry is routinely stale yet still holds the node's name/group. On a re-run, `start` saw no live entry, pushed no `--force`, and `init`'s preserve-over-request precedence dropped the requested `--name` — reverting the node's identity to the stale name. `start` now reconciles against the persisted entry whether or not it's stale and forces the rewrite when an explicit `--name`/`--group` differs. The group is preserved when no `--group` is passed.
+
 ## 0.3.14
 
 ### Added
