@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.13
+
+### Changed
+
+- **Track the latest released `@sym-bot/sym` (`^0.7.6`).** Pulls in the SVAF decision log (every evaluation — admit and reject — is now persisted and emitted) on top of the 0.7.5 replay-storm receive-path dedup. Additive; no API changes in mesh-channel.
+
+## 0.3.12
+
+### Changed
+
+- **Bump `@sym-bot/sym` to `^0.7.5`** — mesh replay-storm receive-path dedup (dedup received CMBs so a co-resident peer restart no longer triggers a replay storm).
+
+### Fixed
+
+- Align install commands + channel-flag handles with the actual marketplace (#13).
+- Fix 5 moderate Dependabot vulnerabilities (`npm audit fix`).
+
 ## 0.3.11
 
 ### Added
