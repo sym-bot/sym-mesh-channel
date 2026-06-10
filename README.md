@@ -66,37 +66,39 @@ They're **not alternatives** — the channel is built *on* sym and speaks the sa
 
 ## Quick start
 
-**One install path — the plugin. It's what everyone should use.** In Claude Code:
+**One command — it configures the mesh and launches Claude Code with real-time push already on:**
 
 ```
-/plugin marketplace add anthropics/claude-plugins-community   # one-time
+npx @sym-bot/mesh-channel@latest start
+```
+
+Run it in any repo, in as many terminals as you like — the sessions discover each other over loopback (or the same wifi) and **think together in real time**. No flag to remember, no `plugin:` vs `server:` to choose — `start` wires the channel for you. (First run configures the MCP server; after that it just launches. Co-resident sessions don't collide — each becomes its own peer.)
+
+Stand up a persistent **named** agent, or join a team room:
+
+```
+npx @sym-bot/mesh-channel@latest start --name cto --group my-team
+```
+
+(`start --print` shows the exact `claude …` command without launching; anything after `--` is passed straight to `claude`, e.g. `… start -- --resume`.)
+
+### Prefer the Claude Code plugin UI?
+
+Install the plugin and you get the 11 MCP tools immediately:
+
+```
 /plugin install sym-mesh-channel@claude-community
 ```
 
-That gives you all **11 MCP tools — no flag, no npm, nothing else to add** — and **one install covers every Claude Code session on the machine**: open as many as you like (one per repo, or one planning while another codes); each session automatically becomes its own mesh peer and picks up the mesh on resume. Also discoverable via `/plugin` → **Discover** → search "mesh".
-
-### Turn on real-time push
-
-The tools above are pull-based. For a peer's message to **land in Claude's context mid-turn, with no tool call** — the "Claude thinks with the mesh" experience the screenshots show — launch each session with the channel flag:
+For real-time push on this path, launch with the channel flag (the handle must match where you installed from):
 
 ```
 claude --dangerously-load-development-channels plugin:sym-mesh-channel@claude-community
 ```
 
-That's the whole setup. The flag is a temporary Anthropic-side gate while the channel awaits the approved-channels allowlist ([anthropics/claude-plugins-official#1512](https://github.com/anthropics/claude-plugins-official/issues/1512)); once it lands, `/plugin install` alone gives you real-time push with no flag.
+Want the latest build before the community directory syncs? Add SYM.BOT's own catalog instead — `/plugin marketplace add sym-bot/marketplace`, then `/plugin install sym-mesh-channel@sym-bot` (and launch with `plugin:sym-mesh-channel@sym-bot`).
 
-### Want a newer build than the directory has?
-
-The community directory pins a build that can lag a few versions behind `main` until the next sync. To track the **latest** release, add the SYM.BOT marketplace and install from there:
-
-```
-/plugin marketplace add sym-bot/marketplace
-/plugin install sym-mesh-channel@sym-bot
-```
-
-`sym-bot/marketplace` is [SYM.BOT's own plugin catalog](https://github.com/sym-bot/marketplace), which tracks each plugin's `main`. The install form is `<plugin>@<marketplace>`, so `@sym-bot` is the marketplace handle. One catch: the channel flag's `@<marketplace>` handle must match wherever you installed from, so on this path it's `plugin:sym-mesh-channel@sym-bot` (not `@claude-community`). Mismatching the handle is the #1 cause of `plugin … not installed` at launch.
-
-> **Either way, that's all most users need.** Want persistent *named* agents (a stable identity in mesh memory), team config committed to a repo, or the `sym` CLI in your terminal? That's the [npm / MCP-server install](#advanced-named-agents-teams--the-cli) — an advanced path, not a second thing to learn here.
+> **The dev flag is temporary** — an Anthropic-side gate while the channel awaits the approved-channels allowlist ([anthropics/claude-plugins-official#1512](https://github.com/anthropics/claude-plugins-official/issues/1512)). `start` passes it under the hood today; once the channel is allowlisted it disappears. Curious when to use the npm/server install directly (named agents, repo-committed team config, the `sym` CLI)? See [Advanced](#advanced-named-agents-teams--the-cli).
 
 ## What you get
 

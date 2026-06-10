@@ -74,37 +74,39 @@
 
 ## 快速开始
 
-**唯一的安装路径——插件。这是所有用户都应使用的方式。** 在 Claude Code 中执行：
+**一条命令——它会配置网格，并启动已开启实时推送的 Claude Code：**
 
 ```
-/plugin marketplace add anthropics/claude-plugins-community   # 一次性注册
+npx @sym-bot/mesh-channel@latest start
+```
+
+在任意仓库、任意多个终端中运行——这些会话通过 loopback（或同一 Wi-Fi）彼此发现并**实时协同思考**。无需记忆任何标志，也无需在 `plugin:` 与 `server:` 之间做选择——`start` 已为你接好频道。（首次运行会配置 MCP 服务器，之后仅启动。同机多个会话不会冲突，各自成为独立对等节点。）
+
+启动一个持久的**命名**智能体，或加入团队房间：
+
+```
+npx @sym-bot/mesh-channel@latest start --name cto --group my-team
+```
+
+（`start --print` 只打印将要执行的 `claude …` 命令而不启动；`--` 之后的所有参数都会原样传给 `claude`，例如 `… start -- --resume`。）
+
+### 更喜欢 Claude Code 插件界面？
+
+安装插件即可立即获得 11 项 MCP 工具：
+
+```
 /plugin install sym-mesh-channel@claude-community
 ```
 
-即可获得全部 **11 项 MCP 工具——无需标志、无需 npm、无需其他配置**，且**一次安装覆盖本机所有 Claude Code 会话**：随心开启任意数量的会话（每个仓库一个，或一个负责规划、另一个负责编码），每个会话自动成为独立的网格对等节点，恢复时自动接入网格。也可通过 `/plugin` → **Discover** 搜索「mesh」发现本插件。
-
-### 开启实时推送
-
-上述工具为拉取模式。若要实现**对等消息在对话中途无工具调用即时送达**——即上文截图所示的「Claude 与网格协同思考」体验——请在启动每个会话时附加频道标志：
+此路径要开启实时推送，需在启动时附加频道标志（句柄必须与安装来源一致）：
 
 ```
 claude --dangerously-load-development-channels plugin:sym-mesh-channel@claude-community
 ```
 
-这就是全部配置。该标志是 Anthropic 侧的临时门控，待频道通过「已批准频道」名单审核后即可去除（[anthropics/claude-plugins-official#1512](https://github.com/anthropics/claude-plugins-official/issues/1512)）；届时仅需 `/plugin install` 即可获得实时推送，无需标志。
+想在社区目录同步前获取最新版本？改为添加 SYM.BOT 自有目录——`/plugin marketplace add sym-bot/marketplace`，然后 `/plugin install sym-mesh-channel@sym-bot`（并以 `plugin:sym-mesh-channel@sym-bot` 启动）。
 
-### 想要比目录更新的版本？
-
-社区目录固定的版本可能落后 `main` 分支若干个版本，需待下次同步才更新。若要跟踪**最新**发布版本，请添加 SYM.BOT 市场并从中安装：
-
-```
-/plugin marketplace add sym-bot/marketplace
-/plugin install sym-mesh-channel@sym-bot
-```
-
-`sym-bot/marketplace` 是 [SYM.BOT 自有插件目录](https://github.com/sym-bot/marketplace)，跟踪各插件的 `main` 分支。安装格式为 `<插件>@<市场>`，因此 `@sym-bot` 是市场句柄。一个注意点：频道标志中的 `@<市场>` 句柄必须与安装来源一致，因此此路径用 `plugin:sym-mesh-channel@sym-bot`（而非 `@claude-community`）。两者不匹配是启动时出现 `plugin … not installed` 的首要原因。
-
-> **无论哪种方式，这都是大多数用户所需的全部。** 需要持久化的**命名**智能体（在网格记忆中拥有稳定身份）、将团队配置提交至仓库、或在终端使用 `sym` CLI？那属于 [npm / MCP 服务器安装](#进阶命名智能体团队与-cli)——一条进阶路径，并非另一套需要学习的东西。
+> **该标志是临时的**——这是 Anthropic 侧的门控，频道正等待进入「已批准频道」名单（[anthropics/claude-plugins-official#1512](https://github.com/anthropics/claude-plugins-official/issues/1512)）。`start` 目前在后台替你附加该标志；一旦频道进入名单，它便会消失。想了解何时直接使用 npm / 服务器安装（命名智能体、提交至仓库的团队配置、`sym` CLI）？参见 [进阶](#进阶命名智能体团队与-cli)。
 
 ---
 

@@ -55,8 +55,8 @@ const cmd = args.find((a) => !a.startsWith('--')) || 'init';
 const groupArgIdx = args.indexOf('--group');
 const groupArg = groupArgIdx !== -1 ? args[groupArgIdx + 1] : null;
 
-if (cmd !== 'init' && cmd !== 'doctor') {
-  process.stderr.write(`Unknown command: ${cmd}\nUsage: sym-mesh-channel init [--project] [--force] [--group <name>]\n       sym-mesh-channel doctor\n`);
+if (cmd !== 'init' && cmd !== 'doctor' && cmd !== 'start') {
+  process.stderr.write(`Unknown command: ${cmd}\nUsage: sym-mesh-channel start [--project] [--name <node>] [--group <name>] [-- <claude args>]\n       sym-mesh-channel init [--project] [--force] [--group <name>]\n       sym-mesh-channel doctor\n`);
   process.exit(1);
 }
 
@@ -109,6 +109,92 @@ function preserveGroup(entry) {
   if (!entry || !entry.env || typeof entry.env.SYM_GROUP !== 'string') return null;
   const g = entry.env.SYM_GROUP.trim();
   return g || null;
+}
+
+// ── start: one command to a live mesh session ─────────────────────
+// `sym-mesh-channel start` configures the MCP server (only if needed)
+// and then launches Claude Code with the real-time Channels flag
+// already on — so the user never types `--dangerously-load-development-
+// channels …` or has to choose between the plugin: and server: handle.
+// The npx / MCP-server install path always exposes the channel as a raw
+// server, so the handle is deterministically `server:claude-sym-mesh`.
+//
+//   sym-mesh-channel start                       # this dir, real-time push on
+//   sym-mesh-channel start --project --name cto --group my-team
+//   sym-mesh-channel start --print               # show the command, don't launch
+//   sym-mesh-channel start -- --resume           # pass args through to claude
+//
+// Co-resident sessions sharing one config don't collide: server.js
+// auto-suffixes a live-identity clash (since 0.3.10), so each session
+// becomes its own peer.
+if (cmd === 'start') {
+  const { spawnSync } = require('child_process');
+
+  const nameArgIdx = args.indexOf('--name');
+  const nameArg = nameArgIdx !== -1 ? args[nameArgIdx + 1] : null;
+  const printOnly = args.includes('--print') || args.includes('--dry-run');
+
+  // Everything after `--` is forwarded verbatim to `claude`.
+  const dashDash = args.indexOf('--');
+  const passthrough = dashDash !== -1 ? args.slice(dashDash + 1) : [];
+
+  const launchDir = process.cwd();
+
+  const handle = 'server:claude-sym-mesh';
+  const claudeArgs = ['--dangerously-load-development-channels', handle, ...passthrough];
+
+  // --print is a pure dry-run: show the launch command, change nothing.
+  if (printOnly) {
+    console.log(`claude ${claudeArgs.join(' ')}`);
+    process.exit(0);
+  }
+
+  // Is the scope Claude Code will actually read already configured with a
+  // LIVE entry?  --project → <cwd>/.mcp.json ; otherwise → ~/.claude.json
+  function liveEntryInScope() {
+    try {
+      const p = isProject
+        ? path.join(launchDir, '.mcp.json')
+        : path.join(os.homedir(), '.claude.json');
+      if (!fs.existsSync(p)) return null;
+      const j = JSON.parse(fs.readFileSync(p, 'utf8'));
+      const e = j && j.mcpServers && j.mcpServers['claude-sym-mesh'];
+      return e && !isStaleEntry(e) ? e : null;
+    } catch { return null; }
+  }
+
+  const existing = liveEntryInScope();
+  const wantName = nameArg || null;
+  const wantGroup = groupArg || null;
+  const mismatch = !!existing && (
+    (wantName && preserveNodeName(existing) !== wantName) ||
+    (wantGroup && (preserveGroup(existing) || 'default') !== wantGroup)
+  );
+
+  // Configure only when there's nothing live yet, an explicit --name/--group
+  // differs from the current entry, or --force was passed. Otherwise launch
+  // straight away — `start` stays cheap to run every session.
+  if (!existing || mismatch || force) {
+    const initArgs = ['init'];
+    if (isProject) initArgs.push('--project');
+    if (groupArg) initArgs.push('--group', groupArg);
+    if (existing && (mismatch || force)) initArgs.push('--force');
+    const childEnv = Object.assign({}, process.env);
+    if (nameArg) childEnv.SYM_NODE_NAME = nameArg;
+    const r = spawnSync(process.execPath, [__filename, ...initArgs], {
+      stdio: 'inherit', env: childEnv, cwd: launchDir,
+    });
+    if (r.status !== 0) process.exit(r.status == null ? 1 : r.status);
+  }
+
+  console.log(`\n▶ Launching Claude Code on the SYM mesh — real-time push on.\n  (channel: ${handle}; the dev flag is temporary until Anthropic allowlists it)\n`);
+  const run = spawnSync('claude', claudeArgs, { stdio: 'inherit', cwd: launchDir });
+  if (run.error && run.error.code === 'ENOENT') {
+    process.stderr.write('ERROR: `claude` was not found on your PATH.\n');
+    process.stderr.write('Install Claude Code (https://claude.com/code), make sure `claude` runs in your terminal, then re-run `sym-mesh-channel start`.\n');
+    process.exit(127);
+  }
+  process.exit(run.status == null ? 0 : run.status);
 }
 
 // --postinstall always runs global install (npm postinstall runs from
@@ -219,9 +305,12 @@ if (useProjectMode) {
     process.exit(2);
   }
 
-  // Preserve the prior node name on rewrite so mesh identity doesn't drift
-  // back to the hostname default on every reinstall.
-  const projectNodeName = preserveNodeName(existingProjectEntry) || nodeName;
+  // --force + an explicit SYM_NODE_NAME deliberately relabels this entry
+  // (symmetric with resolveGroup). Otherwise preserve the prior name so the
+  // mesh identity doesn't drift back to the hostname default on a reinstall.
+  const projectNodeName = (force && process.env.SYM_NODE_NAME)
+    ? process.env.SYM_NODE_NAME
+    : (preserveNodeName(existingProjectEntry) || nodeName);
 
   // Group resolution priority — see resolveGroup() at top of file.
   // Summary: --force + explicit flag/env wins; otherwise preserve, then
@@ -469,7 +558,9 @@ if (existingTopEntry && !force && !topEntryIsStale) {
 }
 
 // Preserve the prior node name on rewrite so mesh identity doesn't drift.
-const topNodeName = preserveNodeName(existingTopEntry) || nodeName;
+const topNodeName = (force && process.env.SYM_NODE_NAME)
+  ? process.env.SYM_NODE_NAME
+  : (preserveNodeName(existingTopEntry) || nodeName);
 
 // Resolve SYM_GROUP for the global entry — see resolveGroup() at top.
 // Heal-path default preserves; --force lets the user explicitly switch

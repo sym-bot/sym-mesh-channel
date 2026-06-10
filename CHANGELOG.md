@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.14
+
+### Added
+
+- **`sym-mesh-channel start` — one command to a live mesh session.** Configures the MCP server if needed, then launches Claude Code with the real-time Channels flag already on, so users never type `--dangerously-load-development-channels …` or have to choose between the `plugin:` and `server:` handle. `start --project --name <node> --group <team>` stands up a named mesh agent; `start --print` is a dry run; everything after `--` is forwarded to `claude`. Co-resident sessions don't collide (server.js auto-suffixes a live-identity clash since 0.3.10), so `start` in several terminals just works.
+
+### Fixed
+
+- **CLI subcommand dispatch via the published bin.** The `bin` entrypoint (`server.js`) only routed `init` to the installer, so `npx @sym-bot/mesh-channel doctor` silently fell through and started the MCP server instead. Now `init`, `doctor`, and `start` all route to the installer/launcher.
+- **`init --force` with an explicit `SYM_NODE_NAME` now relabels the entry** instead of always preserving the prior name (symmetric with how `--group` already behaves). A routine reinstall with no explicit name still preserves identity.
+
 ## 0.3.13
 
 ### Changed

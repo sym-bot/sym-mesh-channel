@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 'use strict';
 
-// Subcommand dispatch: `sym-mesh-channel init` runs the installer.
-if (process.argv[2] === 'init') {
+// Subcommand dispatch: CLI subcommands run the installer/launcher, not the
+// MCP server. (When Claude Code spawns the server there is no subcommand, so
+// argv[2] is undefined and this falls through to the MCP server below.)
+if (['init', 'doctor', 'start'].includes(process.argv[2])) {
   require('./bin/install.js');
   return;
 }
