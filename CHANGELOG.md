@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.17
+
+### Fixed
+
+- **Directed (peer-bound) CMBs now reach the agent.** Pins `@sym-bot/sym` to `^0.7.8`, which carries the MMP §9.2.2 delivery fix: a CMB sent to a specific recipient (`sym_send to=X`) is surfaced to the receiving agent unconditionally, regardless of the SVAF verdict — SVAF governs memory admission only. Previously every inbound CMB (directed or broadcast) ran through the group-autonomous SVAF surfacing gate, so a directed coordination CMB scored low by SVAF was silently dropped. Group-bound broadcasts (`sym_observe`) remain SVAF-gated for surfacing, unchanged. Version-bumped (plugin + `.mcp.json` pin) so installed plugins reinstall and pick up the fix on restart.
+
 ## 0.3.15
 
 ### Fixed
