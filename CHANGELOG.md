@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.19
+
+### Added
+
+- **Signed CMBs (MMP §8.3) — authenticity + integrity.** Pins `@sym-bot/sym` to `^0.7.10`: every CMB is now Ed25519-signed by its author and verified receiver-side against the sending peer's handshake-announced identity key **and** its content hash. A forged, tampered, or content-swapped CMB is rejected before it can reach Claude's context (audit-metered). Unsigned CMBs are allowed for interop unless `SYM_REQUIRE_SIGNED_CMB` is set. This is the cryptographic layer above the existing Ed25519 transport identity + SVAF relevance gate + prompt-injection filter. Version-bumped (plugin + `.mcp.json` pin) so installed plugins reinstall and pick up signing on restart.
+
 ## 0.3.18
 
 ### Added
