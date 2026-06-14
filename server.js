@@ -651,6 +651,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     case 'sym_fetch': {
+      // inNNNN → SDK delivery inbox (pull path); mNNN → channel-push store.
+      if (typeof args.msg_id === 'string' && args.msg_id.startsWith('in')) {
+        const m = node.inboxGet(args.msg_id);
+        if (!m) return { content: [{ type: 'text', text: `Message ${args.msg_id} not found (expired or invalid ID).` }] };
+        return { content: [{ type: 'text', text: `[${m.from}] ${new Date(m.receivedAt).toISOString()}\n\n${m.content}` }] };
+      }
       const entry = MESSAGE_STORE.get(args.msg_id);
       if (!entry) {
         return { content: [{ type: 'text', text: `Message ${args.msg_id} not found (expired or invalid ID).` }] };
@@ -664,35 +670,34 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     case 'sym_inbox': {
-      const limit = Math.max(1, Math.min(args.limit || 50, MAX_STORED));
-      const fresh = [];
-      for (const [id, entry] of MESSAGE_STORE) {
-        const seq = parseInt(id.slice(1), 10);
-        if (seq > inboxCursor) fresh.push({ id, seq, entry });
-      }
-      fresh.sort((a, b) => a.seq - b.seq);
-      // FIFO: drain the OLDEST `limit` first so the cursor advances contiguously
-      // and a backlog larger than `limit` is never skipped — the rest come on the
-      // next call. (Newest-first would jump the cursor past un-returned items.)
-      const slice = fresh.slice(0, limit);
-      if (!args.peek && slice.length) {
-        inboxCursor = Math.max(inboxCursor, ...slice.map((i) => i.seq));
-      }
-      if (!slice.length) {
+      // Thin adapter over the SDK primitive: the node owns the delivery buffer
+      // + drain cursor (node.inbox()). This wrapper only formats for display.
+      const { messages, remaining } = node.inbox({ peek: !!args.peek, limit: args.limit });
+      if (!messages.length) {
         return { content: [{ type: 'text', text: 'Inbox empty — no new mesh messages since your last check.' }] };
       }
-      const more = fresh.length - slice.length;
       const now = Date.now();
-      const lines = slice.map(({ id, entry }) => {
-        const age = Math.round((now - entry.timestamp) / 1000);
-        const head = entry.header || `[${entry.from}] ${String(entry.content || '').replace(/\s+/g, ' ').slice(0, 80)}`;
-        return `${head} [${id}] (${age}s ago)`;
-      });
-      const moreNote = more > 0 ? ` (+${more} more — call sym_inbox again)` : '';
+      const lines = messages.map((m) => {
+        if (m.from === NODE_NAME) return null; // never surface our own deliveries
+        // The security layer still gates the pull path: peer allowlist +
+        // prompt-injection filter run on every message before it enters context.
+        if (!isPeerAllowed(m.from)) return null;
+        const sec = checkSecurity(m.from, m.fields || {}, m.fields?.payload);
+        if (!sec.safe) { securityAudit(sec.reason, m.from, sec.excerpt); return null; }
+        const age = Math.round((now - m.receivedAt) / 1000);
+        const focus = m.fields?.focus?.text || m.content || '';
+        const dirTag = m.directed ? ' →you' : '';
+        const memTag = m.directed && m.remixed === false ? ' ·not-stored' : '';
+        return `[${m.from}${dirTag}] ${String(focus).replace(/\s+/g, ' ').slice(0, 90)}${memTag} [${m.id}] (${age}s ago)`;
+      }).filter(Boolean);
+      if (!lines.length) {
+        return { content: [{ type: 'text', text: 'Inbox empty — no new mesh messages since your last check.' }] };
+      }
+      const moreNote = remaining > 0 ? ` (+${remaining} more — call sym_inbox again)` : '';
       return {
         content: [{
           type: 'text',
-          text: `${slice.length} new mesh message(s)${args.peek ? ' (peek — not drained)' : ''}${moreNote}:\n${lines.join('\n')}\n\nUse sym_fetch <id> for full content; reply via sym_send to=<peer>.`,
+          text: `${lines.length} new mesh message(s)${args.peek ? ' (peek — not drained)' : ''}${moreNote}:\n${lines.join('\n')}\n\nUse sym_fetch <id> for full content; reply via sym_send to=<peer>.`,
         }],
       };
     }
@@ -909,9 +914,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
 // Per COO spec cmb_compact_channel_v0.1.md: push compact headers,
 // store full content for on-demand sym_fetch retrieval. ~10% token
 // savings on mesh traffic without context loss.
-const MESSAGE_STORE = new Map();
+const MESSAGE_STORE = new Map(); // channel-push surface (mNNN) for sym_fetch when channels are enabled
 let msgSeq = 0;
-let inboxCursor = 0; // highest msgSeq drained by sym_inbox (pull-based receive)
 const MAX_STORED = 200;
 
 function storeMessage(from, content, header) {

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.21
+
+### Changed
+
+- **`sym_inbox` is now a thin adapter over the SDK primitive `node.inbox()`** (`@sym-bot/sym` ^0.7.11). The pull-based receive buffer + drain cursor moved down into the node, where it belongs alongside `node.remember()` (send) — so the SDK is sufficient for send **and** pull on its own, and the wrapper owns no buffering logic. Behaviour is unchanged (FIFO drain, `peek`, `limit`); `sym_fetch` now also resolves SDK inbox ids (`inNNNN`). The wrapper still applies the peer allowlist + prompt-injection filter on the pull path before anything enters context.
+
 ## 0.3.20
 
 ### Added
