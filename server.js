@@ -317,8 +317,15 @@ function registerNodeHandlers(n) {
       body = `${body}\n\n---PAYLOAD---\n${serialized}`;
       payloadSuffix = ` [+payload ${serialized.length}b]`;
     }
+    // Directed (peer-bound) delivery indicator (MMP §9.2.2). A directed CMB was
+    // addressed to THIS node — surface it as sent-to-you so the agent knows to
+    // respond. `remixed:false` means SVAF delivered it but did not ingest it
+    // into memory (transient request, not stored) — flag it so the agent does
+    // not assume it is recallable later.
+    const dirTag = entry.directed ? ' →you' : '';
+    const memTag = entry.directed && entry.remixed === false ? ' ·not-stored' : '';
     const msgId = storeMessage(source, body);
-    pushChannel('cmb', `[${source}] ${focus}${moodSuffix}${payloadSuffix} [${msgId}]`);
+    pushChannel('cmb', `[${source}${dirTag}] ${focus}${moodSuffix}${memTag}${payloadSuffix} [${msgId}]`);
   });
 
   n.on('message', (from, content) => {

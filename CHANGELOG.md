@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.18
+
+### Added
+
+- **Directed-delivery indicators in the channel header (MMP §9.2.2).** Pins `@sym-bot/sym` to `^0.7.9`, which adds an ingestion flag to surfaced CMBs. A CMB sent directly to this node now reads as `[peer →you]`; if SVAF delivered it but did not store it (`remixed:false`), the header adds `·not-stored` so the agent knows the directed request is transient, not recallable from mesh memory later. Broadcast CMBs are unaffected.
+
 ## 0.3.17
 
 ### Fixed
