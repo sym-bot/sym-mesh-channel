@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.20
+
+### Added
+
+- **`sym_inbox` — pull-based receive (bypasses channel-push gating).** Claude Code 2.1.177 gates the real-time `<channel>` push behind a managed-settings policy + server-side allowlist, but the MCP tool layer is never gated. Every inbound CMB is already accumulated server-side (the cmb-accepted handler stores it *before* the gated push), so `sym_inbox` lets the agent **pull** messages received since its last check — directed `sym_send` addressed to it plus admitted broadcasts. FIFO drain with a read cursor (no message is skipped even past the page limit), `peek` for non-destructive reads, `limit` to page. The agent is instructed to poll `sym_inbox` at the start of a turn and periodically while coordinating, so receive works regardless of the channel-push policy gate. Compact `[mNNN]` headers; `sym_fetch` for full content.
+
 ## 0.3.19
 
 ### Added

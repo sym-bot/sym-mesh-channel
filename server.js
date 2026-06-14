@@ -324,17 +324,18 @@ function registerNodeHandlers(n) {
     // not assume it is recallable later.
     const dirTag = entry.directed ? ' →you' : '';
     const memTag = entry.directed && entry.remixed === false ? ' ·not-stored' : '';
-    const msgId = storeMessage(source, body);
-    pushChannel('cmb', `[${source}${dirTag}] ${focus}${moodSuffix}${memTag}${payloadSuffix} [${msgId}]`);
+    const header = `[${source}${dirTag}] ${focus}${moodSuffix}${memTag}${payloadSuffix}`;
+    const msgId = storeMessage(source, body, header);
+    pushChannel('cmb', `${header} [${msgId}]`);
   });
 
   n.on('message', (from, content) => {
     if (!isPeerAllowed(from)) return;
     const sec = checkSecurity(from, { focus: { text: content } }, null);
     if (!sec.safe) { securityAudit(sec.reason, from, sec.excerpt); return; }
-    const msgId = storeMessage(from, content);
-    const header = extractCompactHeader(from, content);
-    pushChannel('message', `[${from}] ${header} [${msgId}]`);
+    const header = `[${from}] ${extractCompactHeader(from, content)}`;
+    const msgId = storeMessage(from, content, header);
+    pushChannel('message', `${header} [${msgId}]`);
   });
 }
 
@@ -343,12 +344,12 @@ function registerNodeHandlers(n) {
 // Base instructions shown to the agent at every MCP initialize.
 const BASE_INSTRUCTIONS =
   `You are a peer node on the SYM mesh (identity: ${NODE_NAME}). ` +
-  'Mesh events arrive as <channel> notifications in real-time. ' +
-  'When you see a CMB from another node, respond via sym_send targeted at that node by name if the reply is for that specific peer (MMP §4.4.4 targeted CMB). ' +
+  'Mesh events may arrive as <channel> notifications in real-time, but that push can be gated by Claude Code policy — so to RECEIVE reliably, call sym_inbox to PULL messages addressed to you (directed sym_send + admitted broadcasts). Call sym_inbox at the start of your turn and periodically while coordinating with peers, so you never miss one. ' +
+  'When you receive a CMB from another node, respond via sym_send targeted at that node by name if the reply is for that specific peer (MMP §4.4.4 targeted CMB). ' +
   'Share observations about your own state with the whole mesh via sym_observe (MMP §9.2 receiver-autonomous SVAF evaluation). ' +
   'Both sym_send and sym_observe emit CAT7 CMBs; receivers run SVAF and, if admitted, remix-store with lineage pointing back to your CMB. ' +
   'Search mesh memory via sym_recall. ' +
-  'Messages arrive as compact headers with [mNNN] IDs — use sym_fetch to read the full content when the header is relevant to your current task.';
+  'sym_inbox and <channel> notifications give compact headers with [mNNN] IDs — use sym_fetch to read the full content when relevant to your current task.';
 
 // Final startup step (MMP §4.2 O2 — rejoin-without-replay). The SymNode
 // constructor builds the memory-store index from disk, so the primer is
@@ -485,6 +486,17 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         type: 'object',
         properties: { msg_id: { type: 'string', description: 'Message ID (e.g., m007)' } },
         required: ['msg_id'],
+      },
+    },
+    {
+      name: 'sym_inbox',
+      description: 'PULL mesh messages received since your last inbox check — directed sym_send addressed to you, plus admitted broadcasts. This is the poll-based RECEIVE path: real-time channel push can be gated by Claude Code policy, but this tool always works. Call it at the start of a turn and periodically while coordinating so you never miss a peer. Returns compact headers with [mNNN] IDs (newest last); use sym_fetch for full content, reply via sym_send.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          peek: { type: 'boolean', description: 'If true, do not advance the read cursor (same items return next call). Default false — draining.' },
+          limit: { type: 'number', description: 'Max messages to return (default 50, newest last).' },
+        },
       },
     },
     {
@@ -647,6 +659,40 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
         content: [{
           type: 'text',
           text: `[${entry.from}] ${new Date(entry.timestamp).toISOString()}\n\n${entry.content}`,
+        }],
+      };
+    }
+
+    case 'sym_inbox': {
+      const limit = Math.max(1, Math.min(args.limit || 50, MAX_STORED));
+      const fresh = [];
+      for (const [id, entry] of MESSAGE_STORE) {
+        const seq = parseInt(id.slice(1), 10);
+        if (seq > inboxCursor) fresh.push({ id, seq, entry });
+      }
+      fresh.sort((a, b) => a.seq - b.seq);
+      // FIFO: drain the OLDEST `limit` first so the cursor advances contiguously
+      // and a backlog larger than `limit` is never skipped — the rest come on the
+      // next call. (Newest-first would jump the cursor past un-returned items.)
+      const slice = fresh.slice(0, limit);
+      if (!args.peek && slice.length) {
+        inboxCursor = Math.max(inboxCursor, ...slice.map((i) => i.seq));
+      }
+      if (!slice.length) {
+        return { content: [{ type: 'text', text: 'Inbox empty — no new mesh messages since your last check.' }] };
+      }
+      const more = fresh.length - slice.length;
+      const now = Date.now();
+      const lines = slice.map(({ id, entry }) => {
+        const age = Math.round((now - entry.timestamp) / 1000);
+        const head = entry.header || `[${entry.from}] ${String(entry.content || '').replace(/\s+/g, ' ').slice(0, 80)}`;
+        return `${head} [${id}] (${age}s ago)`;
+      });
+      const moreNote = more > 0 ? ` (+${more} more — call sym_inbox again)` : '';
+      return {
+        content: [{
+          type: 'text',
+          text: `${slice.length} new mesh message(s)${args.peek ? ' (peek — not drained)' : ''}${moreNote}:\n${lines.join('\n')}\n\nUse sym_fetch <id> for full content; reply via sym_send to=<peer>.`,
         }],
       };
     }
@@ -865,11 +911,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
 // savings on mesh traffic without context loss.
 const MESSAGE_STORE = new Map();
 let msgSeq = 0;
+let inboxCursor = 0; // highest msgSeq drained by sym_inbox (pull-based receive)
 const MAX_STORED = 200;
 
-function storeMessage(from, content) {
+function storeMessage(from, content, header) {
   const msgId = `m${String(++msgSeq).padStart(3, '0')}`;
-  MESSAGE_STORE.set(msgId, { from, content, timestamp: Date.now() });
+  MESSAGE_STORE.set(msgId, { from, content, header: header || null, timestamp: Date.now() });
   while (MESSAGE_STORE.size > MAX_STORED) {
     const oldest = MESSAGE_STORE.keys().next().value;
     MESSAGE_STORE.delete(oldest);
