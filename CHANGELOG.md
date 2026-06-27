@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.23
+
+### Changed
+
+- **Removed the automatic `postinstall` registration.** The package no longer mutates `~/.claude.json` (or a project `.mcp.json`) on `npm install`. As a Claude Code **plugin**, the package is launched via `npx` on every session start, and the postinstall re-registered a competing user-scoped `claude-sym-mesh` MCP server each time — producing a second mesh node alongside the plugin's own. Registration now happens only via the explicit `start`/`init` commands, which the standalone flow (`npx @sym-bot/mesh-channel start`) already runs and which self-configure on first launch — so there is no change for standalone users, and the plugin path no longer double-registers. Pairs with the 0.3.22 `.sym/node.json` reader to make the plugin the single, stable, per-project mesh node.
+
 ## 0.3.22
 
 ### Added
