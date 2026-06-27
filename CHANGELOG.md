@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.25
+
+### Changed
+
+- **Runs the `meshmem/` → `cmbs/` store migration on install** (`bin/install.js` calls `@sym-bot/sym`'s `migrateStores()`), so every non-live node is migrated when the plugin is set up. Pairs with `@sym-bot/sym` 0.7.16.
+
 ## 0.3.24
 
 ### Changed

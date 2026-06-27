@@ -60,6 +60,13 @@ if (cmd !== 'init' && cmd !== 'doctor' && cmd !== 'start') {
   process.exit(1);
 }
 
+// One-time bulk store migration (meshmem/ → cmbs/) for all non-live nodes, run
+// on install so readers use the cmbs/ name with no fallback. Idempotent.
+try {
+  const n = require('@sym-bot/sym').migrateStores();
+  if (n) process.stderr.write(`[sym-mesh-channel] migrated ${n} node store(s): meshmem → cmbs\n`);
+} catch { /* SDK not resolvable or nothing to do — non-fatal */ }
+
 const KEBAB_CASE_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 function validateGroupValue(value, source) {
   if (!value) return;
