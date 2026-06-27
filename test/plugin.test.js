@@ -181,7 +181,7 @@ test('self-echo filtering is implemented', () => {
 
 // ── 4b. Tool surface — CAT7 CMB emission (v0.2.0 breaking change) ──
 
-console.log('\nTool surface — sym_send / sym_observe:');
+console.log('\nTool surface — sym_send / sym_publish:');
 
 test('sym_send tool schema has focus (required) and to (optional), no message', () => {
   const code = fs.readFileSync(resolveServerJs(), 'utf8');
@@ -191,7 +191,7 @@ test('sym_send tool schema has focus (required) and to (optional), no message', 
   // Grab the descriptor block (next ~80 lines — tool definitions are small).
   const block = code.slice(sendIdx, sendIdx + 2000);
   // Next tool marker bounds the block.
-  const nextToolIdx = block.indexOf("name: 'sym_observe'");
+  const nextToolIdx = block.indexOf("name: 'sym_publish'");
   const descriptor = nextToolIdx !== -1 ? block.slice(0, nextToolIdx) : block;
   assert.ok(descriptor.includes("required: ['focus']"), 'sym_send must declare focus as required (MMP §4.2 CAT7 anchor)');
   assert.ok(descriptor.includes('to: {'), 'sym_send must accept a "to" property for targeted send (§4.4.4)');
@@ -205,7 +205,7 @@ test('sym_send handler routes through node.remember, not node.send', () => {
   assert.ok(caseIdx !== -1, "sym_send case handler not found");
   // Handler runs until the next case: label. Upper bound defensively.
   const block = code.slice(caseIdx, caseIdx + 4000);
-  const nextCaseIdx = block.indexOf("case 'sym_observe'");
+  const nextCaseIdx = block.indexOf("case 'sym_publish'");
   const handler = nextCaseIdx !== -1 ? block.slice(0, nextCaseIdx) : block;
   assert.ok(handler.includes('node.remember('), 'handler must use node.remember() to emit CAT7 CMB per MMP §4.2');
   assert.ok(!/node\.send\(\s*msg\s*\)/.test(handler), 'handler must NOT fall back to node.send(msg) raw-text broadcast');
@@ -214,14 +214,14 @@ test('sym_send handler routes through node.remember, not node.send', () => {
   assert.ok(handler.includes('ambiguous'), 'handler must reject ambiguous peer matches with an explicit message');
 });
 
-test('sym_observe tool schema unchanged shape (regression)', () => {
+test('sym_publish tool schema unchanged shape (regression)', () => {
   const code = fs.readFileSync(resolveServerJs(), 'utf8');
-  const obsIdx = code.indexOf("name: 'sym_observe'");
-  assert.ok(obsIdx !== -1, 'sym_observe descriptor not found');
+  const obsIdx = code.indexOf("name: 'sym_publish'");
+  assert.ok(obsIdx !== -1, 'sym_publish descriptor not found');
   const block = code.slice(obsIdx, obsIdx + 2000);
   const nextIdx = block.indexOf("name: 'sym_recall'");
   const descriptor = nextIdx !== -1 ? block.slice(0, nextIdx) : block;
-  assert.ok(descriptor.includes("required: ['focus']"), 'sym_observe continues to require focus');
+  assert.ok(descriptor.includes("required: ['focus']"), 'sym_publish continues to require focus');
 });
 
 test('MCP server instructions reference SVAF + targeted CMB semantics', () => {

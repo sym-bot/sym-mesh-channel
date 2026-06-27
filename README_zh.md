@@ -117,7 +117,7 @@ claude --dangerously-load-development-channels plugin:sym-mesh-channel@claude-co
 | 工具 | 功能说明 |
 |------|---------|
 | `sym_send` | 向所有网格对等节点广播自由文本消息，接收方上下文中以 `<channel>` 通知形式即时呈现 |
-| `sym_observe` | 共享结构化 CAT7 观测数据：焦点、问题、意图、动机、承诺、视角、情绪；接收端经 SVAF 门控过滤 |
+| `sym_publish` | 共享结构化 CAT7 观测数据：焦点、问题、意图、动机、承诺、视角、情绪；接收端经 SVAF 门控过滤 |
 | `sym_recall` | 检索网格记忆中历史认知记忆块（CMB） |
 | `sym_fetch` | 通过紧凑频道头部 ID 获取单个 CMB 的完整内容 |
 | `sym_peers` | 列出已发现的对等节点（通过 Bonjour 或中继） |
@@ -261,7 +261,7 @@ sym-mesh-channel  ←——  Bonjour mDNS  ——→  sym-mesh-channel
 1. 对等节点广播认知记忆块（CMB）  
 2. 本地 SymNode 通过 **SVAF**（Symbolic-Vector Attention Fusion，接收端相关性门控）评估该 CMB：在 7 个语义维度打分，低相关性信号在抵达 Claude 上下文前即被过滤  
 3. 若通过门控，MCP 服务器向 Claude Code 发送 `notifications/claude/channel` 通知  
-4. Claude 将其呈现为对话中的 `<channel>` 块，可即时响应，并通过 `sym_send`/`sym_observe` 反向广播  
+4. Claude 将其呈现为对话中的 `<channel>` 块，可即时响应，并通过 `sym_send`/`sym_publish` 反向广播  
 ✅ 无轮询、无工具调用、网格协同思考
 
 ### 身份与传输

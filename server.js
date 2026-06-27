@@ -34,7 +34,7 @@ process.stdout.write = function (chunk, ...rest) {
  * Architecture (MMP Section 13.9: Local Event Interface):
  *   SymNode (own identity, own SVAF field weights) → relay → mesh
  *   MCP channel notifications → Claude Code (real-time push)
- *   MCP tools → SymNode methods (send, observe, recall)
+ *   MCP tools → SymNode methods (send, publish, recall)
  *
  * This is a PEER NODE, not a client of the daemon. It has its own identity,
  * its own relay connection, and its own SVAF evaluation with engineering-domain
@@ -360,12 +360,12 @@ function registerNodeHandlers(n) {
 // Base instructions shown to the agent at every MCP initialize.
 const BASE_INSTRUCTIONS =
   `You are a peer node on the SYM mesh (identity: ${NODE_NAME}). ` +
-  'Mesh events may arrive as <channel> notifications in real-time, but that push can be gated by Claude Code policy — so to RECEIVE reliably, call sym_inbox to PULL messages addressed to you (directed sym_send + admitted broadcasts). Call sym_inbox at the start of your turn and periodically while coordinating with peers, so you never miss one. ' +
+  'The mesh is publish-subscribe: peers deliver CMBs to you in real-time the instant they publish, as <channel> notifications. That real-time push can be gated by Claude Code policy, so call sym_receive to surface any deliveries the push did not bring into your context (directed sym_send + admitted broadcasts) — a live delivery feed, not a memory query. Call sym_receive at the start of your turn and periodically while coordinating with peers, so no delivery is missed. ' +
   'When you receive a CMB from another node, respond via sym_send targeted at that node by name if the reply is for that specific peer (MMP §4.4.4 targeted CMB). ' +
-  'Share observations about your own state with the whole mesh via sym_observe (MMP §9.2 receiver-autonomous SVAF evaluation). ' +
-  'Both sym_send and sym_observe emit CAT7 CMBs; receivers run SVAF and, if admitted, remix-store with lineage pointing back to your CMB. ' +
+  'Publish a CMB to your whole group via sym_publish — a projection of your own state (MMP §9.2 receiver-autonomous SVAF evaluation). ' +
+  'Both sym_send and sym_publish emit a CAT7 CMB (your projection); each receiver runs SVAF and, if it admits the CMB as an observation, remix-stores it with lineage back to yours. ' +
   'Search mesh memory via sym_recall. ' +
-  'sym_inbox and <channel> notifications give compact headers with [mNNN] IDs — use sym_fetch to read the full content when relevant to your current task.';
+  'sym_receive and <channel> notifications give compact headers with [mNNN] IDs — use sym_fetch to read the full content when relevant to your current task.';
 
 // Final startup step (MMP §4.2 O2 — rejoin-without-replay). The SymNode
 // constructor builds the memory-store index from disk, so the primer is
@@ -407,7 +407,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         'Send a structured CAT7 CMB to a specific mesh peer (targeted) or to all peers (broadcast, when "to" is omitted). ' +
         'Receivers evaluate the CMB per-field via SVAF (MMP §9.2) and, if admitted, remix-store it with lineage pointing back to this CMB. ' +
         'Use sym_send when the CMB is for a specific peer (e.g. a peer-review gating request directed at the reviewer role); ' +
-        'use sym_observe when sharing your own state with the whole mesh.',
+        'use sym_publish when publishing your own state to the whole group.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -444,11 +444,11 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
-      name: 'sym_observe',
+      name: 'sym_publish',
       description:
-        'Broadcast a structured CAT7 observation about your own state to all mesh peers. ' +
-        'Receivers run SVAF (MMP §9.2) and admitted CMBs are remix-stored with lineage. ' +
-        'Equivalent to sym_send with "to" omitted — kept as a separate tool because self-observation is the common case and does not need peer selection.',
+        'Publish a structured CAT7 CMB — a projection of your own state — to all peers in your group. ' +
+        'Each receiver runs SVAF (MMP §9.2) and, if it admits the CMB as an observation, remix-stores it with lineage. ' +
+        'Equivalent to sym_send with "to" omitted — kept as a separate tool because publishing your own state is the common case and does not need peer selection.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -505,8 +505,8 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
-      name: 'sym_inbox',
-      description: 'PULL mesh messages received since your last inbox check — directed sym_send addressed to you, plus admitted broadcasts. This is the poll-based RECEIVE path: real-time channel push can be gated by Claude Code policy, but this tool always works. Call it at the start of a turn and periodically while coordinating so you never miss a peer. Returns compact headers with [mNNN] IDs (newest last); use sym_fetch for full content, reply via sym_send.',
+      name: 'sym_receive',
+      description: 'Surface the CMBs the mesh has delivered to you in real-time — directed sym_send addressed to you, plus admitted broadcasts published to your group. The mesh is publish-subscribe: peers deliver the instant they publish, pushed as <channel> notifications. Because that push can be gated by Claude Code policy, sym_receive surfaces any deliveries it missed so none is lost — a live delivery feed, NOT a store query (use sym_recall to search stored memory). Call it at the start of a turn and periodically while coordinating so no delivery is missed. Returns compact headers with [mNNN] IDs (newest last); use sym_fetch for full content, reply via sym_send.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -627,7 +627,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
       return { content: [{ type: 'text', text: summary }] };
     }
 
-    case 'sym_observe': {
+    case 'sym_publish': {
       const fields = {
         focus: args.focus || 'observation',
         issue: args.issue || 'none',
@@ -640,7 +640,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
       const observeOpts = {};
       if (args.payload !== undefined && args.payload !== null) observeOpts.payload = args.payload;
       const entry = node.remember(fields, observeOpts);
-      return { content: [{ type: 'text', text: entry ? `Observed: ${entry.key}` : 'Duplicate — already in memory.' }] };
+      return { content: [{ type: 'text', text: entry ? `Published: ${entry.key}` : 'Duplicate — already in memory.' }] };
     }
 
     case 'sym_recall': {
@@ -685,12 +685,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
       };
     }
 
-    case 'sym_inbox': {
+    case 'sym_receive': {
       // Thin adapter over the SDK primitive: the node owns the delivery buffer
       // + drain cursor (node.inbox()). This wrapper only formats for display.
       const { messages, remaining } = node.inbox({ peek: !!args.peek, limit: args.limit });
       if (!messages.length) {
-        return { content: [{ type: 'text', text: 'Inbox empty — no new mesh messages since your last check.' }] };
+        return { content: [{ type: 'text', text: 'Caught up — nothing new delivered since your last sym_receive.' }] };
       }
       const now = Date.now();
       const lines = messages.map((m) => {
@@ -707,9 +707,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
         return `[${m.from}${dirTag}] ${String(focus).replace(/\s+/g, ' ').slice(0, 90)}${memTag} [${m.id}] (${age}s ago)`;
       }).filter(Boolean);
       if (!lines.length) {
-        return { content: [{ type: 'text', text: 'Inbox empty — no new mesh messages since your last check.' }] };
+        return { content: [{ type: 'text', text: 'Caught up — nothing new delivered since your last sym_receive.' }] };
       }
-      const moreNote = remaining > 0 ? ` (+${remaining} more — call sym_inbox again)` : '';
+      const moreNote = remaining > 0 ? ` (+${remaining} more — call sym_receive again)` : '';
       return {
         content: [{
           type: 'text',

@@ -106,8 +106,9 @@ Eleven MCP tools exposed to Claude Code, namespaced under `mcp__claude-sym-mesh_
 
 | Tool | What it does |
 |---|---|
-| `sym_send` | Broadcast a free-text message to all mesh peers. Arrives in receivers' contexts as a `<channel>` notification. |
-| `sym_observe` | Share a structured CAT7 observation: focus, issue, intent, motivation, commitment, perspective, mood. SVAF-gated on the receiving side. |
+| `sym_send` | Send a CAT7 CMB to a specific peer (point-to-point), or to all if no recipient is given. Arrives in receivers' contexts as a `<channel>` notification. |
+| `sym_publish` | Publish a structured CAT7 CMB — a projection of your state — to your whole group (publish-subscribe): focus, issue, intent, motivation, commitment, perspective, mood. SVAF-gated on the receiving side. |
+| `sym_receive` | Surface CMBs the mesh delivered to you in real-time when the `<channel>` push was gated — a live delivery feed, not a store query. |
 | `sym_recall` | Search mesh memory for past cognitive memory blocks. |
 | `sym_fetch` | Fetch the full content of a single CMB by its compact channel-header ID. |
 | `sym_peers` | List discovered peers (via bonjour or relay). |
@@ -230,7 +231,7 @@ The plugin composes two open specs:
 - **[Claude Code Channels](https://code.claude.com/docs/en/mcp)** (Anthropic, 2026-03-20) — an MCP capability that lets servers push events directly into Claude's conversation context mid-turn via `notifications/claude/channel`. Anthropic built it for the Telegram/Discord/iMessage integrations. We use it for agent-to-agent cognitive coupling.
 - **[MMP — the Mesh Memory Protocol](https://meshcognition.org/spec/mmp)** — defines *what* gets pushed: typed seven-field cognitive bundles (CAT7: focus, issue, intent, motivation, commitment, perspective, mood), how receivers gate incoming signals ([SVAF](https://arxiv.org/abs/2604.03955)), and how peers maintain identity without a central orchestrator.
 
-**What happens on each message.** When a peer broadcasts a cognitive memory block (CMB), the local SymNode evaluates it via SVAF — Symbolic-Vector Attention Fusion, a receiver-side relevance gate that rejects low-signal messages before they reach Claude's context. If accepted, the MCP server fires a `notifications/claude/channel` notification to Claude Code, which surfaces it as a `<channel>` block in the conversation. Claude sees it, can react, and can broadcast back via `sym_send` or `sym_observe`. No polling. No tool calls. The mesh thinks together.
+**What happens on each message.** When a peer broadcasts a cognitive memory block (CMB), the local SymNode evaluates it via SVAF — Symbolic-Vector Attention Fusion, a receiver-side relevance gate that rejects low-signal messages before they reach Claude's context. If accepted, the MCP server fires a `notifications/claude/channel` notification to Claude Code, which surfaces it as a `<channel>` block in the conversation. Claude sees it, can react, and can broadcast back via `sym_send` or `sym_publish`. No polling. No tool calls. The mesh thinks together.
 
 **Identity and transport.** Each peer has its own Ed25519 keypair stored at `~/.sym/nodes/<name>/identity.json`. Node IDs are UUID v7 + Ed25519 signatures, gossiped through the relay's directory or via Bonjour TXT records. Full architecture in MMP §4–§6.
 

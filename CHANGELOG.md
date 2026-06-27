@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.24
+
+### Changed
+
+- **MCP tools renamed to canonical Enterprise Integration Pattern verbs:** `sym_observe` → **`sym_publish`** (Publish-Subscribe Channel) and `sym_inbox` → **`sym_receive`** (Polling Consumer). The I/O surface now reads as what the agent *does* (publish / send / receive), while the cognitive mechanism terms (emit/admit, projection/observation) stay in the MMP spec one layer down. `sym_send` (Point-to-Point) unchanged. Clean break — no aliases. Agent instructions + tool descriptions updated: publishing emits a *projection* of your state; a receiver that admits it takes it as an *observation*.
+
 ## 0.3.23
 
 ### Changed
