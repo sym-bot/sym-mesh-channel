@@ -232,7 +232,23 @@ function resolveNodeName(base) {
   }
   return base;
 }
-const NODE_NAME = resolveNodeName(process.env.SYM_NODE_NAME || defaultNodeName());
+// Per-project identity (v0.3.22): a named role agent (CTO, melotune-dev, …) commits
+// its node name + group to `$CLAUDE_PROJECT_DIR/.sym/node.json`, so the plugin alone
+// carries a stable per-project identity — no parallel MCP registration, and it
+// survives a plugin reinstall because the config lives in the repo, not the plugin.
+// Env (SYM_NODE_NAME/SYM_GROUP) still wins; this only overrides the auto default.
+// Missing/malformed file → {} → auto default; never a hard fail.
+function projectNodeConfig() {
+  const fs = require('fs'), path = require('path');
+  const dir = process.env.CLAUDE_PROJECT_DIR || process.cwd();
+  try {
+    const cfg = JSON.parse(fs.readFileSync(path.join(dir, '.sym', 'node.json'), 'utf8'));
+    const clean = (s) => (typeof s === 'string' && s.trim()) ? s.trim() : undefined;
+    return { node_name: clean(cfg.node_name), group: clean(cfg.group) };
+  } catch { return {}; }
+}
+const PROJECT_CFG = projectNodeConfig();
+const NODE_NAME = resolveNodeName(process.env.SYM_NODE_NAME || PROJECT_CFG.node_name || defaultNodeName());
 
 // ── Mesh group (MMP §5.8) ──────────────────────────────────
 //
@@ -245,7 +261,7 @@ const NODE_NAME = resolveNodeName(process.env.SYM_NODE_NAME || defaultNodeName()
 function resolveServiceType() {
   const explicit = process.env.SYM_SERVICE_TYPE;
   if (explicit) return explicit;
-  const group = process.env.SYM_GROUP;
+  const group = process.env.SYM_GROUP || PROJECT_CFG.group;
   if (group && group !== 'default') return `_${group}._tcp`;
   return '_sym._tcp';
 }
@@ -253,7 +269,7 @@ function resolveServiceType() {
 // Claude Code restart. Declaring as `let` rather than `const` is the
 // smallest change that makes hot-swap possible.
 let SERVICE_TYPE = resolveServiceType();
-let GROUP = process.env.SYM_GROUP || (SERVICE_TYPE !== '_sym._tcp'
+let GROUP = process.env.SYM_GROUP || PROJECT_CFG.group || (SERVICE_TYPE !== '_sym._tcp'
   ? SERVICE_TYPE.replace(/^_/, '').replace(/\._tcp$/, '')
   : 'default');
 let RELAY_URL = process.env.SYM_RELAY_URL || null;

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.22
+
+### Added
+
+- **Per-project identity via `$CLAUDE_PROJECT_DIR/.sym/node.json`.** A named role agent (e.g. a CTO node `claude-code-mac` on `sym-bot-team`, or `melotune-dev` on `melo-ios`) can now commit `{ "node_name": "...", "group": "..." }` to `.sym/node.json` in its repo, and the plugin reads it on start. This lets the **plugin alone** carry a stable, per-project identity — no parallel `claude-sym-mesh` MCP registration in a project `.mcp.json`, which previously produced a *second* mesh node (the project-scoped server plus the plugin-scoped server are never deduplicated). Because the identity lives in the repo, it survives a plugin reinstall. Precedence is unchanged-and-extended: `SYM_NODE_NAME`/`SYM_GROUP` env still win, then `.sym/node.json`, then the auto `claude-<repo>-<session>` default. A missing or malformed file is ignored (falls back to the auto default) — never a hard fail.
+
 ## 0.3.21
 
 ### Changed
