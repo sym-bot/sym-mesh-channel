@@ -237,18 +237,22 @@ The plugin composes two open specs:
 
 ## Advanced: per-project node identity
 
-*(npm / MCP-server install only — plugin sessions already get a distinct peer identity each.)*
+By default each session picks up an identity automatically — fine for one-machine, one-peer use. Override it when you want a project to appear as a **stable, named peer** every time: a `cto` session and a `melotune-dev` session on the same laptop, each keeping its name (and team group) across restarts instead of an auto-generated `claude-<repo>-<hash>` that changes per session.
 
-With the global npm install, every Claude Code session on the machine shares one mesh identity (set in `~/.claude.json`). To give each project directory its own stable peer name instead — e.g. a "research" session and a "strategy" session on the same laptop — install per-project:
+Commit a `.sym/node.json` to the project — e.g. `path/to/project/.sym/node.json`:
 
-```bash
-cd path/to/your/project
-SYM_NODE_NAME=claude-myproject-win npx @sym-bot/mesh-channel init --project
+```json
+{
+  "node_name": "cto",
+  "group": "my-team"
+}
 ```
 
-This writes `<project>/.mcp.json` and merges `<project>/.claude/settings.local.json` instead of touching `~/.claude.json`. Claude Code loads project-scoped `.mcp.json` on launch and those entries override the global one when you're running from that directory, so each project gets its own `SYM_NODE_NAME` without stepping on siblings.
+The plugin reads it on launch (v0.3.22+) whenever Claude Code runs from that directory — the node takes that name and joins that group. It lives in the repo, so it survives a plugin reinstall; `SYM_NODE_NAME` / `SYM_GROUP` still override it; a missing or malformed file just falls back to the auto name. Gitignore `.sym/` if the name is per-machine rather than something the team shares.
 
-Normal one-machine-one-peer usage does **not** need `--project`.
+> ⚠️ **Don't add a project `.mcp.json` when the plugin is installed.** Claude Code runs the plugin's mesh server *and* the project's, with no dedup across them — so you get a phantom `<name>-2` peer beside your node. `.sym/node.json` gives per-project identity through the plugin alone, with no second registration. (This is what the older `init --project` did — use `.sym/node.json` instead.)
+
+*Standalone npm, no plugin?* A project-scoped server is fine there: `SYM_NODE_NAME=… npx @sym-bot/mesh-channel init --project` writes `<project>/.mcp.json`. Just never combine it with the plugin.
 
 ## Cross-network setup (own-hosted relay)
 
@@ -361,7 +365,11 @@ Your shell profile (`~/.zshrc`, `~/.bashrc`) exports `SYM_RELAY_URL`. Claude Cod
 
 ### Multiple Claude Code sessions on the same machine want to share an identity
 
-Don't. Each session should have a distinct `SYM_NODE_NAME`. The SymNode acquires an exclusive lockfile on its identity (`~/.sym/nodes/<name>/lock.pid`) and refuses to start a second process with the same name. If you see `EIDENTITYLOCK`, kill the other process or pick a different name. For multiple parallel sessions with their own identities, use the per-project install above.
+Don't. Each session should have a distinct `SYM_NODE_NAME`. The SymNode acquires an exclusive lockfile on its identity (`~/.sym/nodes/<name>/lock.pid`) and refuses to start a second process with the same name. If you see `EIDENTITYLOCK`, kill the other process or pick a different name. For multiple parallel sessions with their own identities, use [per-project node identity](#advanced-per-project-node-identity).
+
+### A peer named `<name>-2` you didn't create
+
+Two mesh servers are registering one node. Almost always the plugin is installed *and* the project has its own `.mcp.json` for `claude-sym-mesh` (often from an older `init --project`): Claude Code runs both, the second collides on the name and renames itself `-2`. Remove the project `.mcp.json` and use [`.sym/node.json`](#advanced-per-project-node-identity) for per-project identity.
 
 ## Advanced: named agents, teams & the CLI
 
