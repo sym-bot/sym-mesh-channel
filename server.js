@@ -671,7 +671,16 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (typeof args.msg_id === 'string' && args.msg_id.startsWith('in')) {
         const m = node.inboxGet(args.msg_id);
         if (!m) return { content: [{ type: 'text', text: `Message ${args.msg_id} not found (expired or invalid ID).` }] };
-        return { content: [{ type: 'text', text: `[${m.from}] ${new Date(m.receivedAt).toISOString()}\n\n${m.content}` }] };
+        // Append the opaque payload (now preserved on the inbox message) so the
+        // pull path returns structured data intact, exactly like the channel-push
+        // store does — otherwise sym_fetch on a directed CMB silently loses it.
+        let body = m.content || '';
+        if (m.payload !== undefined && m.payload !== null) {
+          let serialized;
+          try { serialized = JSON.stringify(m.payload, null, 2); } catch { serialized = String(m.payload); }
+          body = `${body}\n\n---PAYLOAD---\n${serialized}`;
+        }
+        return { content: [{ type: 'text', text: `[${m.from}] ${new Date(m.receivedAt).toISOString()}\n\n${body}` }] };
       }
       const entry = MESSAGE_STORE.get(args.msg_id);
       if (!entry) {
@@ -698,13 +707,16 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
         // The security layer still gates the pull path: peer allowlist +
         // prompt-injection filter run on every message before it enters context.
         if (!isPeerAllowed(m.from)) return null;
-        const sec = checkSecurity(m.from, m.fields || {}, m.fields?.payload);
+        // payload lives at m.payload (sibling of fields), not m.fields.payload.
+        const sec = checkSecurity(m.from, m.fields || {}, m.payload);
         if (!sec.safe) { securityAudit(sec.reason, m.from, sec.excerpt); return null; }
         const age = Math.round((now - m.receivedAt) / 1000);
         const focus = m.fields?.focus?.text || m.content || '';
         const dirTag = m.directed ? ' →you' : '';
         const memTag = m.directed && m.remixed === false ? ' ·not-stored' : '';
-        return `[${m.from}${dirTag}] ${String(focus).replace(/\s+/g, ' ').slice(0, 90)}${memTag} [${m.id}] (${age}s ago)`;
+        // Flag structured data so the agent knows to sym_fetch the full body.
+        const payTag = (m.payload !== undefined && m.payload !== null) ? ' [+payload]' : '';
+        return `[${m.from}${dirTag}] ${String(focus).replace(/\s+/g, ' ').slice(0, 90)}${memTag}${payTag} [${m.id}] (${age}s ago)`;
       }).filter(Boolean);
       if (!lines.length) {
         return { content: [{ type: 'text', text: 'Caught up — nothing new delivered since your last sym_receive.' }] };
