@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.28
+
+### Fixed
+
+- **Opaque payloads now survive the pull path.** A directed CMB's `payload` (structured data beyond CAT7) reached agents over the channel-push path but vanished on the `sym_receive` → `sym_fetch` pull path: the inbox message dropped it (fixed upstream in `@sym-bot/sym` 0.7.18, now a `^0.7.18` dependency) and the plugin read it from the wrong field and never returned it. `sym_fetch` now appends a `---PAYLOAD---` section, `sym_receive` security-checks `m.payload` and tags the line `[+payload]`. This is the substrate for cross-device agent-to-agent structured data exchange, not just CAT7 projections. Server change — the plugin's `npx` pin moves to `@0.3.28`.
+
 ## 0.3.27
 
 ### Docs
