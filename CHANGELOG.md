@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.26
+
+### Docs
+
+- **Per-project identity documented around `.sym/node.json`.** The README's per-project node identity section now leads with `.sym/node.json` (the v0.3.22+ reader) instead of the legacy `init --project`, which writes a project `.mcp.json`. Adds an explicit warning that pairing a project `.mcp.json` with the plugin double-registers the node into a phantom `<name>-2` peer, and a matching Troubleshooting entry. No code change.
+
 ## 0.3.25
 
 ### Changed
