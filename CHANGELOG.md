@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.27
+
+### Docs
+
+- **`@sym-bot` is now the canonical install path.** The README's headline install and channel-handle guidance pointed at `@claude-community` (the Anthropic community directory), whose auto-synced listing lags releases — so new users could land on stale code. Primary install is now `/plugin marketplace add sym-bot/marketplace` + `sym-mesh-channel@sym-bot`, which tracks the repo's `main` and is always current. The community directory stays as a secondary "also listed, may lag" credit.
+- **Plugin/package descriptions now cover same-machine loopback.** They said the mesh runs "over Bonjour LAN or WebSocket relay" (and "remote teams"), omitting the headline capability — multiple sessions on one machine over loopback, no network at all. Updated both to read one-machine / LAN / cross-network.
+
 ## 0.3.26
 
 ### Docs
