@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.29
+
+### Fixed
+
+- **`sym_group_info` peer list no longer always reads "(no peers in this group)".** The handler called `node.getPeers()`, which is not a public `SymNode` method — the `typeof` guard always fell through to `[]`, so the peer list rendered empty even with peers connected, while `peers in group: N` (from `status().peerCount`) showed the real count. That count/list disagreement read as a membership-handshake failure during cross-device debugging but was purely a rendering bug. Now reads the list from `status().peers` (same source as the count). No transport change.
+- **Cross-device opaque payload now survives on the SVAF-admit path** (via the `@sym-bot/sym` `^0.7.19` bump). A directed CMB's `payload` was dropped whenever the receiver SVAF-*admitted* it (the fused remix is rebuilt from CAT7 fields without the payload), so payload delivery silently depended on the receiver's per-node SVAF drift — the root of the "payload arrives on some peers, not others" asymmetry. Fixed upstream; the plugin's `npx` pin moves to `@0.3.29` to pull it.
+
 ## 0.3.28
 
 ### Fixed
