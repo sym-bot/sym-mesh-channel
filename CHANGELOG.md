@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.35
+
+### Changed
+
+- Bumps `@sym-bot/sym` to `^0.7.25` — adds earned-authority-weighted attestation aggregation (EA6): a node can fold the roster's attestations about a CMB into a single verdict weighted by each attester's *resolved* role, so an anchor's verdict outweighs a participant's and over-claims cannot inflate consensus. Consumed by the Mesh Edge cockpit's source drawer.
+
 ## 0.3.34
 
 ### Changed
