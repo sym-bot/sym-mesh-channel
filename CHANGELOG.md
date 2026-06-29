@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.30
+
+### Added
+
+- **Admission Attestations reach the fleet** (via `@sym-bot/sym` `^0.7.20` / `@sym-bot/core` `^0.3.42`). When a node's SVAF gate admits a CMB, it now signs a per-field Admission Attestation and persists it on the gated remix (`cmb.admission`) — the durable, attributable, tamper-evident (against modification) audit record of the gating decision, with a per-attester hash-chain. No tool-surface change in this release; the substrate now produces and stores the records. `npx` pin moves to `@0.3.30`.
+
 ## 0.3.29
 
 ### Fixed
