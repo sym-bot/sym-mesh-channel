@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.31
+
+### Added
+
+- **Attestation gossip + cross-mesh audit trail with omission-evidence reach the fleet** (via `@sym-bot/sym` `^0.7.21` / `@sym-bot/core` `^0.3.43`). Nodes now gossip their signed per-field gating attestations across the roster (verified end-to-end, rate-limited, relayed once), attest every gate (reject/redundant too), and periodically commit Merkle checkpoints over their attestation chain that roster peers countersign — so once witnessed, a suppressed attestation is detectable (the recomputed root diverges). Guarantee: tamper-evident + omission-evident to the last witnessed checkpoint. No tool-surface change. `npx` pin moves to `@0.3.31`.
+
 ## 0.3.30
 
 ### Added
