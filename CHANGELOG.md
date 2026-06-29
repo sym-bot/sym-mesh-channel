@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.32
+
+### Added
+
+- **Durable audit trail reaches the fleet** (via `@sym-bot/sym` `^0.7.22`). A node's Admission Attestation trail — attestations, Merkle checkpoints, and witness countersignatures — now persists append-only on disk and reloads on startup, so it survives a restart instead of evaporating from memory; the per-attester chain cursor is restored so `seq`/`prev` keep linking across the restart boundary. Guarantee: tamper-evident + omission-evident to the last witnessed checkpoint, and durable across restarts. No tool-surface change. `npx` pin moves to `@0.3.32`.
+
 ## 0.3.31
 
 ### Added
