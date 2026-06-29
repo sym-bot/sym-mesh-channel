@@ -746,9 +746,15 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     case 'sym_group_info': {
       const s = node.status();
-      const peers = typeof node.getPeers === 'function' ? node.getPeers() : [];
+      // Read the connected-peer list from status() — `node.getPeers` is not a
+      // public method, so the old call always fell through to `[]` and printed
+      // "(no peers in this group)" even when peers were connected, while the
+      // count below (s.peerCount) showed the real number. That count/list
+      // disagreement looked like a membership-handshake failure but was purely
+      // this rendering bug. `status().peers` is the same source as peerCount.
+      const peers = Array.isArray(s.peers) ? s.peers : [];
       const peerLines = peers.length
-        ? peers.map(p => `  ${p.name} (${(p.peerId || '').slice(0, 8)}) via ${p.transport || '?'}`).join('\n')
+        ? peers.map(p => `  ${p.name} (${(p.peerId || '').slice(0, 8)}) via ${p.source || '?'}`).join('\n')
         : '  (no peers in this group)';
       return {
         content: [{
