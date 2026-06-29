@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.34
+
+### Changed
+
+- Bumps `@sym-bot/sym` to `^0.7.24` — adds the **roster key registry** (EA5): a node can now verify attestations/grants relayed from peers it never directly handshook, because keys ride the anchor-rooted grant chain (the relayer never vouches). Forward-looking — invisible on a fully connected LAN, it removes the direct-connectivity cap on signature verification.
+
 ## 0.3.33
 
 ### Changed
