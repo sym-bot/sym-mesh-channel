@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.33
+
+### Changed
+
+- Bumps `@sym-bot/sym` to `^0.7.23` — brings **earned authority** to the fleet: a node's validator/anchor role is now resolved from a signed, anchor-rooted role-grant chain (MMP §6.5) and CMB validation/canonization is gated on that resolved rank. Backward compatible — dormant until an anchor is pinned (`SYM_FOUNDER_ANCHOR`), with nodes using their static role until then.
+
 ## 0.3.32
 
 ### Added

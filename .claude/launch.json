@@ -1,0 +1,14 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "sym-day",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["/Users/hongwei/code/symday-webapp/bin/sym-day.js", "--no-open", "--port=8790"],
+      "port": 8790,
+      "env": {
+        "SYMDAY_VERTICALS": "/Users/hongwei/code/mesh-research-conveyancing"
+      }
+    }
+  ]
+}
