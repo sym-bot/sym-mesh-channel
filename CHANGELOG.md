@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.36
+
+### Changed
+
+- Bumps `@sym-bot/sym` to `^0.7.26` — nodes now self-report their memory stats (`emitted` / `admitted` / `memory`) to the roster as a lightweight `node-stats` frame, so a mesh observer (e.g. Mesh Edge) can show real counts for every node, including cross-machine agents whose stores it can't read locally.
+
 ## 0.3.35
 
 ### Changed
