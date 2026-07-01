@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.37
+
+### Changed
+
+- Bumps `@sym-bot/sym` to `^0.7.27` — stops a cross-node echo/replay storm: own-only SVAF anchors (a node no longer re-forwards CMBs it received from peers) plus a reload-durable receive-dedup cache that survives a plugin reload / version skew.
+- Pins the launched MCP server and the plugin manifest to `0.3.37` (`.mcp.json` → `npx @sym-bot/mesh-channel@0.3.37`, `.claude-plugin/plugin.json` → `0.3.37`), so a `/plugin update` actually converges nodes onto the fixed runtime. The marketplace installs from the repo HEAD and the launched version is hard-pinned in `.mcp.json`, so a bare npm publish alone was invisible to the fleet.
+
 ## 0.3.36
 
 ### Changed
