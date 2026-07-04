@@ -652,7 +652,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
         const focus = r.cmb?.fields?.focus?.text || r.content || '';
         const source = r.source || r.cmb?.createdBy || 'unknown';
         const time = r.timestamp ? new Date(r.timestamp).toLocaleString() : '';
-        return `[${source}] ${time}\n  ${focus.slice(0, 150)}`;
+        const cut = focus.length > 150 ? '\u2026 [truncated \u2014 sym_fetch for full]' : '';
+        return `[${source}] ${time}\n  ${focus.slice(0, 150)}${cut}`;
       });
       return { content: [{ type: 'text', text: lines.join('\n\n') }] };
     }
@@ -716,7 +717,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
         const memTag = m.directed && m.remixed === false ? ' ·not-stored' : '';
         // Flag structured data so the agent knows to sym_fetch the full body.
         const payTag = (m.payload !== undefined && m.payload !== null) ? ' [+payload]' : '';
-        return `[${m.from}${dirTag}] ${String(focus).replace(/\s+/g, ' ').slice(0, 90)}${memTag}${payTag} [${m.id}] (${age}s ago)`;
+        const flat = String(focus).replace(/\s+/g, ' ');
+        const cutTag = flat.length > 90 ? '\u2026' : '';
+        return `[${m.from}${dirTag}] ${flat.slice(0, 90)}${cutTag}${memTag}${payTag} [${m.id}] (${age}s ago)`;
       }).filter(Boolean);
       if (!lines.length) {
         return { content: [{ type: 'text', text: 'Caught up — nothing new delivered since your last sym_receive.' }] };
@@ -982,7 +985,7 @@ function extractCompactHeader(from, content) {
   if (signal) parts.push(signal);
   if (focusMatch) parts.push(`focus=${focusMatch[1].trim()}`);
   else if (bracketMatch) parts.push(bracketMatch[1].trim());
-  else if (lines[0]) parts.push(lines[0].slice(0, 100));
+  else if (lines[0]) parts.push(lines[0].slice(0, 100) + (lines[0].length > 100 ? '\u2026' : ''));
 
   const approxTokens = Math.round(content.length / 4);
   return parts.join(' | ') + ` (~${approxTokens}tok)`;
