@@ -655,7 +655,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
         const cut = focus.length > 150 ? '\u2026 [truncated \u2014 sym_fetch for full]' : '';
         return `[${source}] ${time}\n  ${focus.slice(0, 150)}${cut}`;
       });
-      return { content: [{ type: 'text', text: lines.join('\n\n') }] };
+      const more = results.length > 10
+        ? `\n\n(+${results.length - 10} more matched — narrow the query to see them)`
+        : '';
+      return { content: [{ type: 'text', text: lines.join('\n\n') + more }] };
     }
 
     case 'sym_peers': {
