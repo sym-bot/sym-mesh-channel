@@ -1,13 +1,14 @@
 {
   "name": "@sym-bot/mesh-channel",
   "version": "0.3.38",
-  "description": "MCP server — real-time agent-to-agent cognition for Claude Code sessions on one machine, a LAN, or across networks via the SYM mesh.",
+  "description": "MCP server \u2014 real-time agent-to-agent cognition for Claude Code sessions on one machine, a LAN, or across networks via the SYM mesh.",
   "main": "server.js",
   "bin": {
     "sym-mesh-channel": "server.js"
   },
   "scripts": {
-    "test": "node test/plugin.test.js"
+    "test": "node test/plugin.test.js",
+    "release": "node scripts/release.mjs"
   },
   "files": [
     "server.js",
