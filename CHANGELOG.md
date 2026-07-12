@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.38
+
+### Changed
+
+- Mark display truncation in `receive` and `recall` — when a result is cut to fit, it now says so instead of silently thinning. A cut that hides its own existence is a silent loss of information.
+
 ## 0.3.37
 
 ### Changed
