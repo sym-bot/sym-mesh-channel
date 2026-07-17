@@ -5,6 +5,7 @@
 ### Changed
 
 - Mark display truncation in `receive` and `recall` — when a result is cut to fit, it now says so instead of silently thinning. A cut that hides its own existence is a silent loss of information.
+- Pins the launched MCP server and the plugin manifest to `0.3.38` (`.mcp.json` → `npx @sym-bot/mesh-channel@0.3.38`, `.claude-plugin/plugin.json` → `0.3.38`) — the 0.3.38 release published to npm but left both pins at 0.3.37, so a `/plugin update` converged the fleet onto the previous runtime and the published version was unreachable from the plugin path.
 
 ## 0.3.37
 
