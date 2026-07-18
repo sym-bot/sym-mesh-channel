@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased — send-path delivery integrity (E8 variant c)
+
+- `sym_send` / `sym_publish` no longer report "Duplicate — not re-broadcast" for a CMB
+  that was never delivered. `SymNode.remember()` dedups on the content hash of the CAT7
+  fields, so an identical re-send is suppressed — but a **local-store hit is not proof of
+  delivery**: a CMB stored while no peer was connected, or sent before a reconnect, blocked
+  its own re-send forever and the operator's send silently never reached the mesh (the
+  0.3.39 fix closed the *identical-defaults* cause; this closes the *genuinely-undelivered*
+  one). The channel now tracks which CMB keys were actually delivered to a connected
+  destination: a dedup against a **never-delivered** key is re-issued (disambiguated) so it
+  goes out, while a dedup against an **already-delivered** key stays suppressed (no flood
+  regression). Broadcasts and publishes with **no connected peers** now say so honestly
+  instead of claiming "Broadcast to all peers". The delivered-key set resets on
+  `sym_join_group` hot-swap (a reconnect voids prior delivery credits). Tests added
+  (`test/plugin.test.js`): true-duplicate suppression, undelivered re-send, directed
+  re-issue against a pre-existing store copy.
+
 ## 0.3.39 — 2026-07-18
 
 - sym_publish / sym_send input hygiene: a habitual `content` param now MAPS to `focus`
