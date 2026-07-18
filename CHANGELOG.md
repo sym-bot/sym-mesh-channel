@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — send-path delivery integrity (E8 variant c)
+## 0.3.40 — 2026-07-18 · send-path delivery integrity (E8 variant c)
 
 - `sym_send` / `sym_publish` no longer report "Duplicate — not re-broadcast" for a CMB
   that was never delivered. `SymNode.remember()` dedups on the content hash of the CAT7
