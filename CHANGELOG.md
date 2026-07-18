@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.39 — 2026-07-18
+
+- sym_publish / sym_send input hygiene: a habitual `content` param now MAPS to `focus`
+  (the semantic repair — it was silently dropped, yielding constant all-default fields
+  whose hash collided into "Duplicate" while the mind's actual content never reached
+  the mesh); any other unknown top-level param is a loud error. A dropped param is a
+  dropped meaning — silent drops must fail loudly (same failure family as the SVAF
+  lifecycle-intent mute; see the E8 review item).
+
 ## 0.3.38
 
 ### Changed

@@ -568,6 +568,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   switch (name) {
     case 'sym_send': {
+      {
+        const argErr = vetCmbArgs(args, ['to']);
+        if (argErr) return { content: [{ type: 'text', text: argErr }], isError: true };
+      }
       // Emit a structured CAT7 CMB per MMP §4.2. When args.to names a peer,
       // route as a targeted send (§4.4.4); otherwise broadcast. Receivers
       // run SVAF (§9.2) and remix-store on accept — no separate "message"
@@ -628,6 +632,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     case 'sym_publish': {
+      {
+        const argErr = vetCmbArgs(args, []);
+        if (argErr) return { content: [{ type: 'text', text: argErr }], isError: true };
+      }
       const fields = {
         focus: args.focus || 'observation',
         issue: args.issue || 'none',
@@ -1173,6 +1181,23 @@ let groupBeacon = null;
 function publishGroupBeacon() {
   try {
     const { Bonjour } = require('bonjour-service');
+
+// ── input hygiene (0.3.39) — silent semantic drops must fail loudly ──────────────
+// Root-caused 2026-07-18: minds habitually call sym_publish/sym_send with a single
+// `content` param; the schema tolerated it as an unknown property and DROPPED it,
+// producing constant all-default fields whose hash collides — every call after the
+// first answered "Duplicate" while the mind's actual content never reached the mesh.
+// Two rails: `content` maps to `focus` (the semantic repair — the habitual call now
+// carries meaning), and any OTHER unknown top-level param is a loud error.
+function vetCmbArgs(args, extraKeys) {
+  const known = new Set(['focus', 'issue', 'intent', 'motivation', 'commitment', 'perspective', 'mood', 'payload', 'content', ...extraKeys]);
+  const unknown = Object.keys(args || {}).filter(k => !known.has(k));
+  if (unknown.length) {
+    return `Unknown parameter(s): ${unknown.join(', ')}. Allowed: ${[...known].join(', ')}. Nothing was published — fix the call (a dropped param is a dropped meaning).`;
+  }
+  if (args && args.content && !args.focus) args.focus = String(args.content);
+  return null;
+}
     if (groupBeacon) { try { groupBeacon.unpublishAll(); groupBeacon.destroy(); } catch {} groupBeacon = null; }
     groupBeacon = new Bonjour();
     groupBeacon.publish({ name: NODE_NAME, type: 'symgroups', port: (node && node._port) || 7777, txt: { group: GROUP, node: NODE_NAME } });
