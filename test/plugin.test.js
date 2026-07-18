@@ -199,7 +199,7 @@ test('sym_send tool schema has focus (required) and to (optional), no message', 
   assert.ok(!descriptor.match(/required:\s*\['message'\]/), 'sym_send must NOT require "message" — focus is the required anchor');
 });
 
-test('sym_send handler routes through node.remember, not node.send', () => {
+test('sym_send handler routes through explicitSend/node.remember, not node.send', () => {
   const code = fs.readFileSync(resolveServerJs(), 'utf8');
   const caseIdx = code.indexOf("case 'sym_send'");
   assert.ok(caseIdx !== -1, "sym_send case handler not found");
@@ -207,7 +207,8 @@ test('sym_send handler routes through node.remember, not node.send', () => {
   const block = code.slice(caseIdx, caseIdx + 4000);
   const nextCaseIdx = block.indexOf("case 'sym_publish'");
   const handler = nextCaseIdx !== -1 ? block.slice(0, nextCaseIdx) : block;
-  assert.ok(handler.includes('node.remember('), 'handler must use node.remember() to emit CAT7 CMB per MMP §4.2');
+  assert.ok(handler.includes('explicitSend('), 'handler must route the send through explicitSend() (which emits via node.remember, MMP §4.2)');
+  assert.ok(code.includes('n.remember('), 'explicitSend must emit via node.remember() — CAT7 CMB, not a raw node.send()');
   assert.ok(!/node\.send\(\s*msg\s*\)/.test(handler), 'handler must NOT fall back to node.send(msg) raw-text broadcast');
   // Peer resolution guards:
   assert.ok(handler.includes('not connected'), 'handler must return a clear error when "to" peer is disconnected');
@@ -228,6 +229,93 @@ test('MCP server instructions reference SVAF + targeted CMB semantics', () => {
   const code = fs.readFileSync(resolveServerJs(), 'utf8');
   assert.ok(code.includes('SVAF'), 'instructions must mention SVAF for receiver semantics');
   assert.ok(code.includes('§4.4.4') || code.includes('4.4.4'), 'instructions must reference §4.4.4 targeted CMB');
+});
+
+// ── 4c. Send-path delivery integrity (E8 variant c) ──
+
+console.log('\nSend-path delivery integrity (E8 variant c):');
+
+// The fix lives inline in server.js (a separate module would not ship — package
+// `files` omits lib/). These source-scan assertions catch its removal.
+test('server.js carries the delivery-integrity fix', () => {
+  const code = fs.readFileSync(resolveServerJs(), 'utf8');
+  assert.ok(code.includes('function explicitSend('), 'explicitSend helper missing');
+  assert.ok(code.includes('deliveredCmbKeys'), 'delivered-key tracking missing');
+  assert.ok(code.includes('[re-sent '), 're-issue salt for an undelivered re-send is missing');
+  assert.ok(/deliveredCmbKeys = new Set\(\)/.test(code.slice(code.indexOf('node = newNode'))),
+    'deliveredCmbKeys must reset on hot-swap (sym_join_group)');
+  assert.ok(!code.includes('CMB already in memory, not re-broadcast'),
+    'the old unconditional "Duplicate — not re-broadcast" message must be gone');
+});
+
+// Replicate explicitSend's semantics (the loadAllowlistModule pattern — server.js
+// runs main() on require, so it cannot be imported without side effects). Kept a
+// faithful mirror of the server helper it validates.
+function loadSendIntegrity() {
+  const crypto = require('crypto');
+  const key = (f) => crypto.createHash('sha256').update(JSON.stringify(f)).digest('hex').slice(0, 32);
+  const deliveryTag = (f, t) => (t ? `${key(f)}|${t}` : key(f));
+  const peerCount = (n) => {
+    try { const s = n.status && n.status(); return (s && s.peerCount) || (n.peers && n.peers().length) || 0; }
+    catch { return 0; }
+  };
+  function explicitSend(n, delivered, fields, sendOpts, okSummary, now) {
+    const stamp = now || (() => new Date().toISOString());
+    const t = sendOpts.to || null;
+    const connected = t ? true : peerCount(n) > 0;
+    const entry = n.remember(fields, sendOpts);
+    if (entry) { if (connected) delivered.add(deliveryTag(fields, t)); return { text: okSummary(entry, connected) }; }
+    if (delivered.has(deliveryTag(fields, t))) return { text: `Duplicate — identical CMB already delivered${t ? '' : ' to the group'}, not re-broadcast.` };
+    const salted = Object.assign({}, fields, { focus: `${fields.focus} [re-sent ${stamp()}]` });
+    const retry = n.remember(salted, sendOpts);
+    if (!retry) return { text: 'Send failed: nothing broadcast.', isError: true };
+    if (connected) delivered.add(deliveryTag(salted, t));
+    return { text: `Re-sent CMB ${retry.key}${t ? '' : ' to the group'} — undelivered prior copy re-issued.` };
+  }
+  return { explicitSend, deliveryTag };
+}
+
+// A content-addressed fake node: remember() dedups on the fields, like the store.
+function fakeNode(peerCount) {
+  const stored = new Set();
+  const crypto = require('crypto');
+  const key = (f) => 'cmb-' + crypto.createHash('sha256').update(JSON.stringify(f)).digest('hex').slice(0, 16);
+  return {
+    stored,
+    peers: () => Array.from({ length: peerCount }, (_, i) => ({ peerId: 'p' + i })),
+    status: () => ({ peerCount }),
+    remember(fields) { const k = key(fields); if (stored.has(k)) return null; stored.add(k); return { key: k }; },
+  };
+}
+
+const F = { focus: 'hi', issue: 'none', intent: 'directive', motivation: '', commitment: '', perspective: 'me', mood: {} };
+const okS = (e, c) => (c ? `Sent CMB ${e.key}` : `Stored ${e.key} — no peers`);
+
+test('true duplicate to a connected peer is suppressed (no flood regression)', () => {
+  const { explicitSend } = loadSendIntegrity();
+  const n = fakeNode(2); const delivered = new Set();
+  const a = explicitSend(n, delivered, F, {}, okS, () => 'T');
+  assert.ok(/^Sent CMB/.test(a.text), 'first broadcast should send');
+  const b = explicitSend(n, delivered, F, {}, okS, () => 'T');
+  assert.ok(/already delivered/.test(b.text), 'identical resend after real delivery is a suppressed duplicate');
+});
+
+test('undelivered re-send (variant c) is re-issued, not swallowed', () => {
+  const { explicitSend } = loadSendIntegrity();
+  const n = fakeNode(0); const delivered = new Set();       // stored while disconnected
+  const a = explicitSend(n, delivered, F, {}, okS, () => 'T');
+  assert.ok(!/^Sent CMB/.test(a.text), 'a 0-peer send must not claim delivery');
+  assert.strictEqual(delivered.size, 0, 'nothing delivered while disconnected');
+  n.status = () => ({ peerCount: 1 }); n.peers = () => [{ peerId: 'p0' }];   // a peer connects
+  const b = explicitSend(n, delivered, F, {}, okS, () => 'T');
+  assert.ok(/Re-sent CMB/.test(b.text), 'the undelivered CMB must be re-issued so it reaches the mesh');
+});
+
+test('directed dedup against a pre-existing store copy is re-issued', () => {
+  const { explicitSend } = loadSendIntegrity();
+  const n = fakeNode(1); n.remember(F);                      // copy already in store (pre-reconnect)
+  const r = explicitSend(n, new Set(), F, { to: 'peerX' }, () => 'Sent to peerX', () => 'T');
+  assert.ok(/Re-sent CMB/.test(r.text), 'a stored-but-never-delivered directed CMB must be re-issued');
 });
 
 // ── 5. Server lifecycle ─────────────────────────────────────

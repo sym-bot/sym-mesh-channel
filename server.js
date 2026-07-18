@@ -287,6 +287,66 @@ let node = new SymNode({
   silent: true,
 });
 
+// ── Send-path delivery integrity (E8 variant c) ──────────────────────────────
+// SymNode.remember() dedups on the content hash of the CAT7 fields, returning null
+// when identical fields are already in the LOCAL store — and the send/publish
+// handlers reported that null as "Duplicate — not re-broadcast". But a local-store
+// hit is NOT proof of delivery: a CMB stored while this node had no connected peer,
+// or on a prior send before a reconnect, blocks its own identical re-send forever,
+// so an explicit operator send silently never reaches the mesh (root-caused
+// 2026-07-18; same fail-loudly family as the 0.3.39 unknown-param fix). We record
+// which CMB keys were actually delivered to a connected destination: a dedup
+// against a NEVER-DELIVERED key is re-issued (disambiguated with the same salt the
+// commission loop uses) so the send goes out, while a dedup against an
+// already-delivered key stays suppressed — no flood regression. The delivered set
+// is channel-internal, so it uses its own stable content hash, not the store's key.
+const crypto = require('crypto');
+let deliveredCmbKeys = new Set();   // reset on hot-swap (sym_join_group)
+
+function cmbContentKey(fields) {
+  return crypto.createHash('sha256').update(JSON.stringify(fields)).digest('hex').slice(0, 32);
+}
+// Directed deliveries are tagged per (contentKey, target) so identical content can
+// still be delivered to a different peer; broadcasts are tagged by content key only.
+function deliveryTag(fields, targetPeerId) {
+  return targetPeerId ? `${cmbContentKey(fields)}|${targetPeerId}` : cmbContentKey(fields);
+}
+function connectedPeerCount(n) {
+  try { const s = n.status && n.status(); return (s && s.peerCount) || (n.peers && n.peers().length) || 0; }
+  catch { return 0; }
+}
+// An explicit operator send (sym_send / sym_publish): remember() the CMB, but treat
+// a content-dedup miss as "already delivered" ONLY when we actually delivered this
+// key to a connected destination before. A dedup against a never-delivered key
+// (stored while disconnected, or before a reconnect) is re-issued with a
+// disambiguating salt so the operator's send reaches the mesh. okSummary(entry,
+// connected) builds the happy-path text so each caller keeps its verb; `now` is
+// injectable for deterministic tests. Returns { text, isError? }.
+function explicitSend(n, delivered, fields, sendOpts, okSummary, now) {
+  const stamp = now || (() => new Date().toISOString());
+  const targetPeerId = sendOpts.to || null;
+  // A directed send resolved its target from the connected-peer list already, so its
+  // target is connected by construction; a broadcast reaches someone only if a peer
+  // is connected to receive the fanned-out frame.
+  const connected = targetPeerId ? true : connectedPeerCount(n) > 0;
+
+  const entry = n.remember(fields, sendOpts);
+  if (entry) {
+    if (connected) delivered.add(deliveryTag(fields, targetPeerId));
+    return { text: okSummary(entry, connected) };
+  }
+  if (delivered.has(deliveryTag(fields, targetPeerId))) {
+    return { text: `Duplicate — identical CMB already delivered${targetPeerId ? '' : ' to the group'}, not re-broadcast.` };
+  }
+  const salted = Object.assign({}, fields, { focus: `${fields.focus} [re-sent ${stamp()}]` });
+  const retry = n.remember(salted, sendOpts);
+  if (!retry) {
+    return { text: 'Send failed: the prior copy was undelivered and the disambiguated re-send did not store (persist error). Nothing broadcast.', isError: true };
+  }
+  if (connected) delivered.add(deliveryTag(salted, targetPeerId));
+  return { text: `Re-sent CMB ${retry.key}${targetPeerId ? '' : ' to the group'} — a prior identical copy was in the local store but had never been delivered; content-addressed dedup would otherwise have silently suppressed this send.` };
+}
+
 // Event handlers are extracted into a single registration function so the
 // hot-swap path in sym_join_group can re-register them on the new node.
 // The function reads module-level `NODE_NAME`, `isPeerAllowed`, `pushChannel`,
@@ -621,14 +681,13 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
       const sendOpts = {};
       if (targetPeerId) sendOpts.to = targetPeerId;
       if (args.payload !== undefined && args.payload !== null) sendOpts.payload = args.payload;
-      const entry = node.remember(fields, sendOpts);
-      if (!entry) {
-        return { content: [{ type: 'text', text: 'Duplicate — CMB already in memory, not re-broadcast.' }] };
-      }
-      const summary = targetPeerId
-        ? `Sent CMB ${entry.key} to ${args.to}`
-        : `Broadcast CMB ${entry.key} to all peers`;
-      return { content: [{ type: 'text', text: summary }] };
+      const r = explicitSend(node, deliveredCmbKeys, fields, sendOpts, (entry, connected) =>
+        targetPeerId
+          ? `Sent CMB ${entry.key} to ${args.to}`
+          : (connected
+              ? `Broadcast CMB ${entry.key} to all peers`
+              : `Stored CMB ${entry.key} locally, but NO peers are connected — it was not delivered (not silently dropped; re-sendable once a peer connects).`));
+      return { content: [{ type: 'text', text: r.text }], ...(r.isError ? { isError: true } : {}) };
     }
 
     case 'sym_publish': {
@@ -647,8 +706,11 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
       };
       const observeOpts = {};
       if (args.payload !== undefined && args.payload !== null) observeOpts.payload = args.payload;
-      const entry = node.remember(fields, observeOpts);
-      return { content: [{ type: 'text', text: entry ? `Published: ${entry.key}` : 'Duplicate — already in memory.' }] };
+      const r = explicitSend(node, deliveredCmbKeys, fields, observeOpts, (entry, connected) =>
+        connected
+          ? `Published: ${entry.key}`
+          : `Published locally: ${entry.key} — but NO peers are connected, so no one received it (not silently dropped).`);
+      return { content: [{ type: 'text', text: r.text }], ...(r.isError ? { isError: true } : {}) };
     }
 
     case 'sym_recall': {
@@ -925,6 +987,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       // Swap module-level references only after successful start.
       node = newNode;
+      // A reconnect voids prior delivery credits: peers must re-establish, and a CMB
+      // delivered to the old group's peers may never reach the new group — so a
+      // dedup after the swap must be re-issued, not suppressed (E8 variant c).
+      deliveredCmbKeys = new Set();
       GROUP = group;
       SERVICE_TYPE = newServiceType;
       RELAY_URL = relayUrl;
