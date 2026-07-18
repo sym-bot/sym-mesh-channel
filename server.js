@@ -301,6 +301,24 @@ let node = new SymNode({
 // already-delivered key stays suppressed — no flood regression. The delivered set
 // is channel-internal, so it uses its own stable content hash, not the store's key.
 const crypto = require('crypto');
+
+// ── input hygiene (0.3.39) — silent semantic drops must fail loudly ──────────────
+// Root-caused 2026-07-18: minds habitually call sym_publish/sym_send with a single
+// `content` param; the schema tolerated it as an unknown property and DROPPED it,
+// producing constant all-default fields whose hash collides — every call after the
+// first answered "Duplicate" while the mind's actual content never reached the mesh.
+// Two rails: `content` maps to `focus` (the semantic repair — the habitual call now
+// carries meaning), and any OTHER unknown top-level param is a loud error.
+function vetCmbArgs(args, extraKeys) {
+  const known = new Set(['focus', 'issue', 'intent', 'motivation', 'commitment', 'perspective', 'mood', 'payload', 'content', ...extraKeys]);
+  const unknown = Object.keys(args || {}).filter(k => !known.has(k));
+  if (unknown.length) {
+    return `Unknown parameter(s): ${unknown.join(', ')}. Allowed: ${[...known].join(', ')}. Nothing was published — fix the call (a dropped param is a dropped meaning).`;
+  }
+  if (args && args.content && !args.focus) args.focus = String(args.content);
+  return null;
+}
+
 let deliveredCmbKeys = new Set();   // reset on hot-swap (sym_join_group)
 
 function cmbContentKey(fields) {
@@ -1248,22 +1266,6 @@ function publishGroupBeacon() {
   try {
     const { Bonjour } = require('bonjour-service');
 
-// ── input hygiene (0.3.39) — silent semantic drops must fail loudly ──────────────
-// Root-caused 2026-07-18: minds habitually call sym_publish/sym_send with a single
-// `content` param; the schema tolerated it as an unknown property and DROPPED it,
-// producing constant all-default fields whose hash collides — every call after the
-// first answered "Duplicate" while the mind's actual content never reached the mesh.
-// Two rails: `content` maps to `focus` (the semantic repair — the habitual call now
-// carries meaning), and any OTHER unknown top-level param is a loud error.
-function vetCmbArgs(args, extraKeys) {
-  const known = new Set(['focus', 'issue', 'intent', 'motivation', 'commitment', 'perspective', 'mood', 'payload', 'content', ...extraKeys]);
-  const unknown = Object.keys(args || {}).filter(k => !known.has(k));
-  if (unknown.length) {
-    return `Unknown parameter(s): ${unknown.join(', ')}. Allowed: ${[...known].join(', ')}. Nothing was published — fix the call (a dropped param is a dropped meaning).`;
-  }
-  if (args && args.content && !args.focus) args.focus = String(args.content);
-  return null;
-}
     if (groupBeacon) { try { groupBeacon.unpublishAll(); groupBeacon.destroy(); } catch {} groupBeacon = null; }
     groupBeacon = new Bonjour();
     groupBeacon.publish({ name: NODE_NAME, type: 'symgroups', port: (node && node._port) || 7777, txt: { group: GROUP, node: NODE_NAME } });
