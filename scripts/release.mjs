@@ -35,7 +35,11 @@ if (run("git rev-list --count HEAD..@{u}") !== "0") die("behind origin/main — 
 
 step(`CHANGELOG has an entry for ${version}`);
 const changelog = fs.existsSync("CHANGELOG.md") ? fs.readFileSync("CHANGELOG.md", "utf8") : "";
-const section = changelog.match(new RegExp(`^## ${version.replace(/\./g, "\\.")}[^\\n]*\\n([\\s\\S]*?)(?=\\n## |$)`, "m"));
+// The end-of-input alternative must be a TRUE end anchor. With the "m" flag a bare `$`
+// matches the end of ANY line, so the lazy capture terminated at the first line break after
+// the header and every well-formed entry — header, blank line, bullets — read as EMPTY.
+// `(?![\\s\\S])` is end-of-input regardless of the multiline flag, which `^` still needs.
+const section = changelog.match(new RegExp(`^## ${version.replace(/\./g, "\\.")}[^\\n]*\\n([\\s\\S]*?)(?=\\n## |(?![\\s\\S]))`, "m"));
 if (!section) die(`no "## ${version}" section in CHANGELOG.md — write it first (it becomes the tag + release notes)`);
 const notes = section[1].trim();
 if (!notes) die(`the "## ${version}" CHANGELOG section is empty`);
