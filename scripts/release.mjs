@@ -17,7 +17,11 @@ import fs from "node:fs";
 const version = process.argv[2];
 if (!/^\d+\.\d+\.\d+$/.test(version || "")) die(`usage: node scripts/release.mjs <X.Y.Z>  (write the CHANGELOG ## ${version || "X.Y.Z"} entry first)`);
 
-const run = (cmd, opts = {}) => execSync(cmd, { stdio: "pipe", encoding: "utf8", ...opts }).trim();
+// execSync returns NULL when stdio is "inherit" — which callers below deliberately use for
+// npm test / npm run build so their output streams. Calling .trim() on that threw and killed
+// the release at the tests step, i.e. this script could never complete in any repo that HAS a
+// test script. Coalesce before trimming.
+const run = (cmd, opts = {}) => (execSync(cmd, { stdio: "pipe", encoding: "utf8", ...opts }) ?? "").trim();
 const step = (msg) => process.stdout.write(`\n▸ ${msg}\n`);
 function die(msg) { process.stderr.write(`\n✗ ${msg}\n`); process.exit(1); }
 
