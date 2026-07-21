@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.42 — 2026-07-21 · verify both key prefixes before the cmb1- migration
+
+- Takes `@sym-bot/sym` ^0.7.32 (and through it `@sym-bot/core` ^0.3.49), whose verification
+  accepts a v1 CMB under **either** prefix. The mesh is migrating `cmb1-<64hex>` keys to
+  `cmb-<64hex>`; the prefix used to select the signing scheme, and now the digest LENGTH does
+  (64 hex = v1, 32 hex = legacy). Nothing in mesh-channel changes — it has no prefix dispatch
+  and never treated the prefix as the scheme.
+- **This release does not emit the new form.** Emission stays `cmb1-` until cutover. The order
+  is deliberate: every process must be able to READ both prefixes before any process WRITES
+  the new one, or blocks emitted by an upgraded node fail verification on one that has not
+  restarted yet.
+
 ## 0.3.40 — 2026-07-18 · send-path delivery integrity (E8 variant c)
 
 - `sym_send` / `sym_publish` no longer report "Duplicate — not re-broadcast" for a CMB
