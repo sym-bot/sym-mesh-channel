@@ -12,6 +12,7 @@
   },
   "files": [
     "server.js",
+    "classifier-risk.js",
     "bin/",
     ".claude-plugin/",
     ".mcp.json",

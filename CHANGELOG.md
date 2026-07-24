@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.2 — 2026-07-24 · hotfix: pack `classifier-risk.js` (0.4.1 was broken on install)
+
+- **0.4.1 shipped without `classifier-risk.js`** — the `files` allowlist in `package.json` was
+  not extended for the new module, so the published tarball omitted it and every fresh install
+  crashed on load with `Cannot find module './classifier-risk.js'` (`server.js` requires it).
+- Adds `classifier-risk.js` to `files` and re-releases. No code change from 0.4.1; this only
+  fixes the tarball. **Do not use 0.4.1** (deprecated on npm) — upgrade straight to 0.4.2.
+
 ## 0.4.1 — 2026-07-24 · ingest guard: quarantine classifier-risk peer CMBs
 
 - **New receiver-side guard against a session-wedging failure mode.** A benign, non-injecting
