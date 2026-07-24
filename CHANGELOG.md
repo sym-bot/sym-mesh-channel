@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.0 — 2026-07-24 · cmb--only cutover (fail-closed, emission flips to bare `cmb-`)
+
+- Pins `@sym-bot/sym` 0.8.0 (and through it `@sym-bot/core` 0.4.0) — the **fail-closed
+  `cmb-`-only** engine. Key dispatch is now `cmb-<64hex>` → v1, and **anything else
+  (`cmb1-<64hex>`, legacy `cmb-<32hex>`) is rejected**. The transitional `cmb1-` prefix is
+  retired; emission is now bare `cmb-<64hex>`.
+- **Ordering requirement:** a node on 0.4.0 rejects an un-migrated store, so the mesh store
+  must be re-minted to `cmb-` *before* any process runs this version (0.3.42 was the
+  read-both-prefixes release that made that migration safe). Do not update to 0.4.0 until the
+  store is migrated.
+- Plugin launch pin (`.mcp.json`) and `plugin.json` bumped to `@sym-bot/mesh-channel@0.4.0`.
+  Bumping the pin also changes the npx cache key, so restarts resolve the 0.4.0 chain fresh.
+
 ## 0.3.42 — 2026-07-21 · verify both key prefixes before the cmb1- migration
 
 - Takes `@sym-bot/sym` ^0.7.32 (and through it `@sym-bot/core` ^0.3.49), whose verification
