@@ -60,7 +60,27 @@ if (carvesOut) {
 // ── SHIP (version + changelog land in ONE commit, then tag, push, publish, release) ──
 step(`bump ${pkg.version} → ${version} and commit (version + CHANGELOG together)`);
 run(`npm version ${version} --no-git-tag-version`);
-run("git add package.json package-lock.json CHANGELOG.md");
+
+// Keep the plugin LAUNCH PIN and MANIFEST VERSION in lockstep with package.json. The historical
+// pin-lag bug — a tag vX.Y.Z shipping a `.mcp.json` that still pinned `@sym-bot/mesh-channel@<prev>`,
+// and a `plugin.json` version one behind — came from these two files being bumped by hand and
+// forgotten. The release now owns them, so a tag can never again point users at an older runtime.
+// Text-level replace (not parse+stringify) to preserve exact formatting.
+if (fs.existsSync(".mcp.json")) {
+  const before = fs.readFileSync(".mcp.json", "utf8");
+  const after = before.replace(/(@sym-bot\/mesh-channel)@\d+\.\d+\.\d+/g, `$1@${version}`);
+  if (!after.includes(`@sym-bot/mesh-channel@${version}`)) die(".mcp.json has no @sym-bot/mesh-channel pin to bump — check the launch config");
+  fs.writeFileSync(".mcp.json", after);
+}
+{
+  const pjPath = ".claude-plugin/plugin.json";
+  if (fs.existsSync(pjPath)) {
+    const after = fs.readFileSync(pjPath, "utf8").replace(/("version"\s*:\s*")\d+\.\d+\.\d+(")/, `$1${version}$2`);
+    fs.writeFileSync(pjPath, after);
+  }
+}
+
+run("git add package.json package-lock.json CHANGELOG.md .mcp.json .claude-plugin/plugin.json");
 run(`git commit -m ${JSON.stringify(`${version}\n\n${notes}\n\nCo-Authored-By: Claude Fable 5 <noreply@anthropic.com>`)}`);
 
 step(`tag v${version} + push`);
