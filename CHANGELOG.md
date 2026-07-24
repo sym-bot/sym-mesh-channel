@@ -25,6 +25,14 @@
   the new one, or blocks emitted by an upgraded node fail verification on one that has not
   restarted yet.
 
+## 0.3.41 — 2026-07-18 · hotfix: `vetCmbArgs` scope bug broke every publish/send
+
+- **`sym_publish` / `sym_send` threw `vetCmbArgs is not defined`.** The 0.3.39 input-hygiene
+  guard was accidentally defined *inside* `publishGroupBeacon` — out of scope for the tool
+  handlers — so every publish and send failed loudly until this fix moved it to top level.
+  Test suite green. (Loud failure beat a silent drop, but the 0.3.39 insertion anchor — "last
+  require in file" — had landed mid-function.)
+
 ## 0.3.40 — 2026-07-18 · send-path delivery integrity (E8 variant c)
 
 - `sym_send` / `sym_publish` no longer report "Duplicate — not re-broadcast" for a CMB
