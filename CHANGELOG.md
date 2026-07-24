@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.3 — 2026-07-24 · stable node identity across restarts
+
+- Fixes a case where a node could start under a suffixed name (e.g. `name-2`) instead of its
+  configured identity, creating a separate empty store. It happened when a prior session's lock
+  referenced a process id the OS had since reused, making a stale lock look active.
+- Node-name collision handling is now delegated to the engine's process-liveness check, which is
+  robust to reused process ids. A configured name (`SYM_NODE_NAME` / `.sym/node.json`) is used
+  as-is; a genuinely running duplicate is reported clearly instead of silently starting a second
+  identity. No change for the normal single-session case.
+
 ## 0.4.2 — 2026-07-24 · hotfix: pack `classifier-risk.js` (0.4.1 was broken on install)
 
 - **0.4.1 shipped without `classifier-risk.js`** — the `files` allowlist in `package.json` was

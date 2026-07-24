@@ -7,12 +7,13 @@
     "sym-mesh-channel": "server.js"
   },
   "scripts": {
-    "test": "node test/plugin.test.js && node test/classifier-risk.test.js",
+    "test": "node test/plugin.test.js && node test/classifier-risk.test.js && node test/identity.test.js",
     "release": "node scripts/release.mjs"
   },
   "files": [
     "server.js",
     "classifier-risk.js",
+    "identity.js",
     "bin/",
     ".claude-plugin/",
     ".mcp.json",

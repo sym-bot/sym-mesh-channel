@@ -51,6 +51,7 @@ const {
 } = require('@modelcontextprotocol/sdk/types.js');
 const { SymNode } = require('@sym-bot/sym');
 const { scanClassifierRisk, quarantineHeader } = require('./classifier-risk.js');
+const { resolveIdentity } = require('./identity.js');
 
 // Kebab-case validator shared by group-related tools.
 const KEBAB_CASE_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -214,25 +215,10 @@ function defaultNodeName() {
   }
   return `claude-${clean(require('os').hostname())}`;
 }
-// Live-collision auto-suffix (v0.3.10): @sym-bot/sym already reclaims STALE locks
-// (dead holder), so crashed sessions self-heal. But two LIVE sessions wanting the
-// same name — a duplicate dev agent, or two sessions sharing a fixed SYM_NODE_NAME
-// — would hard-fail with EIDENTITYLOCK. Resolve the name up front: if the base is
-// held by a live process, append -2/-3/… so the second session coexists instead of
-// failing. A dead or absent holder keeps the base name (sym reclaims it on start).
-function resolveNodeName(base) {
-  const fs = require('fs'), os = require('os'), path = require('path');
-  const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
-  for (let i = 0; i < 64; i++) {
-    const name = i === 0 ? base : `${base}-${i + 1}`;
-    try {
-      const pid = parseInt(fs.readFileSync(path.join(os.homedir(), '.sym', 'nodes', name, 'lock.pid'), 'utf8').trim(), 10);
-      if (pid && alive(pid)) continue; // live holder → try the next suffix
-    } catch { /* no lock file → name is free */ }
-    return name; // free, or a stale lock sym will reclaim on start()
-  }
-  return base;
-}
+// Node-name collision handling is delegated to the engine (see identity.js). The old plugin-side
+// resolver checked liveness with a bare `process.kill(pid, 0)`, which can't distinguish a live
+// holder from a recycled PID, so a stale lock could force a -2/-3 suffix and a fresh identity.
+// Removed; identity resolution now goes through resolveIdentity + the engine's robust check.
 // Per-project identity (v0.3.22): a named role agent (CTO, melotune-dev, …) commits
 // its node name + group to `$CLAUDE_PROJECT_DIR/.sym/node.json`, so the plugin alone
 // carries a stable per-project identity — no parallel MCP registration, and it
@@ -249,7 +235,10 @@ function projectNodeConfig() {
   } catch { return {}; }
 }
 const PROJECT_CFG = projectNodeConfig();
-const NODE_NAME = resolveNodeName(process.env.SYM_NODE_NAME || PROJECT_CFG.node_name || defaultNodeName());
+const { name: NODE_NAME, autoSuffix: NODE_AUTOSUFFIX } = resolveIdentity({
+  pinnedName: process.env.SYM_NODE_NAME || PROJECT_CFG.node_name,
+  defaultName: defaultNodeName(),
+});
 
 // ── Mesh group (MMP §5.8) ──────────────────────────────────
 //
@@ -278,6 +267,7 @@ let RELAY_TOKEN = process.env.SYM_RELAY_TOKEN || null;
 
 let node = new SymNode({
   name: NODE_NAME,
+  autoSuffix: NODE_AUTOSUFFIX,   // engine handles collision (start-time-verified); off for pinned names
   cognitiveProfile: 'Engineering node. Code, architecture, debugging, technical decisions.',
   svafFieldWeights: FIELD_WEIGHTS,
   svafFreshnessSeconds: 7200, // 2hr — session-length context
@@ -1000,6 +990,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       const newNode = new SymNode({
         name: NODE_NAME,
+        autoSuffix: NODE_AUTOSUFFIX,   // same stable identity across a group hot-swap
         cognitiveProfile: 'Engineering node. Code, architecture, debugging, technical decisions.',
         svafFieldWeights: FIELD_WEIGHTS,
         svafFreshnessSeconds: 7200,
@@ -1314,6 +1305,18 @@ async function main() {
 }
 
 main().catch((err) => {
+  if (err && err.code === 'EIDENTITYLOCK') {
+    // A pinned identity is a singleton: some live process already holds this node's identity.
+    // We intentionally do NOT fork a -2/-3 identity (that would start a separate empty store).
+    // Surface the conflict instead. A stale lock from a dead holder is not this — the engine
+    // reclaims those (start-time-verified), so reaching here means a genuinely live holder.
+    process.stderr.write(
+      `sym-mesh-channel: node identity '${NODE_NAME}' is already held by a live process ` +
+      `(PID ${err.holderPid ?? 'unknown'}). A pinned role is one node — not starting a second ` +
+      `copy. Close the other session, or run this one under a distinct SYM_NODE_NAME.\n`
+    );
+    process.exit(3);
+  }
   process.stderr.write(`sym-mesh-channel failed: ${err.message}\n`);
   process.exit(1);
 });
