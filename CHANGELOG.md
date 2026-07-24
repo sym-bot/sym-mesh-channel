@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.1 — 2026-07-24 · ingest guard: quarantine classifier-risk peer CMBs
+
+- **New receiver-side guard against a session-wedging failure mode.** A benign, non-injecting
+  peer CMB whose wording was security/offensive-adjacent (e.g. "protocol stripped") passed
+  `checkSecurity` but, once its text was auto-surfaced into the receiving agent's context and
+  re-fed to the model, tripped the LLM provider's server-side usage-policy classifier — a hard
+  API error that took down two consecutive requests and forced a session reset. Peer content is
+  untrusted **prompt input**, not merely untrusted instructions.
+- **`classifier-risk.js`** (`scanClassifierRisk`): the `cmb-accepted` and `message` delivery
+  handlers now **quarantine** a flagged CMB — the auto-push carries metadata only (no peer
+  free-text, no term names) and the verbatim body stays available for a deliberate `sym_fetch`.
+  The guarantee is in *not auto-surfacing*, not in guessing what the classifier keys on; a false
+  positive costs a fetch, never information. Composes with (does not replace) the existing
+  injection / rate-limit / payload-size checks.
+- Backward-compatible: unflagged deliveries are unchanged. 8 new unit tests; existing suite green.
+
 ## 0.4.0 — 2026-07-24 · cmb--only cutover (fail-closed, emission flips to bare `cmb-`)
 
 - Pins `@sym-bot/sym` 0.8.0 (and through it `@sym-bot/core` 0.4.0) — the **fail-closed
