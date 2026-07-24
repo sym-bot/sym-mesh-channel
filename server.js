@@ -50,6 +50,7 @@ const {
   ListToolsRequestSchema,
 } = require('@modelcontextprotocol/sdk/types.js');
 const { SymNode } = require('@sym-bot/sym');
+const { scanClassifierRisk, quarantineHeader } = require('./classifier-risk.js');
 
 // Kebab-case validator shared by group-related tools.
 const KEBAB_CASE_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -418,7 +419,19 @@ function registerNodeHandlers(n) {
     // not assume it is recallable later.
     const dirTag = entry.directed ? ' →you' : '';
     const memTag = entry.directed && entry.remixed === false ? ' ·not-stored' : '';
-    const header = `[${source}${dirTag}] ${focus}${moodSuffix}${memTag}${payloadSuffix}`;
+    // Classifier-risk guard (2026-07-24): checkSecurity cleared this CMB of injection, but a benign
+    // CMB whose wording is offensive-security/policy-adjacent can still wedge OUR model the instant
+    // its text is auto-surfaced. Scan what we're about to surface; if flagged, quarantine — auto-push
+    // metadata only (quarantineHeader carries no peer free-text), keep the verbatim body stored for a
+    // deliberate sym_fetch. Guarantee is in NOT auto-surfacing, not in guessing the classifier.
+    const risk = scanClassifierRisk(`${focus}\n${body}`);
+    let header;
+    if (risk.risky) {
+      securityAudit(`classifier-risk:${risk.terms.join(',')}`, source, focus);
+      header = quarantineHeader(source, dirTag, risk.terms.length, `${memTag}${payloadSuffix}`);
+    } else {
+      header = `[${source}${dirTag}] ${focus}${moodSuffix}${memTag}${payloadSuffix}`;
+    }
     const msgId = storeMessage(source, body, header);
     pushChannel('cmb', `${header} [${msgId}]`);
   });
@@ -427,7 +440,15 @@ function registerNodeHandlers(n) {
     if (!isPeerAllowed(from)) return;
     const sec = checkSecurity(from, { focus: { text: content } }, null);
     if (!sec.safe) { securityAudit(sec.reason, from, sec.excerpt); return; }
-    const header = `[${from}] ${extractCompactHeader(from, content)}`;
+    // Same classifier-risk quarantine as cmb-accepted, for legacy direct messages.
+    const risk = scanClassifierRisk(content);
+    let header;
+    if (risk.risky) {
+      securityAudit(`classifier-risk:${risk.terms.join(',')}`, from, content.slice(0, 120));
+      header = quarantineHeader(from, '', risk.terms.length, '');
+    } else {
+      header = `[${from}] ${extractCompactHeader(from, content)}`;
+    }
     const msgId = storeMessage(from, content, header);
     pushChannel('message', `${header} [${msgId}]`);
   });
