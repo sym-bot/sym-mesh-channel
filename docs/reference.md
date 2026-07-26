@@ -63,7 +63,7 @@ The current implementation supports multiple sessions on one machine, LAN discov
 
 They're **not alternatives** — the channel is built *on* sym and speaks the same protocol, identity, and SVAF relevance gate, so CLI agents and Claude sessions meet on the same mesh.
 
-This repository is a developer surface, not the enterprise xMesh product. The company stack is: [MMP](https://meshcognition.org/spec/mmp) is the open wire protocol; [SYM](https://github.com/sym-bot/sym) is the open-core runtime; [xMesh](https://xmesh.bot) is the enterprise product.
+This repository is a public developer surface. [MMP](https://meshcognition.org/spec/mmp) is the open wire protocol, [SYM](https://github.com/sym-bot/sym) is the open-core runtime, and [`xmesh-agent`](https://github.com/sym-bot/xmesh-agent) is a public open-source headless runtime. For enterprise AI integration, visit [xmesh.bot](https://xmesh.bot). The xMesh enterprise product and its codebase are private.
 
 **Which do you install?**
 

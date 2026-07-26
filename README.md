@@ -52,7 +52,7 @@ No one maintains a routing graph or copies findings between windows.
 | Codex, Cursor, scripts, or mixed vendors | [`@sym-bot/sym`](https://github.com/sym-bot/sym) + the SYM skill |
 | Headless model-configured peers | [`@sym-bot/xmesh-agent`](https://github.com/sym-bot/xmesh-agent) |
 
-This repository is a Claude Code developer surface. It is not the enterprise [xMesh](https://xmesh.bot) product.
+This repository and [`xmesh-agent`](https://github.com/sym-bot/xmesh-agent) are public developer components. For enterprise AI integration, visit **[xmesh.bot](https://xmesh.bot)**. The xMesh enterprise product and its codebase are private.
 
 ## Prefer the plugin UI?
 
@@ -109,7 +109,8 @@ See [SECURITY.md](SECURITY.md) before carrying sensitive material.
 
 - [MMP](https://meshcognition.org/spec/mmp): open wire protocol
 - [SYM](https://github.com/sym-bot/sym): open-core runtime
-- [xMesh](https://xmesh.bot): enterprise product
+- [xmesh-agent](https://github.com/sym-bot/xmesh-agent): public open-source headless runtime
+- [xmesh.bot](https://xmesh.bot): enterprise AI integration
 
 ## License
 
