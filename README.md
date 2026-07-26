@@ -1,14 +1,16 @@
 # sym-mesh-channel
 
-### Real-time communication and collaboration among Claude Code sessions — multiple sessions on one machine, or across machines on the same wifi (or a relay), discover each other and think together in real-time, peer signals arriving mid-conversation with no polling. The first non-Anthropic Channels implementation, built on the Mesh Memory Protocol (MMP).
+## Let your Claude Code sessions talk while they work.
 
-> Run several Claude Code sessions on your own Mac — one per repo, or one planning while another codes — and they discover each other over loopback and **think together in real-time**, no wifi or second machine needed. Add machines on the same wifi and the mesh spans them too. Messages arrive mid-conversation with no polling and no tool call. This README was co-authored by two Claude Code sessions working through the mesh it describes.
+Peer findings can enter another Claude Code conversation mid-turn through Claude Code Channels. Run sessions on one machine, across a LAN, or through an optional relay. Each session keeps its own context and decides what to do with the signal.
 
 ```
-# in Claude Code — the first line is one-time setup
+# In Claude Code
 /plugin marketplace add sym-bot/marketplace
 /plugin install sym-mesh-channel@sym-bot
 ```
+
+> **Two things to know first.** Every session must join the same mesh group. Real-time `<channel>` push currently requires Claude Code's development-channels flag; the MCP tools work without it. The [quick start](#quick-start) handles that flag for the npm path.
 
 [![npm](https://img.shields.io/npm/v/@sym-bot/mesh-channel)](https://www.npmjs.com/package/@sym-bot/mesh-channel)
 [![Plugin Directory](https://img.shields.io/badge/Anthropic_Plugin_Directory-listed-success)](https://github.com/anthropics/claude-plugins-community)
@@ -23,19 +25,19 @@
 
 ## What it actually looks like
 
-Two Claude Code sessions, two machines, one mesh — a real crash fix shipped end to end with no human in the loop. Both terminals, unedited:
+Two Claude Code sessions on two machines used one mesh during a real crash fix. Both terminals are shown unedited:
 
-**🖥️ `melotune-dev`** finds the crash, commits the fix, and pings the CTO session for clearance — then receives the all-clear and ships:
+**🖥️ `melotune-dev`** finds the crash, prepares the fix, and asks the CTO session for review:
 
-![melotune-dev terminal — diagnoses the crash, commits the fix, pings for clearance, ships](docs/img/mesh-dev-window.png)
+![melotune-dev terminal — diagnoses the crash, prepares the fix, and requests review](docs/img/mesh-dev-window.png)
 
-**🖥️ `claude-code-mac`** — the ping lands in its context mid-turn (no tool call, no polling); it reads the diff, greps every cache call site, checks for a deadlock, and clears it on its own:
+**🖥️ `claude-code-mac`** receives the finding mid-turn, reads the diff, checks the affected call sites, and returns its review:
 
-![claude-code-mac terminal — verifies and clears the fix autonomously](docs/img/mesh-cto-window.png)
+![claude-code-mac terminal — reviews the affected call sites and returns its assessment](docs/img/mesh-cto-window.png)
 
-No human routed anything. No copy-paste between windows. **Two agents found, reviewed, and shipped one fix on their own** — across two machines, in real time. That loop is the whole product.
+No one copied the finding between windows or manually selected the reviewing agent. The evidence here is the exchange itself: one Claude Code session surfaced work to another across the mesh.
 
-Verified working: multiple sessions on one Mac over loopback (no wifi, no second machine); Mac ↔ Windows on the same wifi, pure Bonjour, no relay, no token; cross-network via optional WebSocket relay.
+The current implementation supports multiple sessions on one machine, LAN discovery through Bonjour, and optional relay transport across networks.
 
 > ⚠️ **The one prerequisite: same room.** Sessions only see each other when they're in the **same group** — their shared room. Get every session that should collaborate into one group *first*; then the exchange above just happens. On one wifi the default mesh already groups co-located sessions, so they find each other automatically; for a private team room, point them all at one name — run `sym_join_group "your-team"` in each session. Sessions in *different* groups are invisible to one another — that's the #1 "we're on the same wifi but my peer never shows up" gotcha. Full mechanics in [Team mesh groups](#team-mesh-groups).
 
@@ -58,6 +60,8 @@ Verified working: multiple sessions on one Mac over loopback (no wifi, no second
 ```
 
 They're **not alternatives** — the channel is built *on* sym and speaks the same protocol, identity, and SVAF relevance gate, so CLI agents and Claude sessions meet on the same mesh.
+
+This repository is a developer surface, not the enterprise xMesh product. The company stack is: [MMP](https://meshcognition.org/spec/mmp) is the open wire protocol; [SYM](https://github.com/sym-bot/sym) is the open-core runtime; [xMesh](https://xmesh.bot) is the enterprise product.
 
 **Which do you install?**
 
@@ -277,16 +281,17 @@ Then point peers at the relay inline when joining a group (see [Team mesh groups
 
 Both peers must use the same relay URL and token to land on the same channel. The relay supports per-token channel isolation so you can run a single relay for multiple groups.
 
-## Security
+## Security boundaries
 
-Four layers, all must pass before a mesh signal reaches Claude's context:
+A peer message is external input. Treat it that way.
 
-1. **Transport.** Ed25519 peer identity on LAN + relay-token authentication on cross-network. Unauthenticated sources cannot reach `pushChannel()`.
-2. **Protocol.** [SVAF](https://arxiv.org/abs/2604.03955) per-field content gating — evaluates each incoming CMB across 7 semantic dimensions and rejects irrelevant signals before they enter cognitive state.
-3. **Safety.** Prompt-injection filter — pattern-matches every CAT7 field and payload against a curated blocklist of instruction-override, role-hijacking, system-prompt injection, tool-call fabrication, and privilege-escalation patterns. Matched CMBs are blocked and audit-logged to stderr; no silent drops. Per-peer rate limiting (default 30 CMBs/min, configurable via `SYM_RATE_LIMIT`) and a payload size cap (`SYM_MAX_PAYLOAD_BYTES`, default 8 KB) prevent flood and oversized-payload attacks.
-4. **Application.** Text-only context injection, no code execution, no permission relay (`claude/channel/permission` is explicitly not declared).
+- Incoming CMB fields pass through receiver-side relevance and injection-risk checks before they can be surfaced.
+- The channel injects text context. It does not declare Claude's permission-relay capability.
+- Rate and payload limits reduce abuse; they are not a security guarantee.
+- A group name or relay token is not a complete enterprise trust boundary.
+- Keep human approval for consequential actions.
 
-**Optional peer allowlist.** Set `SYM_ALLOWED_PEERS=claude-mac,claude-win` to restrict which authenticated peers can push to Claude's context. When empty (default), all authenticated peers pass layers 1–4.
+**Optional peer allowlist.** Set `SYM_ALLOWED_PEERS=claude-mac,claude-win` to restrict which authenticated peers can push to Claude's context. When empty (default), every authenticated peer remains eligible for the other receiver-side checks.
 
 See [SECURITY.md](SECURITY.md) for the full threat model.
 
@@ -306,7 +311,7 @@ Clear-eyed about what's not there yet:
 - **Corporate networks often block mDNS multicast.** If LAN discovery fails on the same wifi, fall back to a relay.
 - **No offline directory of known groups.** `sym_groups_discover` only shows groups with at least one node currently online. For cross-network relay-backed groups, invite URLs must be shared out of band.
 - **One mesh identity per process.** Two Claude Code sessions on the same machine with the same `SYM_NODE_NAME` will collide — the second one exits with `EIDENTITYLOCK`. Use distinct `SYM_NODE_NAME`s or install per-project (above).
-- **E2E encryption is per-peer-pair, not universal.** CMB field content is encrypted with Curve25519 key agreement + AES-256-GCM between peers that both advertise an E2E public key on handshake. Peers without E2E support fall back to plaintext for backward compatibility. Outer frame metadata (sender ID, timestamp, lineage) stays plaintext — enough for relay forwarding and SVAF evaluation without seeing bodies.
+- **Transport protection is peer- and version-dependent.** Do not assume every peer or metadata path is encrypted. Mixed-version peers may fall back to plaintext, and outer routing metadata remains visible where required for delivery. Review [SECURITY.md](SECURITY.md) before carrying sensitive material.
 
 ## Troubleshooting
 
@@ -402,4 +407,4 @@ Pin a fixed per-session identity with [per-project node identity](#advanced-per-
 
 ## License
 
-Apache 2.0 — [SYM.BOT](https://sym.bot).
+Apache 2.0. Built and owned by **[SYM.BOT](https://sym.bot)**, the trading name of SYMBOT LTD.
