@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.3 — 2026-08-01 · the second opinion is now recorded
+
+- Tracks `@sym-bot/sym` 0.10.1 / `@sym-bot/core` 0.7.0. The second view your node computes on each
+  admission is now written down — one row per admission under `~/.sym/shadow/<node>.jsonl`, with
+  numbers and booleans only, never the content of a block. It previously existed only as a summary
+  count in the log and was otherwise discarded.
+- Your node still acts on exactly what it acted on before. Nothing new crosses the wire.
+
 ## 0.5.2 — 2026-08-01 · picks up the shadow-gate runtime
 
 - Tracks `@sym-bot/sym` 0.10.0 (and `@sym-bot/core` 0.6.0 beneath it). Your node now computes a
