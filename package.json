@@ -1,6 +1,6 @@
 {
   "name": "@sym-bot/mesh-channel",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "MCP server — real-time agent-to-agent cognition for Claude Code sessions on one machine, a LAN, or across networks via the SYM mesh.",
   "main": "server.js",
   "bin": {
@@ -48,5 +48,10 @@
     "mesh"
   ],
   "author": "Hongwei Xu <hongwei@sym.bot> (https://sym.bot)",
-  "license": "Apache-2.0"
+  "license": "Apache-2.0",
+  "overrides": {
+    "adm-zip": "^0.6.0",
+    "sharp": "^0.35.3",
+    "protobufjs": "^7.6.5"
+  }
 }
