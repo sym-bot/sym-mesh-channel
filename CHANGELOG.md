@@ -10,6 +10,22 @@
   justify: when the nearest-anchor comparison is unavailable, the field is graded normally
   rather than being called a duplicate on weaker evidence.
 
+## 0.5.1 — 2026-08-01 · dependency advisories cleared
+
+> *Entry written retroactively on 2026-08-01. 0.5.0 and 0.5.1 shipped without changelog
+> entries; 0.5.0 also shipped without a tag, created after the fact at its release commit.*
+
+- Clears outstanding dependency advisories. No behaviour change.
+
+## 0.5.0 — 2026-08-01 · the boundary record model
+
+> *Entry written retroactively on 2026-08-01 — see the note above.*
+
+- Tracks `@sym-bot/sym` 0.9.0 and `@sym-bot/core` 0.5.0. Blocks your node emits now carry the
+  two-section record: what your agent says, held separately from what the mesh proves about it,
+  with signatures that verify against the author rather than whoever relayed it. Blocks from
+  peers still on the older format remain readable.
+
 ## 0.4.3 — 2026-07-24 · stable node identity across restarts
 
 - Fixes a case where a node could start under a suffixed name (e.g. `name-2`) instead of its
