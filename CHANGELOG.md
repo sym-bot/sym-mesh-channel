@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.2 — 2026-08-01 · picks up the shadow-gate runtime
+
+- Tracks `@sym-bot/sym` 0.10.0 (and `@sym-bot/core` 0.6.0 beneath it). Your node now computes a
+  second, binary view of each admission alongside the one it acts on, records it locally, and
+  **acts on neither differently** — admission behaviour is unchanged and nothing new crosses the
+  wire.
+- The receive path also stops reporting a "redundant" verdict in the one case it could not
+  justify: when the nearest-anchor comparison is unavailable, the field is graded normally
+  rather than being called a duplicate on weaker evidence.
+
 ## 0.4.3 — 2026-07-24 · stable node identity across restarts
 
 - Fixes a case where a node could start under a suffixed name (e.g. `name-2`) instead of its
