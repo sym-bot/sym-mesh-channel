@@ -104,6 +104,19 @@ test('version matches npm package version', () => {
   assert.strictEqual(manifest.version, pkg.version, `plugin version (${manifest.version}) should match package version (${pkg.version})`);
 });
 
+test('.mcp.json launch pin matches npm package version', () => {
+  // The .mcp.json args are what a seat actually RUNS after /plugin update — a lagging pin
+  // ships the old runtime under a new plugin version (v0.5.4 launched 0.5.3 this way).
+  const mcp = loadMcpJson();
+  const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+  const pinArg = mcp.mcpServers['claude-sym-mesh'].args.find((a) => a.includes('@sym-bot/mesh-channel'));
+  assert.strictEqual(
+    pinArg,
+    `@sym-bot/mesh-channel@${pkg.version}`,
+    `.mcp.json launches ${pinArg} but package version is ${pkg.version}`
+  );
+});
+
 test('channels server matches .mcp.json server key', () => {
   const manifest = loadManifest();
   const mcp = loadMcpJson();
