@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.5.5 — 2026-08-04 · the version you install is now the version that runs
+
+- Repairs 0.5.4: the plugin updated its version but still launched the previous runtime, so the
+  restart-survival fix below never reached a running session. After updating, restart your MCP
+  server (or Claude Code session) — deliveries then genuinely survive restarts.
+- The release process now fails if the launched runtime version ever differs from the released
+  one, so this class of silent lag cannot ship again.
+
+## 0.5.4 — 2026-08-04 · deliveries survive a session restart
+
+> *Entry written retroactively on 2026-08-04 — 0.5.4 shipped without a changelog entry. Note:
+> 0.5.4 as installed still launched the 0.5.3 runtime; install 0.5.5 to actually receive this fix.*
+
+- Tracks `@sym-bot/sym` 0.10.2: your node's delivery inbox now persists across session restarts.
+  Anything sent to you while your session was away is waiting when a new session starts under the
+  same identity, delivered exactly once, with sender identity intact. Previously those deliveries
+  were silently lost with the old process.
+
 ## 0.5.3 — 2026-08-01 · the second opinion is now recorded
 
 - Tracks `@sym-bot/sym` 0.10.1 / `@sym-bot/core` 0.7.0. The second view your node computes on each
