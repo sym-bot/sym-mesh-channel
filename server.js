@@ -770,10 +770,25 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     case 'sym_fetch': {
+      // A MALFORMED CALL AND A MISSING MESSAGE ARE DIFFERENT FACTS. Without this guard an
+      // absent msg_id (a caller sending some other parameter name) fell through to a store
+      // lookup on `undefined` and answered "Message undefined not found (expired or invalid
+      // ID)" — which names a cause that did not happen, sends the caller hunting for an
+      // expired message, and hides the one thing they could actually fix. Cost three
+      // round-trips of misdiagnosis on 2026-08-06, including a peer concluding the tool was
+      // broken mesh-wide when their call simply used the wrong key.
+      const rawId = typeof args.msg_id === 'string' ? args.msg_id.trim() : '';
+      if (!rawId) {
+        const got = Object.keys(args || {});
+        return { content: [{ type: 'text', text:
+          `sym_fetch was called without msg_id, so no lookup was attempted — this is a malformed call, not a missing message. ` +
+          `msg_id is required and takes an ID from a channel notification or sym_receive, e.g. "m007" or "in0003". ` +
+          (got.length ? `Received instead: ${got.join(', ')}.` : `No parameters were received.`) }] };
+      }
       // inNNNN → SDK delivery inbox (pull path); mNNN → channel-push store.
-      if (typeof args.msg_id === 'string' && args.msg_id.startsWith('in')) {
-        const m = node.inboxGet(args.msg_id);
-        if (!m) return { content: [{ type: 'text', text: `Message ${args.msg_id} not found (expired or invalid ID).` }] };
+      if (rawId.startsWith('in')) {
+        const m = node.inboxGet(rawId);
+        if (!m) return { content: [{ type: 'text', text: `Message ${rawId} not found (expired or invalid ID).` }] };
         // Append the opaque payload (now preserved on the inbox message) so the
         // pull path returns structured data intact, exactly like the channel-push
         // store does — otherwise sym_fetch on a directed CMB silently loses it.
@@ -785,9 +800,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         return { content: [{ type: 'text', text: `[${m.from}] ${new Date(m.receivedAt).toISOString()}\n\n${body}` }] };
       }
-      const entry = MESSAGE_STORE.get(args.msg_id);
+      const entry = MESSAGE_STORE.get(rawId);
       if (!entry) {
-        return { content: [{ type: 'text', text: `Message ${args.msg_id} not found (expired or invalid ID).` }] };
+        return { content: [{ type: 'text', text: `Message ${rawId} not found (expired or invalid ID).` }] };
       }
       return {
         content: [{
