@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.6.0 (2026-08-07)
+
+### Changed
+
+- **Repin `@sym-bot/sym` 0.10.5 → 0.11.0 (core 0.7.4 → 0.8.1).** This carries a fix that would
+  otherwise have discarded records: core's `verifyCMB` used to return `valid: true` for records
+  it had never actually checked, and `recomputeKey` could not recompute a single record the
+  library minted. See `@sym-bot/core` 0.8.0/0.8.1 and `@sym-bot/sym` 0.11.0.
+
+  Nothing in this package derives or verifies a content address itself — it delegates to `sym` —
+  so there is no call site here that a corrected core could invalidate. That was checked rather
+  than assumed: `sym` had a hand-rolled workaround around the core defect and the bump alone
+  turned it into a regression, so every consumer in this cascade was examined for the same shape.
+
+  Resolved versions after install are verified, not the declarations: `sym` 0.11.0, `core` 0.8.1.
+
 ## 0.5.5 — 2026-08-04 · the version you install is now the version that runs
 
 - Repairs 0.5.4: the plugin updated its version but still launched the previous runtime, so the
