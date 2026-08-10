@@ -765,7 +765,52 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   ],
 }));
 
+// UNREAD-INBOX ADVISORY (contract ruled by codex-mac, 2026-08-10).
+//
+// Some MCP hosts never invoke the model on an inbound CMB — verified on Codex,
+// where a directed CMB was verified and durable at cursor 4 / seq 5 and surfaced
+// only when the next user turn called sym_receive. So ANY mesh tool can succeed
+// while directed mail sits unread. This puts the count where the model already
+// looks: on every tool response.
+//
+// It is NOT a wake and NOT a push — nothing here invokes anyone. It is a count
+// on a reply the caller was already reading.
+//
+// Contract, kept deliberately narrow:
+//   · exactly one line, and ONLY when unread > 0 — silent at zero
+//   · COUNT ONLY: no sender, no focus, no payload
+//   · MUST NOT advance the cursor — inboxStatus() is read-only, unlike inbox()
+//   · labelled distinctly from held sender-outbox state, which is a different fact
+function inboxAdvisoryLine() {
+  try {
+    const s = node.inboxStatus();          // read-only: does not move the cursor
+    if (!s || !s.undrained) return null;
+    return `Mesh inbox: ${s.undrained} unread — call sym_receive.`;
+  } catch { return null; }
+}
+
+// One wrapper so success and error responses behave identically. Applying this
+// per-case would drift the moment someone adds a tool.
+function withInboxAdvisory(result) {
+  const line = inboxAdvisoryLine();
+  if (!line || !result || !Array.isArray(result.content)) return result;
+  const last = result.content[result.content.length - 1];
+  if (last && last.type === 'text') {
+    // Append rather than push a second block: hosts differ in how they render
+    // multiple content blocks, and this must not become a second visual element.
+    return {
+      ...result,
+      content: [...result.content.slice(0, -1), { ...last, text: `${last.text}\n\n${line}` }],
+    };
+  }
+  return { ...result, content: [...result.content, { type: 'text', text: line }] };
+}
+
 mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
+  return withInboxAdvisory(await dispatchTool(request));
+});
+
+async function dispatchTool(request) {
   const { name, arguments: args } = request.params;
 
   switch (name) {
@@ -1251,7 +1296,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
     default:
       return { content: [{ type: 'text', text: `Unknown tool: ${name}` }] };
   }
-});
+}
 
 // ── Compact Channel — message store for lazy-load (v0.1) ────
 // Per COO spec cmb_compact_channel_v0.1.md: push compact headers,
