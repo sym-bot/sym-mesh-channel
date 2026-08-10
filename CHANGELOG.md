@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.6.4 (2026-08-10)
+
+**0.6.3 put the room diagnostics on stderr. Some MCP hosts never show that.** Measured on Codex
+CLI 0.144.0 by a Codex agent: a session with a misspelled or unset `SYM_ROOM` started normally and
+displayed **none** of the child's non-fatal stderr. The warnings 0.6.3 added were invisible to
+exactly the audience it was written for.
+
+Worse, `required = true` cannot catch this class at all — **a wrong room does not fail startup.**
+The server launches, the tools work, the session runs. It just talks to nobody.
+
+### Changed — the advisory now travels IN BAND
+
+- **In the MCP `initialize` instructions**, so the agent reads it whether or not the host surfaces
+  stderr.
+- **In `sym_peers` output on every call** — including `No peers connected`, which is the exact
+  moment someone asks why the mesh is quiet. It now answers with the room and its source instead
+  of leaving them to find stderr the host may never print.
+
+Stderr logging from 0.6.3 stays; it is simply no longer the only path.
+
+### Docs
+
+- **What a wrong room actually looks like** — a per-host table of where the warning appears, and
+  the observed `required = true` failure text (exit 1 before session creation) versus
+  `required = false` (exit 0, session runs silently tool-less).
+- A typo is the common case: `SYM_ROOM = "sym-bot-rooom"` resolves cleanly and joins a real, empty
+  room. Nothing about it is invalid — it is just not where anyone else is.
+- Codex **desktop** UI presentation is marked **UNTESTED**, because verifying it requires
+  terminating the task doing the reporting. Not inferred, not quietly omitted.
+
 ## 0.6.3 (2026-08-10)
 
 **Codex ↔ Claude Code duplex is now a supported, documented setup** — and the failure that made

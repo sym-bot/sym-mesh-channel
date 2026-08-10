@@ -126,7 +126,45 @@ peers in room: 2
   codex-mac (019f8c9f) via bonjour
 ```
 
-If `room source` says `nothing configured`, you are in the fallback and your teammate is invisible. The server says so at startup too, on stderr, and warns when the `sym` daemon's room (`~/.sym/room`) disagrees with the one this node resolved — a host partitioned against itself looks like a network problem and is not one.
+If `room source` says `nothing configured`, you are in the fallback and your teammate is invisible.
+
+### What a wrong room actually looks like
+
+**A wrong room does not fail startup.** The server launches, the tools work, and the session runs normally — it simply talks to nobody. `required = true` cannot catch this: it catches a server that *fails to start*, which this isn't.
+
+**Where the warning shows up, by host** — measured on Codex CLI 0.144.0 and `@sym-bot/mesh-channel` 0.6.4:
+
+| Surface | Shown? |
+|---|---|
+| MCP `initialize` instructions (**in band, the agent reads it**) | **Yes — every host** |
+| `sym_peers` / `sym_room_info` output | **Yes — every host** |
+| Server stderr at startup | Yes in hosts that surface child stderr; **not shown by Codex CLI 0.144.0** |
+
+Because some hosts swallow non-fatal child stderr, the advisory also travels **in band** — in the MCP initialize instructions and in the tool responses themselves:
+
+```
+MESH ROOM ADVISORY: the sym daemon is in room 'sym-bot-room' (~/.sym/room)
+but this node resolved 'sym-bot-rooom' from SYM_ROOM env. They cannot see
+each other. Call sym_join_room with room="sym-bot-room", or fix the config.
+```
+
+`sym_peers` reports the room and its source on **every** call, including `No peers connected` — the moment you're most likely to be asking why.
+
+**A typo is the common case.** `SYM_ROOM = "sym-bot-rooom"` resolves cleanly to `_sym-bot-rooom._tcp` and joins a real, empty room. There is nothing invalid about it; it's just not where anyone else is.
+
+*Codex CLI stderr suppression and the `required = true` behaviour below were measured on real Codex hosts by a Codex agent. Codex **desktop** UI presentation for both cases is **UNTESTED** — verifying it requires terminating the task doing the reporting.*
+
+### What `required = true` does catch
+
+A server that cannot launch. Measured on Codex CLI 0.144.0 with a deliberately invalid command:
+
+```
+Failed to create session: required MCP servers failed to initialize:
+mesh_failure: No such file or directory
+Fatal error: Failed to initialize session...
+```
+
+Exit code 1, before the session is created. With `required = false` the same fault exits 0 and only logs an MCP shutdown warning afterwards — the session runs silently tool-less. Keep `required = true`.
 
 ### Restarting Codex after a config change
 
