@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.7.1 (2026-08-10)
+
+### Fixed — 0.7.0 on npm was broken. Do not use it.
+
+`server.js` requires `./outbox.js`; `package.json`'s `files` whitelist omitted it. The published
+tarball had no `outbox.js`, so `npm i @sym-bot/mesh-channel@0.7.0` failed at startup with
+`Cannot find module './outbox.js'`.
+
+Every test passed and the repo was green, because **every test ran against the working tree, where
+the file is trivially present. The artifact users receive is a different artifact from the one we
+tested.** The plugin install was unaffected — it installs from git.
+
+Found from the registry tarball by a Codex agent, not by this repo's suite.
+
+### Added — a release gate that tests the packed artifact
+
+`npm run verify:packed`, wired into `prepublishOnly`: `npm pack` → install the tarball into an
+empty directory → speak real MCP over stdio to the **installed** copy → exercise the three outbox
+cases. It also asserts every local `require` in the installed `server.js` resolves on disk.
+
+Plus static checks in `test/packaging.test.js`: every local module reachable from `server.js`,
+transitively, must appear in `files`, and every entry in `files` must exist.
+
+### Docs
+
+README's offline-peer section still said absent peers were refused. Corrected, and trimmed to
+usage rather than rationale.
+
 ## 0.7.0 (2026-08-10)
 
 **A directed send to a peer that is not connected is now HELD, not refused.**

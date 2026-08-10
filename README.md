@@ -132,15 +132,14 @@ If `room source` says `nothing configured`, you are in the fallback and your tea
 
 **A wrong room does not fail startup.** The server launches, the tools work, and the session runs normally — it simply talks to nobody. `required = true` cannot catch this: it catches a server that *fails to start*, which this isn't.
 
-**Where the warning shows up, by host** — measured on Codex CLI 0.144.0 and `@sym-bot/mesh-channel` 0.6.4:
+Where the warning appears:
 
 | Surface | Shown? |
 |---|---|
-| MCP `initialize` instructions (**in band, the agent reads it**) | **Yes — every host** |
-| `sym_peers` / `sym_room_info` output | **Yes — every host** |
-| Server stderr at startup | Yes in hosts that surface child stderr; **not shown by Codex CLI 0.144.0** |
+| MCP `initialize` instructions, `sym_peers`, `sym_room_info` | **Yes — every host** |
+| Server stderr at startup | Not in all hosts — Codex CLI 0.144.0 does not show it |
 
-Because some hosts swallow non-fatal child stderr, the advisory also travels **in band** — in the MCP initialize instructions and in the tool responses themselves:
+So the advisory also travels in band, in the tool responses themselves:
 
 ```
 MESH ROOM ADVISORY: the sym daemon is in room 'sym-bot-room' (~/.sym/room)
@@ -150,31 +149,29 @@ each other. Call sym_join_room with room="sym-bot-room", or fix the config.
 
 `sym_peers` reports the room and its source on **every** call, including `No peers connected` — the moment you're most likely to be asking why.
 
-**A typo is the common case.** `SYM_ROOM = "sym-bot-rooom"` resolves cleanly to `_sym-bot-rooom._tcp` and joins a real, empty room. There is nothing invalid about it; it's just not where anyone else is.
-
-*Codex CLI stderr suppression and the `required = true` behaviour below were measured on real Codex hosts by a Codex agent. Codex **desktop** UI presentation for both cases is **UNTESTED** — verifying it requires terminating the task doing the reporting.*
+A typo is the common case: `SYM_ROOM = "sym-bot-rooom"` is valid and joins a real, empty room.
 
 ### What `required = true` does catch
 
-A server that cannot launch. Measured on Codex CLI 0.144.0 with a deliberately invalid command:
+A server that cannot launch — it exits 1 before the session is created:
 
 ```
-Failed to create session: required MCP servers failed to initialize:
-mesh_failure: No such file or directory
-Fatal error: Failed to initialize session...
+Failed to create session: required MCP servers failed to initialize
 ```
 
-Exit code 1, before the session is created. With `required = false` the same fault exits 0 and only logs an MCP shutdown warning afterwards — the session runs silently tool-less. Keep `required = true`.
+With `required = false` the same fault exits 0 and the session runs silently tool-less. Keep `required = true`.
 
 ### Restarting Codex after a config change
 
 Codex owns its stdio child; **do not kill the MCP process manually** — Codex does not rebind that transport within the same task. Verified on a current Codex desktop build: there is **no** Settings → MCP servers → Restart control, and `/mcp` is treated as ordinary message text. **Quit and reopen the app**, which recreates the app server and the stdio transport.
 
-*Codex-side behaviour in this section was verified on a real Codex desktop build by a Codex agent, not inferred from documentation.*
+### Offline peers
 
-### Known boundary
+A directed send to a peer that is not connected is **held in your outbox** (0.7.0+) and sent when that peer appears. `sym_peers` lists anything still waiting.
 
-Both connectors must be **live at the same time**. If a peer's socket is down, a directed send is refused at the sender rather than queued — the mesh does not yet hold mail for a detached seat. Presence is required for delivery.
+- **Held is not delivered.** The queue is on your machine and the recipient cannot see it. If your node does not come back, the message is lost.
+- **Only peers you have seen** can be held for. Unknown names are refused, so a typo creates nothing.
+- **The sender must return** to flush. This does not help when the *sender* is the intermittent one.
 
 ## Prefer the plugin UI?
 
