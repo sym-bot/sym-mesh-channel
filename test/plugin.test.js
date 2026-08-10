@@ -256,7 +256,7 @@ test('server.js carries the delivery-integrity fix', () => {
   assert.ok(code.includes('deliveredCmbKeys'), 'delivered-key tracking missing');
   assert.ok(code.includes('[re-sent '), 're-issue salt for an undelivered re-send is missing');
   assert.ok(/deliveredCmbKeys = new Set\(\)/.test(code.slice(code.indexOf('node = newNode'))),
-    'deliveredCmbKeys must reset on hot-swap (sym_join_group)');
+    'deliveredCmbKeys must reset on hot-swap (sym_join_room)');
   assert.ok(!code.includes('CMB already in memory, not re-broadcast'),
     'the old unconditional "Duplicate — not re-broadcast" message must be gone');
 });
@@ -616,7 +616,7 @@ async function runProjectInstallTests() {
     // SYM_GROUP must be first-class at install time so a teammate's group
     // membership survives Claude Code restarts. Pre-0.3.4, the only way to
     // persist a group was to hand-edit ~/.claude.json after running
-    // sym_join_group at runtime — which the README never told users to do.
+    // sym_join_room at runtime — which the README never told users to do.
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-proj-'));
     try {
       const { code } = await spawnInstaller(['init', '--project', '--group', 'backend-team'], {

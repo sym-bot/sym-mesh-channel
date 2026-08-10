@@ -49,7 +49,7 @@ const cmd = args.find((a) => !a.startsWith('--')) || 'init';
 // --group <name>: persist a SYM_GROUP env entry into the written .mcp.json /
 // ~/.claude.json so the node joins that group on every Claude Code launch.
 // Without this flag, the env block omits SYM_GROUP and the node falls back
-// to the default _sym._tcp mesh on startup. Runtime sym_join_group hot-swaps
+// to the default _sym._tcp mesh on startup. Runtime sym_join_room hot-swaps
 // only last for the current session — without persistence, peers in named
 // groups silently revert to default and become invisible to teammates.
 const groupArgIdx = args.indexOf('--group');
