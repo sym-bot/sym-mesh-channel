@@ -278,12 +278,12 @@ function loadSendIntegrity() {
     const connected = t ? true : peerCount(n) > 0;
     const entry = n.remember(fields, sendOpts);
     if (entry) { if (connected) delivered.add(deliveryTag(fields, t)); return { text: okSummary(entry, connected) }; }
-    if (delivered.has(deliveryTag(fields, t))) return { text: `Duplicate — identical CMB already delivered${t ? '' : ' to the group'}, not re-broadcast.` };
+    if (delivered.has(deliveryTag(fields, t))) return { text: `Duplicate — identical CMB already delivered${t ? '' : ' to the room'}, not re-broadcast.` };
     const salted = Object.assign({}, fields, { focus: `${fields.focus} [re-sent ${stamp()}]` });
     const retry = n.remember(salted, sendOpts);
     if (!retry) return { text: 'Send failed: nothing broadcast.', isError: true };
     if (connected) delivered.add(deliveryTag(salted, t));
-    return { text: `Re-sent CMB ${retry.key}${t ? '' : ' to the group'} — undelivered prior copy re-issued.` };
+    return { text: `Re-sent CMB ${retry.key}${t ? '' : ' to the room'} — undelivered prior copy re-issued.` };
   }
   return { explicitSend, deliveryTag };
 }
@@ -612,29 +612,29 @@ async function runProjectInstallTests() {
     }
   });
 
-  await testAsync('--project --group <name> persists SYM_GROUP into .mcp.json env', async () => {
-    // SYM_GROUP must be first-class at install time so a teammate's group
+  await testAsync('--project --room <name> persists SYM_ROOM into .mcp.json env', async () => {
+    // SYM_ROOM must be first-class at install time so a teammate's room
     // membership survives Claude Code restarts. Pre-0.3.4, the only way to
-    // persist a group was to hand-edit ~/.claude.json after running
+    // persist a room was to hand-edit ~/.claude.json after running
     // sym_join_room at runtime — which the README never told users to do.
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-proj-'));
     try {
-      const { code } = await spawnInstaller(['init', '--project', '--group', 'backend-team'], {
+      const { code } = await spawnInstaller(['init', '--project', '--room', 'backend-team'], {
         cwd: tmpDir,
         env: { ...process.env, SYM_NODE_NAME: 'claude-test-grp' },
       });
       assert.strictEqual(code, 0);
       const mcp = JSON.parse(fs.readFileSync(path.join(tmpDir, '.mcp.json'), 'utf8'));
-      assert.strictEqual(mcp.mcpServers['claude-sym-mesh'].env.SYM_GROUP, 'backend-team');
+      assert.strictEqual(mcp.mcpServers['claude-sym-mesh'].env.SYM_ROOM, 'backend-team');
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
 
-  await testAsync('--project without --group omits SYM_GROUP (default mesh)', async () => {
-    // Omitting SYM_GROUP from the env block (rather than writing an empty
+  await testAsync('--project without --room omits SYM_ROOM (default mesh)', async () => {
+    // Omitting SYM_ROOM from the env block (rather than writing an empty
     // value) lets the server.js fallback select the global _sym._tcp mesh.
-    // An empty SYM_GROUP would shadow the fallback and pin the node to a
+    // An empty SYM_ROOM would shadow the fallback and pin the node to a
     // nameless service type — silent failure mode.
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-proj-'));
     try {
@@ -645,17 +645,17 @@ async function runProjectInstallTests() {
       assert.strictEqual(code, 0);
       const mcp = JSON.parse(fs.readFileSync(path.join(tmpDir, '.mcp.json'), 'utf8'));
       const env = mcp.mcpServers['claude-sym-mesh'].env;
-      assert.ok(!('SYM_GROUP' in env), 'SYM_GROUP must be omitted when not requested');
+      assert.ok(!('SYM_ROOM' in env), 'SYM_ROOM must be omitted when not requested');
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
 
-  await testAsync('global: heal preserves SYM_GROUP across stale-entry rewrite', async () => {
+  await testAsync('global: heal preserves SYM_ROOM across stale-entry rewrite', async () => {
     // The 2026-05-02 SYM.BOT incident root cause: pre-0.3.4 healing dropped
-    // SYM_GROUP silently, reverting the node to default mesh on next launch
-    // and stranding teammates who stayed in the named group. The fix copies
-    // both SYM_NODE_NAME and SYM_GROUP from the prior entry into the rewrite.
+    // SYM_ROOM silently, reverting the node to default mesh on next launch
+    // and stranding teammates who stayed in the named room. The fix copies
+    // both SYM_NODE_NAME and SYM_ROOM from the prior entry into the rewrite.
     const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-home-'));
     try {
       const claudeJsonPath = path.join(fakeHome, '.claude.json');
@@ -666,7 +666,7 @@ async function runProjectInstallTests() {
             args: ['/nonexistent/stale/server.js'],
             env: {
               SYM_NODE_NAME: 'claude-team-member',
-              SYM_GROUP: 'sym-bot-team',
+              SYM_ROOM: 'sym-bot-team',
               SYM_RELAY_URL: '',
               SYM_RELAY_TOKEN: '',
             },
@@ -680,16 +680,16 @@ async function runProjectInstallTests() {
       const after = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf8'));
       const env = after.mcpServers['claude-sym-mesh'].env;
       assert.strictEqual(env.SYM_NODE_NAME, 'claude-team-member', 'node name must be preserved');
-      assert.strictEqual(env.SYM_GROUP, 'sym-bot-team', 'group must be preserved on heal');
+      assert.strictEqual(env.SYM_ROOM, 'sym-bot-team', 'room must be preserved on heal');
     } finally {
       fs.rmSync(fakeHome, { recursive: true, force: true });
     }
   });
 
-  await testAsync('global: --force --group <name> overrides preserved SYM_GROUP', async () => {
+  await testAsync('global: --force --room <name> overrides preserved SYM_ROOM', async () => {
     // CTO PR review note 1: --force is the "I am explicitly overriding state"
-    // signal. With --force, an explicit --group should win over the preserved
-    // value so users can switch groups in a single command. Without --force,
+    // signal. With --force, an explicit --room should win over the preserved
+    // value so users can switch rooms in a single command. Without --force,
     // preserve still wins (heal path must not lose state) — covered by the
     // separate stale-heal test above.
     const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-home-'));
@@ -703,28 +703,28 @@ async function runProjectInstallTests() {
             args: [liveServerPath],
             env: {
               SYM_NODE_NAME: 'claude-mover',
-              SYM_GROUP: 'old-team',
+              SYM_ROOM: 'old-team',
               SYM_RELAY_URL: '',
               SYM_RELAY_TOKEN: '',
             },
           },
         },
       }));
-      const { code } = await spawnInstaller(['init', '--force', '--group', 'new-team'], {
+      const { code } = await spawnInstaller(['init', '--force', '--room', 'new-team'], {
         env: { ...process.env, HOME: fakeHome, USERPROFILE: fakeHome },
       });
       assert.strictEqual(code, 0);
       const after = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf8'));
-      assert.strictEqual(after.mcpServers['claude-sym-mesh'].env.SYM_GROUP, 'new-team',
-        '--force + explicit --group must override preserved SYM_GROUP (one-command switch)');
+      assert.strictEqual(after.mcpServers['claude-sym-mesh'].env.SYM_ROOM, 'new-team',
+        '--force + explicit --room must override preserved SYM_ROOM (one-command switch)');
     } finally {
       fs.rmSync(fakeHome, { recursive: true, force: true });
     }
   });
 
-  await testAsync('global: --force --group default reverts to global mesh (omits SYM_GROUP)', async () => {
-    // The escape hatch documented in the README. `--group default` must
-    // remove the persisted SYM_GROUP entirely (not write the literal string
+  await testAsync('global: --force --room default reverts to global mesh (omits SYM_ROOM)', async () => {
+    // The escape hatch documented in the README. `--room default` must
+    // remove the persisted SYM_ROOM entirely (not write the literal string
     // "default" into the env block, which would map to a `_default._tcp`
     // service type). Equivalent: revert to `_sym._tcp` global mesh.
     const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-home-'));
@@ -736,44 +736,44 @@ async function runProjectInstallTests() {
           'claude-sym-mesh': {
             command: 'node',
             args: [liveServerPath],
-            env: { SYM_NODE_NAME: 'claude-r', SYM_GROUP: 'team-x' },
+            env: { SYM_NODE_NAME: 'claude-r', SYM_ROOM: 'team-x' },
           },
         },
       }));
-      const { code } = await spawnInstaller(['init', '--force', '--group', 'default'], {
+      const { code } = await spawnInstaller(['init', '--force', '--room', 'default'], {
         env: { ...process.env, HOME: fakeHome, USERPROFILE: fakeHome },
       });
       assert.strictEqual(code, 0);
       const env = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf8'))
         .mcpServers['claude-sym-mesh'].env;
-      assert.ok(!('SYM_GROUP' in env), '--force --group default must omit SYM_GROUP entirely');
+      assert.ok(!('SYM_ROOM' in env), '--force --room default must omit SYM_ROOM entirely');
     } finally {
       fs.rmSync(fakeHome, { recursive: true, force: true });
     }
   });
 
-  await testAsync('init rejects malformed SYM_GROUP env var with kebab-case error', async () => {
-    // CTO PR review note 2: KEBAB_CASE_RE must apply to SYM_GROUP env var,
-    // not just the --group CLI flag. Pre-fix, SYM_GROUP=Backend_Team flowed
+  await testAsync('init rejects malformed SYM_ROOM env var with kebab-case error', async () => {
+    // CTO PR review note 2: KEBAB_CASE_RE must apply to SYM_ROOM env var,
+    // not just the --room CLI flag. Pre-fix, SYM_ROOM=Backend_Team flowed
     // through unvalidated and got written into the entry as-is, producing
     // an mDNS service type the SymNode would silently fail to register.
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-proj-'));
     try {
       const { code, stderr } = await spawnInstaller(['init', '--project'], {
         cwd: tmpDir,
-        env: { ...process.env, SYM_GROUP: 'Backend_Team' },
+        env: { ...process.env, SYM_ROOM: 'Backend_Team' },
         allowFail: true,
       });
-      assert.strictEqual(code, 1, 'malformed SYM_GROUP must exit 1');
-      assert.ok(stderr.includes('SYM_GROUP'), 'error must name the env var, not just --group');
+      assert.strictEqual(code, 1, 'malformed SYM_ROOM must exit 1');
+      assert.ok(stderr.includes('SYM_ROOM'), 'error must name the env var, not just --room');
       assert.ok(stderr.includes('kebab-case'), 'error must explain the constraint');
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
 
-  await testAsync('global: doctor reports group per entry and warns on mismatch', async () => {
-    // doctor surfaces SYM_GROUP for every entry so users can spot the
+  await testAsync('global: doctor reports room per entry and warns on mismatch', async () => {
+    // doctor surfaces SYM_ROOM for every entry so users can spot the
     // failure mode without first reading the troubleshooting section.
     const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-home-'));
     try {
@@ -784,7 +784,7 @@ async function runProjectInstallTests() {
           'claude-sym-mesh': {
             command: 'node',
             args: [liveServerPath],
-            env: { SYM_NODE_NAME: 'claude-a', SYM_GROUP: 'team-x' },
+            env: { SYM_NODE_NAME: 'claude-a', SYM_ROOM: 'team-x' },
           },
         },
         projects: {
@@ -793,7 +793,7 @@ async function runProjectInstallTests() {
               'claude-sym-mesh': {
                 command: 'node',
                 args: [liveServerPath],
-                env: { SYM_NODE_NAME: 'claude-b', SYM_GROUP: 'team-y' },
+                env: { SYM_NODE_NAME: 'claude-b', SYM_ROOM: 'team-y' },
               },
             },
           },
@@ -803,9 +803,9 @@ async function runProjectInstallTests() {
         env: { ...process.env, HOME: fakeHome, USERPROFILE: fakeHome },
       });
       assert.strictEqual(code, 0);
-      assert.ok(stdout.includes('group: team-x'), 'doctor must show team-x');
-      assert.ok(stdout.includes('group: team-y'), 'doctor must show team-y');
-      assert.ok(stdout.includes('Group mismatch'), 'doctor must flag mismatch across entries');
+      assert.ok(stdout.includes('room: team-x'), 'doctor must show team-x');
+      assert.ok(stdout.includes('room: team-y'), 'doctor must show team-y');
+      assert.ok(stdout.includes('Room mismatch'), 'doctor must flag mismatch across entries');
     } finally {
       fs.rmSync(fakeHome, { recursive: true, force: true });
     }
@@ -895,7 +895,7 @@ function spawnInstallerCapture(args, opts = {}) {
 // is the authoritative one; this mirror is kept tight and regenerated
 // if the authoritative version changes.
 
-const INVITE_URL_RE = /^([a-z][a-z0-9-]+):\/\/(?:room|group|team)\/([^/?#]+)(?:\/([^?#]+))?(?:\?(.+))?$/i;
+const INVITE_URL_RE = /^([a-z][a-z0-9-]+):\/\/(?:room|room|team)\/([^/?#]+)(?:\/([^?#]+))?(?:\?(.+))?$/i;
 const KEBAB_CASE_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 function parseInviteURL(url) {
@@ -912,29 +912,29 @@ function parseInviteURL(url) {
     })
   );
   const serviceType = appScheme === 'sym' ? `_${rawId}._tcp` : `_${appScheme}-${rawId}._tcp`;
-  const group = appScheme === 'sym' ? rawId : `${appScheme}-${rawId}`;
+  const room = appScheme === 'sym' ? rawId : `${appScheme}-${rawId}`;
   return {
-    appScheme, group, serviceType,
+    appScheme, room, serviceType,
     roomId: rawId, roomName: rawName,
     relayUrl: query.relay || null, relayToken: query.token || null,
   };
 }
 
-function buildInviteURL({ group, relayUrl, relayToken }) {
-  if (!KEBAB_CASE_RE.test(group)) throw new Error(`invalid group: ${group}`);
+function buildInviteURL({ room, relayUrl, relayToken }) {
+  if (!KEBAB_CASE_RE.test(room)) throw new Error(`invalid room: ${room}`);
   if (relayToken && !relayUrl) throw new Error('relay_token requires relay_url');
-  if (!relayUrl && !relayToken) return `sym://group/${group}`;
+  if (!relayUrl && !relayToken) return `sym://room/${room}`;
   const params = [`relay=${encodeURIComponent(relayUrl)}`];
   if (relayToken) params.push(`token=${encodeURIComponent(relayToken)}`);
-  return `sym://team/${group}?${params.join('&')}`;
+  return `sym://team/${room}?${params.join('&')}`;
 }
 
 console.log('\nInvite URL — parse:');
 
-test('sym://group/{name} parses to matching group + service type', () => {
-  const p = parseInviteURL('sym://group/backend-team');
+test('sym://room/{name} parses to matching room + service type', () => {
+  const p = parseInviteURL('sym://room/backend-team');
   assert.strictEqual(p.appScheme, 'sym');
-  assert.strictEqual(p.group, 'backend-team');
+  assert.strictEqual(p.room, 'backend-team');
   assert.strictEqual(p.serviceType, '_backend-team._tcp');
   assert.strictEqual(p.relayUrl, null);
   assert.strictEqual(p.relayToken, null);
@@ -943,16 +943,16 @@ test('sym://group/{name} parses to matching group + service type', () => {
 test('sym://team/{name}?relay=... parses relay URL + token', () => {
   const url = 'sym://team/eng-team?relay=wss%3A%2F%2Fsym-relay.onrender.com&token=abc123';
   const p = parseInviteURL(url);
-  assert.strictEqual(p.group, 'eng-team');
+  assert.strictEqual(p.room, 'eng-team');
   assert.strictEqual(p.serviceType, '_eng-team._tcp');
   assert.strictEqual(p.relayUrl, 'wss://sym-relay.onrender.com');
   assert.strictEqual(p.relayToken, 'abc123');
 });
 
-test('melotune://room/{id}/{name} prefixes group with app scheme', () => {
+test('melotune://room/{id}/{name} prefixes room with app scheme', () => {
   const p = parseInviteURL('melotune://room/abc123/Kitchen');
   assert.strictEqual(p.appScheme, 'melotune');
-  assert.strictEqual(p.group, 'melotune-abc123');
+  assert.strictEqual(p.room, 'melotune-abc123');
   assert.strictEqual(p.serviceType, '_melotune-abc123._tcp');
   assert.strictEqual(p.roomName, 'Kitchen');
 });
@@ -981,13 +981,13 @@ test('garbage string returns error', () => {
 
 console.log('\nInvite URL — create + round-trip:');
 
-test('buildInviteURL(group) returns sym://group/{name}', () => {
-  assert.strictEqual(buildInviteURL({ group: 'backend-team' }), 'sym://group/backend-team');
+test('buildInviteURL(room) returns sym://room/{name}', () => {
+  assert.strictEqual(buildInviteURL({ room: 'backend-team' }), 'sym://room/backend-team');
 });
 
-test('buildInviteURL(group, relay, token) returns sym://team/ with query string', () => {
+test('buildInviteURL(room, relay, token) returns sym://team/ with query string', () => {
   const url = buildInviteURL({
-    group: 'eng-team',
+    room: 'eng-team',
     relayUrl: 'wss://sym-relay.onrender.com',
     relayToken: 'shared-secret-xyz',
   });
@@ -996,35 +996,35 @@ test('buildInviteURL(group, relay, token) returns sym://team/ with query string'
   assert.ok(url.includes('token=shared-secret-xyz'), 'token present');
 });
 
-test('buildInviteURL rejects invalid group name', () => {
-  assert.throws(() => buildInviteURL({ group: 'Bad Group' }), /invalid group/);
-  assert.throws(() => buildInviteURL({ group: 'UPPERCASE' }), /invalid group/);
-  assert.throws(() => buildInviteURL({ group: '-leading-hyphen' }), /invalid group/);
-  assert.throws(() => buildInviteURL({ group: 'trailing-hyphen-' }), /invalid group/);
+test('buildInviteURL rejects invalid room name', () => {
+  assert.throws(() => buildInviteURL({ room: 'Bad Room' }), /invalid room/);
+  assert.throws(() => buildInviteURL({ room: 'UPPERCASE' }), /invalid room/);
+  assert.throws(() => buildInviteURL({ room: '-leading-hyphen' }), /invalid room/);
+  assert.throws(() => buildInviteURL({ room: 'trailing-hyphen-' }), /invalid room/);
 });
 
 test('buildInviteURL rejects token without URL', () => {
   assert.throws(
-    () => buildInviteURL({ group: 'x', relayToken: 'token-only' }),
+    () => buildInviteURL({ room: 'x', relayToken: 'token-only' }),
     /relay_token requires relay_url/,
   );
 });
 
-test('round-trip: create LAN → parse → same group back', () => {
-  const url = buildInviteURL({ group: 'my-team' });
+test('round-trip: create LAN → parse → same room back', () => {
+  const url = buildInviteURL({ room: 'my-team' });
   const p = parseInviteURL(url);
-  assert.strictEqual(p.group, 'my-team');
+  assert.strictEqual(p.room, 'my-team');
   assert.strictEqual(p.serviceType, '_my-team._tcp');
 });
 
-test('round-trip: create relay → parse → same group + relay creds back', () => {
+test('round-trip: create relay → parse → same room + relay creds back', () => {
   const url = buildInviteURL({
-    group: 'cross-net',
+    room: 'cross-net',
     relayUrl: 'wss://sym-relay.onrender.com',
     relayToken: 'tok-123',
   });
   const p = parseInviteURL(url);
-  assert.strictEqual(p.group, 'cross-net');
+  assert.strictEqual(p.room, 'cross-net');
   assert.strictEqual(p.relayUrl, 'wss://sym-relay.onrender.com');
   assert.strictEqual(p.relayToken, 'tok-123');
 });

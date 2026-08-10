@@ -53,7 +53,7 @@ const { SymNode } = require('@sym-bot/sym');
 const { scanClassifierRisk, quarantineHeader } = require('./classifier-risk.js');
 const { resolveIdentity } = require('./identity.js');
 
-// Kebab-case validator shared by group-related tools.
+// Kebab-case validator shared by room-related tools.
 const KEBAB_CASE_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 // ── Invite URL parsing (shared by sym_invite_info and the internal
@@ -61,7 +61,7 @@ const KEBAB_CASE_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 //    a module-level function so it's trivially unit-testable and the
 //    same regex doesn't drift between two call sites.
 
-const INVITE_URL_RE = /^([a-z][a-z0-9-]+):\/\/(?:room|group|team)\/([^/?#]+)(?:\/([^?#]+))?(?:\?(.+))?$/i;
+const INVITE_URL_RE = /^([a-z][a-z0-9-]+):\/\/(?:room|room|team)\/([^/?#]+)(?:\/([^?#]+))?(?:\?(.+))?$/i;
 
 function parseInviteURL(url) {
   const m = INVITE_URL_RE.exec(url);
@@ -70,7 +70,7 @@ function parseInviteURL(url) {
       error:
         `Unrecognised invite URL: ${url}\n\n` +
         `Expected shapes:\n` +
-        `  sym://group/{name}                        (LAN-only)\n` +
+        `  sym://room/{name}                        (LAN-only)\n` +
         `  sym://team/{name}?relay=...&token=...     (cross-network via relay)\n` +
         `  melotune://room/{id}/{name}               (app-specific room)`,
     };
@@ -85,14 +85,14 @@ function parseInviteURL(url) {
       return [decodeURIComponent(k), decodeURIComponent(v)];
     })
   );
-  // For sym:// the path element IS the group name. For app-scoped URLs
+  // For sym:// the path element IS the room name. For app-scoped URLs
   // (melotune://, melomove://, etc.) the path is the room id and the
-  // group is prefixed with the app name to avoid collisions.
+  // room is prefixed with the app name to avoid collisions.
   const serviceType = appScheme === 'sym' ? `_${rawId}._tcp` : `_${appScheme}-${rawId}._tcp`;
-  const group = appScheme === 'sym' ? rawId : `${appScheme}-${rawId}`;
+  const room = appScheme === 'sym' ? rawId : `${appScheme}-${rawId}`;
   return {
     appScheme,
-    group,
+    room,
     serviceType,
     roomId: rawId,
     roomName: rawName,
@@ -107,7 +107,7 @@ function parseInviteURL(url) {
 //    service types that look SYM-ish, and reports them. Pure observation,
 //    no node state changes.
 
-async function discoverGroups() {
+async function discoverRooms() {
   const { spawn } = require('child_process');
   const platform = process.platform;
 
@@ -149,7 +149,7 @@ async function discoverGroups() {
       let m;
       while ((m = typeRe.exec(text)) !== null) {
         const full = `_${m[1]}._tcp`;
-        // Filter to the SYM protocol family: global sym, named groups, and
+        // Filter to the SYM protocol family: global sym, named rooms, and
         // app-scoped rooms (melotune-<id>, melomove-<id>, etc). Anything
         // that looks like generic infra (_services._dns-sd, _tcp, _udp,
         // printer protocols, etc.) is ignored.
@@ -160,22 +160,22 @@ async function discoverGroups() {
       if (seen.size === 0) {
         return resolve({
           text:
-            `No SYM-mesh groups visible on the local network right now.\n\n` +
-            `This only shows groups with at least one node currently online. ` +
-            `Groups you or teammates have used before are not persisted anywhere ` +
+            `No SYM-mesh rooms visible on the local network right now.\n\n` +
+            `This only shows rooms with at least one node currently online. ` +
+            `Rooms you or teammates have used before are not persisted anywhere ` +
             `(p2p architecture — no central directory).\n\n` +
-            `Your node is on: ${SERVICE_TYPE} (group "${GROUP}").`,
+            `Your node is on: ${SERVICE_TYPE} (room "${ROOM}").`,
         });
       }
       const lines = [];
-      lines.push(`SYM-mesh groups visible on LAN (${seen.size}):`);
+      lines.push(`SYM-mesh rooms visible on LAN (${seen.size}):`);
       for (const st of Array.from(seen).sort()) {
         const name = st.replace(/^_/, '').replace(/\._tcp$/, '');
-        const isSelf = st === SERVICE_TYPE ? '  (← your current group)' : '';
-        lines.push(`  ${st}   group="${name}"${isSelf}`);
+        const isSelf = st === SERVICE_TYPE ? '  (← your current room)' : '';
+        lines.push(`  ${st}   room="${name}"${isSelf}`);
       }
       lines.push('');
-      lines.push(`To join one, call sym_join_room with group="<name>".`);
+      lines.push(`To join one, call sym_join_room with room="<name>".`);
       resolve({ text: lines.join('\n') });
     });
   });
@@ -220,10 +220,10 @@ function defaultNodeName() {
 // holder from a recycled PID, so a stale lock could force a -2/-3 suffix and a fresh identity.
 // Removed; identity resolution now goes through resolveIdentity + the engine's robust check.
 // Per-project identity (v0.3.22): a named role agent (CTO, melotune-dev, …) commits
-// its node name + group to `$CLAUDE_PROJECT_DIR/.sym/node.json`, so the plugin alone
+// its node name + room to `$CLAUDE_PROJECT_DIR/.sym/node.json`, so the plugin alone
 // carries a stable per-project identity — no parallel MCP registration, and it
 // survives a plugin reinstall because the config lives in the repo, not the plugin.
-// Env (SYM_NODE_NAME/SYM_GROUP) still wins; this only overrides the auto default.
+// Env (SYM_NODE_NAME/SYM_ROOM) still wins; this only overrides the auto default.
 // Missing/malformed file → {} → auto default; never a hard fail.
 function projectNodeConfig() {
   const fs = require('fs'), path = require('path');
@@ -231,7 +231,7 @@ function projectNodeConfig() {
   try {
     const cfg = JSON.parse(fs.readFileSync(path.join(dir, '.sym', 'node.json'), 'utf8'));
     const clean = (s) => (typeof s === 'string' && s.trim()) ? s.trim() : undefined;
-    return { node_name: clean(cfg.node_name), group: clean(cfg.group) };
+    return { node_name: clean(cfg.node_name), room: clean(cfg.room) };
   } catch { return {}; }
 }
 const PROJECT_CFG = projectNodeConfig();
@@ -240,26 +240,26 @@ const { name: NODE_NAME, autoSuffix: NODE_AUTOSUFFIX } = resolveIdentity({
   defaultName: defaultNodeName(),
 });
 
-// ── Mesh group (MMP §5.8) ──────────────────────────────────
+// ── Mesh room (MMP §5.8) ──────────────────────────────────
 //
 // LAN isolation by Bonjour service type. `_sym._tcp` is the default
-// (backward compatible). A named group `<foo>` maps to service type
+// (backward compatible). A named room `<foo>` maps to service type
 // `_foo._tcp`. Passing a full `_foo._tcp` service type explicitly also
-// works. Nodes in different groups never discover each other at mDNS.
+// works. Nodes in different rooms never discover each other at mDNS.
 // See MeloTune's MoodRoom model for the per-room pattern
 // (`_melotune-{id}._tcp`).
 function resolveServiceType() {
   const explicit = process.env.SYM_SERVICE_TYPE;
   if (explicit) return explicit;
-  const group = process.env.SYM_GROUP || PROJECT_CFG.group;
-  if (group && group !== 'default') return `_${group}._tcp`;
+  const room = process.env.SYM_ROOM || PROJECT_CFG.room;
+  if (room && room !== 'default') return `_${room}._tcp`;
   return '_sym._tcp';
 }
 // Mutable so sym_join_room can hot-swap the node at runtime without a
 // Claude Code restart. Declaring as `let` rather than `const` is the
 // smallest change that makes hot-swap possible.
 let SERVICE_TYPE = resolveServiceType();
-let GROUP = process.env.SYM_GROUP || PROJECT_CFG.group || (SERVICE_TYPE !== '_sym._tcp'
+let ROOM = process.env.SYM_ROOM || PROJECT_CFG.room || (SERVICE_TYPE !== '_sym._tcp'
   ? SERVICE_TYPE.replace(/^_/, '').replace(/\._tcp$/, '')
   : 'default');
 let RELAY_URL = process.env.SYM_RELAY_URL || null;
@@ -272,7 +272,7 @@ let node = new SymNode({
   svafFieldWeights: FIELD_WEIGHTS,
   svafFreshnessSeconds: 7200, // 2hr — session-length context
   discoveryServiceType: SERVICE_TYPE,
-  group: GROUP,
+  room: ROOM,
   relay: RELAY_URL,
   relayToken: RELAY_TOKEN,
   silent: true,
@@ -345,7 +345,7 @@ function explicitSend(n, delivered, fields, sendOpts, okSummary, now) {
     return { text: okSummary(entry, connected) };
   }
   if (delivered.has(deliveryTag(fields, targetPeerId))) {
-    return { text: `Duplicate — identical CMB already delivered${targetPeerId ? '' : ' to the group'}, not re-broadcast.` };
+    return { text: `Duplicate — identical CMB already delivered${targetPeerId ? '' : ' to the room'}, not re-broadcast.` };
   }
   const salted = Object.assign({}, fields, { focus: `${fields.focus} [re-sent ${stamp()}]` });
   const retry = n.remember(salted, sendOpts);
@@ -353,7 +353,7 @@ function explicitSend(n, delivered, fields, sendOpts, okSummary, now) {
     return { text: 'Send failed: the prior copy was undelivered and the disambiguated re-send did not store (persist error). Nothing broadcast.', isError: true };
   }
   if (connected) delivered.add(deliveryTag(salted, targetPeerId));
-  return { text: `Re-sent CMB ${retry.key}${targetPeerId ? '' : ' to the group'} — a prior identical copy was in the local store but had never been delivered; content-addressed dedup would otherwise have silently suppressed this send.` };
+  return { text: `Re-sent CMB ${retry.key}${targetPeerId ? '' : ' to the room'} — a prior identical copy was in the local store but had never been delivered; content-addressed dedup would otherwise have silently suppressed this send.` };
 }
 
 // Event handlers are extracted into a single registration function so the
@@ -451,7 +451,7 @@ const BASE_INSTRUCTIONS =
   `You are a peer node on the SYM mesh (identity: ${NODE_NAME}). ` +
   'The mesh is publish-subscribe: peers deliver CMBs to you in real-time the instant they publish, as <channel> notifications. That real-time push can be gated by Claude Code policy, so call sym_receive to surface any deliveries the push did not bring into your context (directed sym_send + admitted broadcasts) — a live delivery feed, not a memory query. Call sym_receive at the start of your turn and periodically while coordinating with peers, so no delivery is missed. ' +
   'When you receive a CMB from another node, respond via sym_send targeted at that node by name if the reply is for that specific peer (MMP §4.4.4 targeted CMB). ' +
-  'Publish a CMB to your whole group via sym_publish — a projection of your own state (MMP §9.2 receiver-autonomous SVAF evaluation). ' +
+  'Publish a CMB to your whole room via sym_publish — a projection of your own state (MMP §9.2 receiver-autonomous SVAF evaluation). ' +
   'Both sym_send and sym_publish emit a CAT7 CMB (your projection); each receiver runs SVAF and, if it admits the CMB as an observation, remix-stores it with lineage back to yours. ' +
   'Search mesh memory via sym_recall. ' +
   'sym_receive and <channel> notifications give compact headers with [mNNN] IDs — use sym_fetch to read the full content when relevant to your current task.';
@@ -496,7 +496,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         'Send a structured CAT7 CMB to a specific mesh peer (targeted) or to all peers (broadcast, when "to" is omitted). ' +
         'Receivers evaluate the CMB per-field via SVAF (MMP §9.2) and, if admitted, remix-store it with lineage pointing back to this CMB. ' +
         'Use sym_send when the CMB is for a specific peer (e.g. a peer-review gating request directed at the reviewer role); ' +
-        'use sym_publish when publishing your own state to the whole group.',
+        'use sym_publish when publishing your own state to the whole room.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -535,7 +535,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: 'sym_publish',
       description:
-        'Publish a structured CAT7 CMB — a projection of your own state — to all peers in your group. ' +
+        'Publish a structured CAT7 CMB — a projection of your own state — to all peers in your room. ' +
         'Each receiver runs SVAF (MMP §9.2) and, if it admits the CMB as an observation, remix-stores it with lineage. ' +
         'Equivalent to sym_send with "to" omitted — kept as a separate tool because publishing your own state is the common case and does not need peer selection.',
       inputSchema: {
@@ -595,7 +595,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'sym_receive',
-      description: 'Surface the CMBs the mesh has delivered to you in real-time — directed sym_send addressed to you, plus admitted broadcasts published to your group. The mesh is publish-subscribe: peers deliver the instant they publish, pushed as <channel> notifications. Because that push can be gated by Claude Code policy, sym_receive surfaces any deliveries it missed so none is lost — a live delivery feed, NOT a store query (use sym_recall to search stored memory). Call it at the start of a turn and periodically while coordinating so no delivery is missed. Returns compact headers with [mNNN] IDs (newest last); use sym_fetch for full content, reply via sym_send.',
+      description: 'Surface the CMBs the mesh has delivered to you in real-time — directed sym_send addressed to you, plus admitted broadcasts published to your room. The mesh is publish-subscribe: peers deliver the instant they publish, pushed as <channel> notifications. Because that push can be gated by Claude Code policy, sym_receive surfaces any deliveries it missed so none is lost — a live delivery feed, NOT a store query (use sym_recall to search stored memory). Call it at the start of a turn and periodically while coordinating so no delivery is missed. Returns compact headers with [mNNN] IDs (newest last); use sym_fetch for full content, reply via sym_send.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -606,47 +606,47 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'sym_room_info',
-      description: 'Report the mesh group this node is in (MMP §5.8). Shows service type + group name + peer count.',
+      description: 'Report the mesh room this node is in (MMP §5.8). Shows service type + room name + peer count.',
       inputSchema: { type: 'object', properties: {} },
     },
     {
       name: 'sym_invite_create',
-      description: 'Generate a shareable invite URL for a named mesh group. Team leads use this to let teammates join their dev-team mesh. LAN-only invite: pass group only, returns sym://group/{name}. Cross-network invite: pass relay_url + relay_token too, returns sym://team/{name}?relay=...&token=... — teammates on different networks join through the relay.',
+      description: 'Generate a shareable invite URL for a named mesh room. Team leads use this to let teammates join their dev-team mesh. LAN-only invite: pass room only, returns sym://room/{name}. Cross-network invite: pass relay_url + relay_token too, returns sym://team/{name}?relay=...&token=... — teammates on different networks join through the relay.',
       inputSchema: {
         type: 'object',
         properties: {
-          group: { type: 'string', description: 'Kebab-case group name, e.g. "backend-team".' },
+          room: { type: 'string', description: 'Kebab-case room name, e.g. "backend-team".' },
           relay_url: { type: 'string', description: 'Optional WebSocket relay URL, e.g. wss://sym-relay.onrender.com. Include for cross-network teams.' },
           relay_token: { type: 'string', description: 'Optional relay authentication token (shared secret for this team channel).' },
         },
-        required: ['group'],
+        required: ['room'],
       },
     },
     {
       name: 'sym_invite_info',
-      description: 'Parse a mesh invite URL and return everything the invitee needs to join: group name, service type, and any relay credentials. Read-only; does NOT switch the current node (use sym_join_room for that). Works on LAN group invites (sym://group/{name}), cross-network team invites (sym://team/{name}?relay=&token=), and app-specific room invites (e.g. melotune://room/{id}/{name}).',
+      description: 'Parse a mesh invite URL and return everything the invitee needs to join: room name, service type, and any relay credentials. Read-only; does NOT switch the current node (use sym_join_room for that). Works on LAN room invites (sym://room/{name}), cross-network team invites (sym://team/{name}?relay=&token=), and app-specific room invites (e.g. melotune://room/{id}/{name}).',
       inputSchema: {
         type: 'object',
-        properties: { url: { type: 'string', description: 'Invite URL, e.g. sym://group/backend-team' } },
+        properties: { url: { type: 'string', description: 'Invite URL, e.g. sym://room/backend-team' } },
         required: ['url'],
       },
     },
     {
       name: 'sym_join_room',
-      description: 'Hot-swap this node into a different mesh group at runtime — no Claude Code restart needed. Stops the current SymNode, reconstructs it with the new group (and optional relay credentials), and restarts it. Teammates on the same group/relay will discover this node via Bonjour (LAN) or the relay (cross-network). To leave a group, pass group="default" which reverts to the global _sym._tcp mesh.',
+      description: 'Hot-swap this node into a different mesh room at runtime — no Claude Code restart needed. Stops the current SymNode, reconstructs it with the new room (and optional relay credentials), and restarts it. Teammates on the same room/relay will discover this node via Bonjour (LAN) or the relay (cross-network). To leave a room, pass room="default" which reverts to the global _sym._tcp mesh.',
       inputSchema: {
         type: 'object',
         properties: {
-          group: { type: 'string', description: 'Kebab-case group name, e.g. "backend-team". Pass "default" to return to the global mesh.' },
+          room: { type: 'string', description: 'Kebab-case room name, e.g. "backend-team". Pass "default" to return to the global mesh.' },
           relay_url: { type: 'string', description: 'Optional WebSocket relay URL for cross-network teams. Leave empty for LAN-only.' },
           relay_token: { type: 'string', description: 'Optional relay authentication token.' },
         },
-        required: ['group'],
+        required: ['room'],
       },
     },
     {
       name: 'sym_rooms_discover',
-      description: 'List SYM-mesh groups currently advertising on the local network. Uses Bonjour / mDNS to find service types matching the SYM protocol. Only shows groups with at least one node online right now — there is no central directory of offline-but-known groups. macOS and Windows have Bonjour built in; Linux requires avahi-daemon.',
+      description: 'List SYM-mesh rooms currently advertising on the local network. Uses Bonjour / mDNS to find service types matching the SYM protocol. Only shows rooms with at least one node online right now — there is no central directory of offline-but-known rooms. macOS and Windows have Bonjour built in; Linux requires avahi-daemon.',
       inputSchema: { type: 'object', properties: {} },
     },
   ],
@@ -856,7 +856,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
         content: [{
           type: 'text',
           text: `Node: ${NODE_NAME} (${node.nodeId?.slice(0, 8) || '?'})\n` +
-            `Group: ${GROUP} (${SERVICE_TYPE})\n` +
+            `Room: ${ROOM} (${SERVICE_TYPE})\n` +
             `Relay: ${s.relayConnected ? 'connected' : 'disconnected'}\n` +
             `Peers: ${s.peerCount || 0}\n` +
             `Memories: ${s.memoryCount || 0}`,
@@ -868,45 +868,45 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
       const s = node.status();
       // Read the connected-peer list from status() — `node.getPeers` is not a
       // public method, so the old call always fell through to `[]` and printed
-      // "(no peers in this group)" even when peers were connected, while the
+      // "(no peers in this room)" even when peers were connected, while the
       // count below (s.peerCount) showed the real number. That count/list
       // disagreement looked like a membership-handshake failure but was purely
       // this rendering bug. `status().peers` is the same source as peerCount.
       const peers = Array.isArray(s.peers) ? s.peers : [];
       const peerLines = peers.length
         ? peers.map(p => `  ${p.name} (${(p.peerId || '').slice(0, 8)}) via ${p.source || '?'}`).join('\n')
-        : '  (no peers in this group)';
+        : '  (no peers in this room)';
       return {
         content: [{
           type: 'text',
-          text: `Mesh group (MMP §5.8):\n` +
-            `  group: ${GROUP}\n` +
+          text: `Mesh room (MMP §5.8):\n` +
+            `  room: ${ROOM}\n` +
             `  service type: ${SERVICE_TYPE}\n` +
             `  node: ${NODE_NAME} (${node.nodeId?.slice(0, 8) || '?'})\n` +
-            `  peers in group: ${s.peerCount || 0}\n` +
+            `  peers in room: ${s.peerCount || 0}\n` +
             peerLines + `\n\n` +
-            `To join a different group, restart the sym-mesh-channel MCP server with env var SYM_GROUP=<name> or SYM_SERVICE_TYPE=<_foo._tcp>.`,
+            `To join a different room, restart the sym-mesh-channel MCP server with env var SYM_ROOM=<name> or SYM_SERVICE_TYPE=<_foo._tcp>.`,
         }],
       };
     }
 
     case 'sym_invite_create': {
-      const group = args?.group;
+      const room = args?.room;
       const relayUrl = args?.relay_url;
       const relayToken = args?.relay_token;
-      if (!group || typeof group !== 'string') {
-        return { content: [{ type: 'text', text: 'Missing required argument: group' }], isError: true };
+      if (!room || typeof room !== 'string') {
+        return { content: [{ type: 'text', text: 'Missing required argument: room' }], isError: true };
       }
-      if (!KEBAB_CASE_RE.test(group)) {
+      if (!KEBAB_CASE_RE.test(room)) {
         return {
           content: [{
             type: 'text',
-            text: `Invalid group name: "${group}". Must be kebab-case (lowercase alphanumerics + single hyphens), e.g. "backend-team".`,
+            text: `Invalid room name: "${room}". Must be kebab-case (lowercase alphanumerics + single hyphens), e.g. "backend-team".`,
           }],
           isError: true,
         };
       }
-      // LAN-only flavor: sym://group/{name}
+      // LAN-only flavor: sym://room/{name}
       // Cross-network flavor: sym://team/{name}?relay=...&token=...
       let url;
       let flavor;
@@ -914,15 +914,15 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!relayUrl) return { content: [{ type: 'text', text: 'relay_token requires relay_url' }], isError: true };
         const params = [`relay=${encodeURIComponent(relayUrl)}`];
         if (relayToken) params.push(`token=${encodeURIComponent(relayToken)}`);
-        url = `sym://team/${group}?${params.join('&')}`;
+        url = `sym://team/${room}?${params.join('&')}`;
         flavor = 'cross-network (relay)';
       } else {
-        url = `sym://group/${group}`;
+        url = `sym://room/${room}`;
         flavor = 'LAN-only (Bonjour)';
       }
-      const youRunning = GROUP === group
-        ? `You're already on this group — teammates who join will see you.`
-        : `You are currently on group "${GROUP}". To be reachable, call sym_join_room with group="${group}" (+ same relay creds if cross-network) before sharing.`;
+      const youRunning = ROOM === room
+        ? `You're already on this room — teammates who join will see you.`
+        : `You are currently on room "${ROOM}". To be reachable, call sym_join_room with room="${room}" (+ same relay creds if cross-network) before sharing.`;
       return {
         content: [{
           type: 'text',
@@ -942,11 +942,11 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (parsed.error) {
         return { content: [{ type: 'text', text: parsed.error }], isError: true };
       }
-      const { appScheme, group, serviceType, roomId, roomName, relayUrl, relayToken } = parsed;
+      const { appScheme, room, serviceType, roomId, roomName, relayUrl, relayToken } = parsed;
 
       const out = {
         app: appScheme,
-        group,
+        room,
         service_type: serviceType,
         room_id: appScheme === 'sym' ? undefined : roomId,
         room_name: appScheme === 'sym' ? undefined : roomName,
@@ -956,7 +956,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
       for (const k of Object.keys(out)) if (out[k] === undefined) delete out[k];
 
       const joinCall = {
-        group,
+        room,
         ...(relayUrl && { relay_url: relayUrl }),
         ...(relayToken && { relay_token: relayToken }),
       };
@@ -967,27 +967,27 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
           text: `Parsed invite: ${url}\n\n` +
             JSON.stringify(out, null, 2) + `\n\n` +
             `To join, call sym_join_room:\n\n    ${JSON.stringify(joinCall)}\n\n` +
-            `This hot-swaps your node into the ${relayUrl ? 'relay channel' : 'LAN group'} — no Claude Code restart needed.`,
+            `This hot-swaps your node into the ${relayUrl ? 'relay channel' : 'LAN room'} — no Claude Code restart needed.`,
         }],
       };
     }
 
     case 'sym_join_room': {
-      const group = args?.group;
+      const room = args?.room;
       const relayUrl = args?.relay_url || null;
       const relayToken = args?.relay_token || null;
-      if (!group || typeof group !== 'string') {
-        return { content: [{ type: 'text', text: 'Missing required argument: group' }], isError: true };
+      if (!room || typeof room !== 'string') {
+        return { content: [{ type: 'text', text: 'Missing required argument: room' }], isError: true };
       }
-      if (!KEBAB_CASE_RE.test(group) && group !== 'default') {
+      if (!KEBAB_CASE_RE.test(room) && room !== 'default') {
         return {
-          content: [{ type: 'text', text: `Invalid group name: "${group}". Must be kebab-case or "default".` }],
+          content: [{ type: 'text', text: `Invalid room name: "${room}". Must be kebab-case or "default".` }],
           isError: true,
         };
       }
 
-      const newServiceType = group === 'default' ? '_sym._tcp' : `_${group}._tcp`;
-      const prevGroup = GROUP;
+      const newServiceType = room === 'default' ? '_sym._tcp' : `_${room}._tcp`;
+      const prevRoom = ROOM;
       const prevServiceType = SERVICE_TYPE;
 
       // Stop the current node cleanly so peers see us leave, then construct
@@ -1005,12 +1005,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       const newNode = new SymNode({
         name: NODE_NAME,
-        autoSuffix: NODE_AUTOSUFFIX,   // same stable identity across a group hot-swap
+        autoSuffix: NODE_AUTOSUFFIX,   // same stable identity across a room hot-swap
         cognitiveProfile: 'Engineering node. Code, architecture, debugging, technical decisions.',
         svafFieldWeights: FIELD_WEIGHTS,
         svafFreshnessSeconds: 7200,
         discoveryServiceType: newServiceType,
-        group,
+        room,
         relay: relayUrl,
         relayToken,
         silent: true,
@@ -1023,8 +1023,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
         return {
           content: [{
             type: 'text',
-            text: `Failed to start new node on group "${group}": ${e?.message || e}\n\n` +
-              `Previous node already stopped. To recover, call sym_join_room with group="${prevGroup}".`,
+            text: `Failed to start new node on room "${room}": ${e?.message || e}\n\n` +
+              `Previous node already stopped. To recover, call sym_join_room with room="${prevRoom}".`,
           }],
           isError: true,
         };
@@ -1033,20 +1033,20 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
       // Swap module-level references only after successful start.
       node = newNode;
       // A reconnect voids prior delivery credits: peers must re-establish, and a CMB
-      // delivered to the old group's peers may never reach the new group — so a
+      // delivered to the old room's peers may never reach the new room — so a
       // dedup after the swap must be re-issued, not suppressed (E8 variant c).
       deliveredCmbKeys = new Set();
-      GROUP = group;
+      ROOM = room;
       SERVICE_TYPE = newServiceType;
       RELAY_URL = relayUrl;
       RELAY_TOKEN = relayToken;
 
-      publishRoomBeacon();   // re-advertise the new group on _symrooms._tcp
+      publishRoomBeacon();   // re-advertise the new room on _symrooms._tcp
 
       return {
         content: [{
           type: 'text',
-          text: `Hot-swapped from group "${prevGroup}" (${prevServiceType}) to "${group}" (${newServiceType}).\n` +
+          text: `Hot-swapped from room "${prevRoom}" (${prevServiceType}) to "${room}" (${newServiceType}).\n` +
             (relayUrl ? `Relay: ${relayUrl}\n` : '') +
             `Discovering peers on the new service type. Call sym_peers in a moment to see who's online.`,
         }],
@@ -1054,7 +1054,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     case 'sym_rooms_discover': {
-      const result = await discoverGroups();
+      const result = await discoverRooms();
       return {
         content: [{
           type: 'text',
@@ -1269,7 +1269,7 @@ let shuttingDown = false;
 async function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
-  stopGroupBeacon();
+  stopRoomBeacon();
   try {
     await node.stop();
   } catch {
@@ -1282,12 +1282,12 @@ process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT',  () => shutdown('SIGINT'));
 process.on('SIGHUP',  () => shutdown('SIGHUP'));
 
-// ── Group discovery beacon (MMP §5.8) ──────────────────────────
-// Mirror the sym CLI daemon: advertise this node's group on the shared
-// `_symrooms._tcp` service (group name in TXT) via the pure-JS bonjour-service,
-// so `sym groups` lists this Claude/MCP node cross-platform alongside
-// CLI-daemon nodes. Discovery-only — comms stay on the group's own
-// `_<group>._tcp`. Re-published on group hot-swap; torn down on shutdown.
+// ── Room discovery beacon (MMP §5.8) ──────────────────────────
+// Mirror the sym CLI daemon: advertise this node's room on the shared
+// `_symrooms._tcp` service (room name in TXT) via the pure-JS bonjour-service,
+// so `sym rooms` lists this Claude/MCP node cross-platform alongside
+// CLI-daemon nodes. Discovery-only — comms stay on the room's own
+// `_<room>._tcp`. Re-published on room hot-swap; torn down on shutdown.
 let roomBeacon = null;
 function publishRoomBeacon() {
   try {
@@ -1295,12 +1295,12 @@ function publishRoomBeacon() {
 
     if (roomBeacon) { try { roomBeacon.unpublishAll(); roomBeacon.destroy(); } catch {} roomBeacon = null; }
     roomBeacon = new Bonjour();
-    roomBeacon.publish({ name: NODE_NAME, type: "symrooms", port: (node && node._port) || 7777, txt: { group: GROUP, node: NODE_NAME } });
+    roomBeacon.publish({ name: NODE_NAME, type: "symrooms", port: (node && node._port) || 7777, txt: { room: ROOM, node: NODE_NAME } });
   } catch (e) {
-    process.stderr.write(`group beacon unavailable: ${e?.message || e}\n`);
+    process.stderr.write(`room beacon unavailable: ${e?.message || e}\n`);
   }
 }
-function stopGroupBeacon() {
+function stopRoomBeacon() {
   if (!roomBeacon) return;
   try { roomBeacon.unpublishAll(() => { try { roomBeacon.destroy(); } catch {} }); } catch {}
   roomBeacon = null;
