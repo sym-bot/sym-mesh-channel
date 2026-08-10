@@ -57,7 +57,7 @@ const { resolveIdentity } = require('./identity.js');
 const KEBAB_CASE_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 // ── Invite URL parsing (shared by sym_invite_info and the internal
-//    validation path for sym_join_group when passed a URL). Exposed as
+//    validation path for sym_join_room when passed a URL). Exposed as
 //    a module-level function so it's trivially unit-testable and the
 //    same regex doesn't drift between two call sites.
 
@@ -175,7 +175,7 @@ async function discoverGroups() {
         lines.push(`  ${st}   group="${name}"${isSelf}`);
       }
       lines.push('');
-      lines.push(`To join one, call sym_join_group with group="<name>".`);
+      lines.push(`To join one, call sym_join_room with group="<name>".`);
       resolve({ text: lines.join('\n') });
     });
   });
@@ -255,7 +255,7 @@ function resolveServiceType() {
   if (group && group !== 'default') return `_${group}._tcp`;
   return '_sym._tcp';
 }
-// Mutable so sym_join_group can hot-swap the node at runtime without a
+// Mutable so sym_join_room can hot-swap the node at runtime without a
 // Claude Code restart. Declaring as `let` rather than `const` is the
 // smallest change that makes hot-swap possible.
 let SERVICE_TYPE = resolveServiceType();
@@ -310,7 +310,7 @@ function vetCmbArgs(args, extraKeys) {
   return null;
 }
 
-let deliveredCmbKeys = new Set();   // reset on hot-swap (sym_join_group)
+let deliveredCmbKeys = new Set();   // reset on hot-swap (sym_join_room)
 
 function cmbContentKey(fields) {
   return crypto.createHash('sha256').update(JSON.stringify(fields)).digest('hex').slice(0, 32);
@@ -357,7 +357,7 @@ function explicitSend(n, delivered, fields, sendOpts, okSummary, now) {
 }
 
 // Event handlers are extracted into a single registration function so the
-// hot-swap path in sym_join_group can re-register them on the new node.
+// hot-swap path in sym_join_room can re-register them on the new node.
 // The function reads module-level `NODE_NAME`, `isPeerAllowed`, `pushChannel`,
 // `storeMessage`, and `extractCompactHeader` via closure; those don't change
 // across swaps.
@@ -379,7 +379,7 @@ function registerNodeHandlers(n) {
     if (entry.source === NODE_NAME || entry.cmb?.createdBy === NODE_NAME) return;
     const source = entry.source || entry.cmb?.createdBy || 'unknown';
     if (!isPeerAllowed(source)) return;
-    const fields = entry.cmb?.fields || {};
+    const fields = entry.cmb?.categories || {};
     const payload = entry.cmb?.payload;
     const sec = checkSecurity(source, fields, payload);
     if (!sec.safe) { securityAudit(sec.reason, source, sec.excerpt); return; }
@@ -605,7 +605,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
-      name: 'sym_group_info',
+      name: 'sym_room_info',
       description: 'Report the mesh group this node is in (MMP §5.8). Shows service type + group name + peer count.',
       inputSchema: { type: 'object', properties: {} },
     },
@@ -624,7 +624,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'sym_invite_info',
-      description: 'Parse a mesh invite URL and return everything the invitee needs to join: group name, service type, and any relay credentials. Read-only; does NOT switch the current node (use sym_join_group for that). Works on LAN group invites (sym://group/{name}), cross-network team invites (sym://team/{name}?relay=&token=), and app-specific room invites (e.g. melotune://room/{id}/{name}).',
+      description: 'Parse a mesh invite URL and return everything the invitee needs to join: group name, service type, and any relay credentials. Read-only; does NOT switch the current node (use sym_join_room for that). Works on LAN group invites (sym://group/{name}), cross-network team invites (sym://team/{name}?relay=&token=), and app-specific room invites (e.g. melotune://room/{id}/{name}).',
       inputSchema: {
         type: 'object',
         properties: { url: { type: 'string', description: 'Invite URL, e.g. sym://group/backend-team' } },
@@ -632,7 +632,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
-      name: 'sym_join_group',
+      name: 'sym_join_room',
       description: 'Hot-swap this node into a different mesh group at runtime — no Claude Code restart needed. Stops the current SymNode, reconstructs it with the new group (and optional relay credentials), and restarts it. Teammates on the same group/relay will discover this node via Bonjour (LAN) or the relay (cross-network). To leave a group, pass group="default" which reverts to the global _sym._tcp mesh.',
       inputSchema: {
         type: 'object',
@@ -645,7 +645,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
-      name: 'sym_groups_discover',
+      name: 'sym_rooms_discover',
       description: 'List SYM-mesh groups currently advertising on the local network. Uses Bonjour / mDNS to find service types matching the SYM protocol. Only shows groups with at least one node online right now — there is no central directory of offline-but-known groups. macOS and Windows have Bonjour built in; Linux requires avahi-daemon.',
       inputSchema: { type: 'object', properties: {} },
     },
@@ -748,7 +748,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
         return { content: [{ type: 'text', text: 'No memories found.' }] };
       }
       const lines = results.slice(0, 10).map(r => {
-        const focus = r.cmb?.fields?.focus?.text || r.content || '';
+        const focus = r.cmb?.categories?.focus?.text || r.content || '';
         const source = r.source || r.cmb?.createdBy || 'unknown';
         const time = r.timestamp ? new Date(r.timestamp).toLocaleString() : '';
         const cut = focus.length > 150 ? '\u2026 [truncated \u2014 sym_fetch for full]' : '';
@@ -825,11 +825,11 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
         // The security layer still gates the pull path: peer allowlist +
         // prompt-injection filter run on every message before it enters context.
         if (!isPeerAllowed(m.from)) return null;
-        // payload lives at m.payload (sibling of fields), not m.fields.payload.
-        const sec = checkSecurity(m.from, m.fields || {}, m.payload);
+        // payload lives at m.payload (sibling of fields), not m.categories.payload.
+        const sec = checkSecurity(m.from, m.categories || {}, m.payload);
         if (!sec.safe) { securityAudit(sec.reason, m.from, sec.excerpt); return null; }
         const age = Math.round((now - m.receivedAt) / 1000);
-        const focus = m.fields?.focus?.text || m.content || '';
+        const focus = m.categories?.focus?.text || m.content || '';
         const dirTag = m.directed ? ' →you' : '';
         const memTag = m.directed && m.remixed === false ? ' ·not-stored' : '';
         // Flag structured data so the agent knows to sym_fetch the full body.
@@ -864,7 +864,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
       };
     }
 
-    case 'sym_group_info': {
+    case 'sym_room_info': {
       const s = node.status();
       // Read the connected-peer list from status() — `node.getPeers` is not a
       // public method, so the old call always fell through to `[]` and printed
@@ -922,12 +922,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
       const youRunning = GROUP === group
         ? `You're already on this group — teammates who join will see you.`
-        : `You are currently on group "${GROUP}". To be reachable, call sym_join_group with group="${group}" (+ same relay creds if cross-network) before sharing.`;
+        : `You are currently on group "${GROUP}". To be reachable, call sym_join_room with group="${group}" (+ same relay creds if cross-network) before sharing.`;
       return {
         content: [{
           type: 'text',
           text: `Invite URL (${flavor}):\n\n    ${url}\n\n` +
-            `Share this URL with teammates. Each pastes it into Claude Code and calls sym_join_group (or sym_invite_info for a dry run first).\n\n` +
+            `Share this URL with teammates. Each pastes it into Claude Code and calls sym_join_room (or sym_invite_info for a dry run first).\n\n` +
             youRunning,
         }],
       };
@@ -966,13 +966,13 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
           type: 'text',
           text: `Parsed invite: ${url}\n\n` +
             JSON.stringify(out, null, 2) + `\n\n` +
-            `To join, call sym_join_group:\n\n    ${JSON.stringify(joinCall)}\n\n` +
+            `To join, call sym_join_room:\n\n    ${JSON.stringify(joinCall)}\n\n` +
             `This hot-swaps your node into the ${relayUrl ? 'relay channel' : 'LAN group'} — no Claude Code restart needed.`,
         }],
       };
     }
 
-    case 'sym_join_group': {
+    case 'sym_join_room': {
       const group = args?.group;
       const relayUrl = args?.relay_url || null;
       const relayToken = args?.relay_token || null;
@@ -1024,7 +1024,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [{
             type: 'text',
             text: `Failed to start new node on group "${group}": ${e?.message || e}\n\n` +
-              `Previous node already stopped. To recover, call sym_join_group with group="${prevGroup}".`,
+              `Previous node already stopped. To recover, call sym_join_room with group="${prevGroup}".`,
           }],
           isError: true,
         };
@@ -1041,7 +1041,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
       RELAY_URL = relayUrl;
       RELAY_TOKEN = relayToken;
 
-      publishGroupBeacon();   // re-advertise the new group on _symgroups._tcp
+      publishRoomBeacon();   // re-advertise the new group on _symrooms._tcp
 
       return {
         content: [{
@@ -1053,7 +1053,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
       };
     }
 
-    case 'sym_groups_discover': {
+    case 'sym_rooms_discover': {
       const result = await discoverGroups();
       return {
         content: [{
@@ -1245,7 +1245,7 @@ function pushChannel(eventType, data) {
 }
 
 // All node.on(...) handlers live in registerNodeHandlers(n) above so the
-// hot-swap path in sym_join_group can attach them to a freshly-constructed
+// hot-swap path in sym_join_room can attach them to a freshly-constructed
 // SymNode without duplicating logic. This call wires up the initial node.
 registerNodeHandlers(node);
 
@@ -1284,26 +1284,26 @@ process.on('SIGHUP',  () => shutdown('SIGHUP'));
 
 // ── Group discovery beacon (MMP §5.8) ──────────────────────────
 // Mirror the sym CLI daemon: advertise this node's group on the shared
-// `_symgroups._tcp` service (group name in TXT) via the pure-JS bonjour-service,
+// `_symrooms._tcp` service (group name in TXT) via the pure-JS bonjour-service,
 // so `sym groups` lists this Claude/MCP node cross-platform alongside
 // CLI-daemon nodes. Discovery-only — comms stay on the group's own
 // `_<group>._tcp`. Re-published on group hot-swap; torn down on shutdown.
-let groupBeacon = null;
-function publishGroupBeacon() {
+let roomBeacon = null;
+function publishRoomBeacon() {
   try {
     const { Bonjour } = require('bonjour-service');
 
-    if (groupBeacon) { try { groupBeacon.unpublishAll(); groupBeacon.destroy(); } catch {} groupBeacon = null; }
-    groupBeacon = new Bonjour();
-    groupBeacon.publish({ name: NODE_NAME, type: 'symgroups', port: (node && node._port) || 7777, txt: { group: GROUP, node: NODE_NAME } });
+    if (roomBeacon) { try { roomBeacon.unpublishAll(); roomBeacon.destroy(); } catch {} roomBeacon = null; }
+    roomBeacon = new Bonjour();
+    roomBeacon.publish({ name: NODE_NAME, type: "symrooms", port: (node && node._port) || 7777, txt: { group: GROUP, node: NODE_NAME } });
   } catch (e) {
     process.stderr.write(`group beacon unavailable: ${e?.message || e}\n`);
   }
 }
 function stopGroupBeacon() {
-  if (!groupBeacon) return;
-  try { groupBeacon.unpublishAll(() => { try { groupBeacon.destroy(); } catch {} }); } catch {}
-  groupBeacon = null;
+  if (!roomBeacon) return;
+  try { roomBeacon.unpublishAll(() => { try { roomBeacon.destroy(); } catch {} }); } catch {}
+  roomBeacon = null;
 }
 
 async function main() {
@@ -1312,7 +1312,7 @@ async function main() {
   // already embedded in the MCP server's initialize-response payload.
   await node.start();
 
-  publishGroupBeacon();
+  publishRoomBeacon();
 
   // Start MCP server — communicates with Claude Code via stdio
   const transport = new StdioServerTransport();

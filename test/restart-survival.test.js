@@ -36,7 +36,7 @@ test('a restarted plugin session drains what the mesh delivered to its node', as
   before._pushInbox({
     source: 'claude-sym-cto@test',
     content: 'gate request — merged, releasing',
-    cmb: { fields: { focus: { text: 'gate request — merged, releasing' } }, metadata: { key: 'cmb-restart-1' } },
+    cmb: { categories: { focus: { text: 'gate request — merged, releasing' } }, metadata: { key: 'cmb-restart-1' } },
   });
   await settle();
 
