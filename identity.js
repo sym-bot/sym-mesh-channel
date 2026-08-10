@@ -10,10 +10,22 @@
 // starting a fresh identity in place of the intended one. This module does no pid/lock inspection;
 // that decision is delegated to the engine.
 //
-//   - PINNED (SYM_NODE_NAME or .sym/node.json): used verbatim, autoSuffix OFF — the engine reclaims a
-//     dead holder's stale lock and only hard-fails (EIDENTITYLOCK) on a genuinely live holder.
-//   - UNPINNED session: the caller's default name with autoSuffix ON, so a real collision is resolved
-//     by the engine's start-time-verified resolver.
+// FOUNDER RULING 2026-08-10: NEVER -2, NEVER -3. autoSuffix is OFF for every
+// identity, pinned or not. A suffix looks like a courtesy and is a data event:
+// `foo-2` is a DIFFERENT store with a DIFFERENT signing key, so the seat keeps
+// its name in conversation while silently becoming a new cryptographic identity
+// with none of its own memory. We found three such stores on one machine
+// (codex-mac, -2, -3), each with its own keypair, minted by collisions nobody
+// was told about.
+//
+// A collision is now always a hard failure. The engine still reclaims a DEAD
+// holder's stale lock — that path is start-time-verified and is not a suffix —
+// so this only bites when a genuinely live process holds the name, which is a
+// real conflict that deserves an error rather than a second identity.
+//
+//   - PINNED (SYM_NODE_NAME or .sym/node.json): used verbatim.
+//   - UNPINNED session: the caller's default name.
+//   Both: autoSuffix OFF. EIDENTITYLOCK on a live holder.
 
 /**
  * @param {{ pinnedName?: string|null, defaultName: string }} opts
@@ -22,7 +34,7 @@
 function resolveIdentity({ pinnedName, defaultName } = {}) {
   const pinned = (typeof pinnedName === 'string' && pinnedName.trim()) ? pinnedName.trim() : null;
   if (pinned) return { name: pinned, autoSuffix: false, pinned: true };
-  return { name: defaultName, autoSuffix: true, pinned: false };
+  return { name: defaultName, autoSuffix: false, pinned: false };
 }
 
 module.exports = { resolveIdentity };

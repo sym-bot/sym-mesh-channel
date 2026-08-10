@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.6.5 (2026-08-10)
+
+**Restarting the same node is now just a restart.**
+
+### Fixed — a stdio server that outlives its host
+
+Signals were handled; **stdin closing was not**. Not every host signals its children on the way
+out — Codex quits without one, which left a `codex-mac` connector running with **PPID 1 for twenty
+minutes past its parent**, still holding the pinned identity. The next launch hit `EIDENTITYLOCK`
+and, correctly with `required = true`, died reporting a conflict with a process that could no
+longer serve anyone.
+
+**A stdio server whose stdin has closed is already dead** — the only channel a client could speak
+on is gone. It now exits on stdin `end`/`close`/`error`, leaving the mesh cleanly and releasing the
+identity lock.
+
+### Changed — NEVER `-2`, NEVER `-3` (founder ruling)
+
+`autoSuffix` is now **off for every identity**, pinned or not. It was previously on for unpinned
+sessions.
+
+A suffix looks like a courtesy and is a **data event**: `foo-2` is a different store with a
+**different signing key**, so a seat keeps its name in conversation while silently becoming a new
+cryptographic identity with none of its own memory. Three such stores existed on one machine —
+`codex-mac`, `-2`, `-3` — each with its own keypair, minted by collisions nobody was told about.
+
+A collision is now always a hard failure. The engine still reclaims a **dead** holder's stale lock;
+that path is start-time-verified and is not a suffix. With the stdin fix above, the orphan that
+caused collisions in the first place no longer survives.
+
+Two tests that asserted `autoSuffix: true` were **inverted rather than deleted** — a test that
+encoded the wrong design names the mistake where someone would repeat it — plus a new one proving
+no input shape can produce a suffix.
+
 ## 0.6.4 (2026-08-10)
 
 **0.6.3 put the room diagnostics on stderr. Some MCP hosts never show that.** Measured on Codex
