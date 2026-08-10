@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.7.0 (2026-08-10)
+
+**A directed send to a peer that is not connected is now HELD, not refused.**
+
+### The seam this closes
+
+`sym_send` resolved the target against `node.peers()` and, when absent, **returned the refusal
+before anything was sent**. No envelope left this package — so a correct, well-tested delivery
+spool in `sym-daemon` sat downstream of a message that was never sent. The refusal lived in the
+seam between two suites: mesh-channel's tests cannot see the daemon, the daemon's cannot see
+mesh-channel. Two people reasoned about that boundary instead of crossing it, and a
+`sym_send`-first acceptance test in the `sym` repo is what finally showed it.
+
+**Why the queue is here rather than in the daemon** — measured, not assumed. mesh-channel has
+**zero** references to `register-agent`, `daemon.sock` or `agent-cmb`, and the daemon log carries
+**zero** hosted-agent registrations for any seat (109 for the ops agents). Seats are standalone
+`SymNode`s, so a daemon-side spool cannot serve them until they register at all. Holding at the
+sender needs no registration.
+
+### Added — `outbox.js`
+
+- **Durable, atomic**, at `~/.sym/nodes/<node>/outbox.json`. FIFO, survives restart.
+- **Flushes automatically** when the peer appears (`peer-joined`), dropping items **only after the
+  send returns** — never on dispatch, because a socket write is not delivery.
+- **Known peers only.** A name is holdable only if this node has actually *seen* it, recorded in
+  `known-peers.json`. `identity.json exists on disk` was rejected as the test: it is true for
+  **961 of 962** node directories here, so it admits essentially everything. An unrecognised name
+  stays a typed refusal — **a typo cannot create a queue.**
+- **A full outbox refuses rather than evicting.** Dropping held mail would be invisible to everyone
+  but this node. Caps are 200 items / 8 MB.
+
+### Honest limits, stated in the tool output itself
+
+The response says **`HELD AT SENDER — not delivered`**, names the peer it waits for, and says
+plainly that the queue is invisible to that peer and lost if this node does not return. Pending
+mail is reported in `sym_peers` and at startup — held mail that nobody can see is
+indistinguishable from mail that was delivered.
+
+**This fails when the SENDER is the intermittent one** — the mirror of the daemon spool's weakness.
+It covers the observed case: a persistent seat sending to an intermittent one.
+
+### Fixed — a test that measured a window instead of a fact
+
+`plugin.test.js` bounded the `sym_send` handler at a fixed `caseIdx + 4000`. The handler grew to
+~4,800 chars and the test went red reporting "explicitSend is missing" when `explicitSend` was
+simply further down. It now finds the next `case` label in the full source.
+
 ## 0.6.5 (2026-08-10)
 
 **Restarting the same node is now just a restart.**

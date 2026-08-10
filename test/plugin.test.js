@@ -216,10 +216,15 @@ test('sym_send handler routes through explicitSend/node.remember, not node.send'
   const code = fs.readFileSync(resolveServerJs(), 'utf8');
   const caseIdx = code.indexOf("case 'sym_send'");
   assert.ok(caseIdx !== -1, "sym_send case handler not found");
-  // Handler runs until the next case: label. Upper bound defensively.
-  const block = code.slice(caseIdx, caseIdx + 4000);
-  const nextCaseIdx = block.indexOf("case 'sym_publish'");
-  const handler = nextCaseIdx !== -1 ? block.slice(0, nextCaseIdx) : block;
+  // Handler runs until the next case: label. Find that label in the FULL source
+  // rather than inside a fixed-size window: the old `caseIdx + 4000` bound went
+  // red the moment the handler grew past it (the sender-side outbox took it to
+  // ~4800 chars), reporting "explicitSend is missing" when explicitSend was
+  // simply further down. A window that silently truncates what it searches
+  // answers a different question than the one the assertion asks.
+  const nextCaseIdx = code.indexOf("case 'sym_publish'", caseIdx);
+  assert.ok(nextCaseIdx !== -1, "sym_publish case not found — cannot bound the sym_send handler");
+  const handler = code.slice(caseIdx, nextCaseIdx);
   assert.ok(handler.includes('explicitSend('), 'handler must route the send through explicitSend() (which emits via node.remember, MMP §4.2)');
   assert.ok(code.includes('n.remember('), 'explicitSend must emit via node.remember() — CAT7 CMB, not a raw node.send()');
   assert.ok(!/node\.send\(\s*msg\s*\)/.test(handler), 'handler must NOT fall back to node.send(msg) raw-text broadcast');

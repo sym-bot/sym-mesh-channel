@@ -52,6 +52,7 @@ const {
 const { SymNode } = require('@sym-bot/sym');
 const { scanClassifierRisk, quarantineHeader } = require('./classifier-risk.js');
 const { resolveIdentity } = require('./identity.js');
+const outbox = require('./outbox.js');
 
 // Kebab-case validator shared by room-related tools.
 const KEBAB_CASE_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -393,7 +394,53 @@ function explicitSend(n, delivered, fields, sendOpts, okSummary, now) {
 // The function reads module-level `NODE_NAME`, `isPeerAllowed`, `pushChannel`,
 // `storeMessage`, and `extractCompactHeader` via closure; those don't change
 // across swaps.
+// Flush anything held for a peer that has just appeared. Items are dropped ONLY
+// after the send returns — never on dispatch, because a socket write is not
+// delivery and a crash between the two would lose mail we promised to hold.
+async function flushOutboxFor(peerName, peerId) {
+  const pending = outbox.pendingFor(NODE_NAME, peerName);
+  if (pending.length === 0) return;
+  process.stderr.write(
+    `sym-mesh-channel: "${peerName}" appeared — flushing ${pending.length} held CMB(s) from the outbox.\n`,
+  );
+  const sent = [];
+  for (const item of pending) {
+    try {
+      const opts = { to: peerId };
+      if (item.opts && item.opts.payload !== undefined) opts.payload = item.opts.payload;
+      const r = explicitSend(node, deliveredCmbKeys, item.fields, opts, (entry) => `flushed ${entry.key}`);
+      if (!r.isError) sent.push(item.seq);
+    } catch (e) {
+      process.stderr.write(`sym-mesh-channel: outbox flush failed for #${item.seq}: ${e?.message || e}\n`);
+      break;   // keep ordering; a later item must not overtake a failed earlier one
+    }
+  }
+  if (sent.length) {
+    const left = outbox.drop(NODE_NAME, sent);
+    process.stderr.write(
+      `sym-mesh-channel: flushed ${sent.length} to "${peerName}", ${left} still held in the outbox.\n`,
+    );
+  }
+}
+
 function registerNodeHandlers(n) {
+  // A peer we have actually SEEN is what makes a name "known" for the outbox.
+  // Recording it here — rather than trusting a directory on disk — is what stops
+  // a typo from creating a queue: identity.json exists for 961 of 962 node dirs
+  // on this machine, so disk presence admits essentially everything.
+  // Event name and payload verified in @sym-bot/sym lib/node.js:2584 —
+  // `this.emit('peer-joined', { id: peer.peerId, name: peer.name })`. It is
+  // 'peer-joined', NOT 'peer-connected'; a wrong name here would have failed
+  // silently, leaving the outbox correct but never flushed.
+  n.on('peer-joined', (p) => {
+    try {
+      const name = p?.name;
+      if (!name) return;
+      outbox.rememberPeer(NODE_NAME, name, p?.id || null);
+      flushOutboxFor(name, p?.id || null);
+    } catch { /* never let bookkeeping break peer handling */ }
+  });
+
   // Identity collision (added in @sym-bot/sym 0.3.68): the relay told us
   // another process is holding our nodeId. Don't try to reconnect — that
   // caused the peer-flap loop documented in v0.1.2/v0.1.3 commit messages.
@@ -758,9 +805,46 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
         else matches = [];
 
         if (matches.length === 0) {
+          // THE SEAM. This branch used to return before anything was sent, so no
+          // envelope ever left this package and a daemon-side spool sat
+          // downstream of a message that was never sent. Hold it here instead —
+          // but ONLY for a peer this node has actually seen. An unknown name
+          // stays a typed refusal, so a typo still creates no state.
+          if (!outbox.isKnownPeer(NODE_NAME, args.to)) {
+            return {
+              content: [{
+                type: 'text',
+                text: `Peer "${args.to}" not connected, and this node has never seen a peer by that name — ` +
+                      `nothing was queued. Call sym_peers to see connected peers. ` +
+                      `(An unrecognised name is refused rather than held, so a typo cannot create a queue.)`,
+              }],
+              isError: true,
+            };
+          }
+          const h = outbox.hold(NODE_NAME, args.to, fields, {
+            payload: args.payload !== undefined ? args.payload : undefined,
+          });
+          if (!h.held) {
+            return {
+              content: [{
+                type: 'text',
+                text: `Peer "${args.to}" not connected and the outbox could not hold this message (${h.reason}). ` +
+                      `NOTHING WAS QUEUED and nothing was sent. Full outbox refuses rather than evicting, ` +
+                      `because dropping held mail would be invisible to everyone but this node.`,
+              }],
+              isError: true,
+            };
+          }
+          const s = outbox.summary(NODE_NAME);
           return {
-            content: [{ type: 'text', text: `Peer "${args.to}" not connected. Call sym_peers to see connected peers.` }],
-            isError: true,
+            content: [{
+              type: 'text',
+              text: `HELD AT SENDER — not delivered. Peer "${args.to}" is not connected, so this CMB is queued ` +
+                    `in this node's outbox (#${h.seq}; ${s.byPeer[args.to] || 1} waiting for "${args.to}", ` +
+                    `${s.total} total) and will be sent when "${args.to}" appears.\n\n` +
+                    `This queue lives at the SENDER and is invisible to "${args.to}" — it does not know the ` +
+                    `message exists. If this node does not come back, the message is lost. It is not delivery.`,
+            }],
           };
         }
         if (matches.length > 1) {
@@ -832,6 +916,17 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
       // wrong room is the commonest answer. Answer it here rather than making them
       // find stderr the host may never show them.
       const advisory = roomAdvisory();
+      // A sender-held queue is invisible to everyone but this node. Pending mail
+      // must therefore be reported wherever someone looks at peer state, or it
+      // is indistinguishable from mail that was delivered.
+      const ob = outbox.summary(NODE_NAME);
+      if (ob.total > 0) {
+        const per = Object.entries(ob.byPeer).map(([n, c]) => `${c} for "${n}"`).join(', ');
+        advisory.push(
+          `OUTBOX: ${ob.total} CMB(s) HELD AT THIS SENDER, not delivered — ${per}. ` +
+          `They flush when the peer appears. If this node does not come back, they are lost.`,
+        );
+      }
       const advisoryText = advisory.length ? `\n\n${advisory.join('\n')}` : '';
       if (peers.length === 0) {
         return {
@@ -1453,6 +1548,18 @@ async function main() {
   await node.start();
 
   announceRoom();
+  // Say it at startup too: mail held from a previous run is exactly the mail
+  // most likely to be forgotten, and only this node knows it exists.
+  try {
+    const ob = outbox.summary(NODE_NAME);
+    if (ob.total > 0) {
+      const per = Object.entries(ob.byPeer).map(([n, c]) => `${c} for "${n}"`).join(', ');
+      process.stderr.write(
+        `sym-mesh-channel: OUTBOX carries ${ob.total} CMB(s) held from a previous run — ${per}. ` +
+        `They are NOT delivered; they flush when each peer appears.\n`,
+      );
+    }
+  } catch { /* never block startup on bookkeeping */ }
   publishRoomBeacon();
 
   // Start MCP server — communicates with Claude Code via stdio
