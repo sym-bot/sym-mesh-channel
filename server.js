@@ -228,11 +228,24 @@ function defaultNodeName() {
 function projectNodeConfig() {
   const fs = require('fs'), path = require('path');
   const dir = process.env.CLAUDE_PROJECT_DIR || process.cwd();
+  const file = path.join(dir, '.sym', 'node.json');
   try {
-    const cfg = JSON.parse(fs.readFileSync(path.join(dir, '.sym', 'node.json'), 'utf8'));
+    const cfg = JSON.parse(fs.readFileSync(file, 'utf8'));
     const clean = (s) => (typeof s === 'string' && s.trim()) ? s.trim() : undefined;
-    return { node_name: clean(cfg.node_name), room: clean(cfg.room) };
-  } catch { return {}; }
+    return { node_name: clean(cfg.node_name), room: clean(cfg.room), file };
+  } catch (e) {
+    // Distinguish "no config" from "config I could not read". Collapsing both
+    // to {} is what let a MALFORMED node.json look identical to an absent one:
+    // you land in `default`, silently, with a config file sitting right there
+    // looking obeyed. Absent is normal and stays quiet; unreadable is not.
+    if (e && e.code !== 'ENOENT') {
+      process.stderr.write(
+        `sym-mesh-channel: ${file} exists but could not be read (${e.message}). ` +
+        `Ignoring it — this node will NOT use the room or name it declares.\n`,
+      );
+    }
+    return { file };
+  }
 }
 const PROJECT_CFG = projectNodeConfig();
 const { name: NODE_NAME, autoSuffix: NODE_AUTOSUFFIX } = resolveIdentity({
@@ -255,13 +268,32 @@ function resolveServiceType() {
   if (room && room !== 'default') return `_${room}._tcp`;
   return '_sym._tcp';
 }
+// Resolve the room AND say where it came from, from one function, so the
+// answer and the explanation can never drift apart.
+//
+// Two harnesses on one machine resolve this differently and that is the whole
+// trap: SYM_ROOM is read by both, but CLAUDE_PROJECT_DIR is set only by Claude
+// Code, so for Codex (or any other harness) the `.sym/node.json` fallback is
+// keyed off process.cwd(). Run it from elsewhere and it silently joins
+// `default` while its sibling sits in the named room. Nothing errors; the two
+// simply stop seeing each other. Naming the SOURCE turns a night of forensics
+// into one line of startup output.
+function resolveRoom(serviceType) {
+  if (process.env.SYM_ROOM) return { room: process.env.SYM_ROOM, source: 'SYM_ROOM env' };
+  if (PROJECT_CFG.room) return { room: PROJECT_CFG.room, source: PROJECT_CFG.file };
+  if (serviceType !== '_sym._tcp') {
+    return {
+      room: serviceType.replace(/^_/, '').replace(/\._tcp$/, ''),
+      source: 'SYM_SERVICE_TYPE env',
+    };
+  }
+  return { room: 'default', source: 'nothing configured — this is the fallback, not a choice' };
+}
 // Mutable so sym_join_room can hot-swap the node at runtime without a
 // Claude Code restart. Declaring as `let` rather than `const` is the
 // smallest change that makes hot-swap possible.
 let SERVICE_TYPE = resolveServiceType();
-let ROOM = process.env.SYM_ROOM || PROJECT_CFG.room || (SERVICE_TYPE !== '_sym._tcp'
-  ? SERVICE_TYPE.replace(/^_/, '').replace(/\._tcp$/, '')
-  : 'default');
+let { room: ROOM, source: ROOM_SOURCE } = resolveRoom(SERVICE_TYPE);
 let RELAY_URL = process.env.SYM_RELAY_URL || null;
 let RELAY_TOKEN = process.env.SYM_RELAY_TOKEN || null;
 
@@ -881,10 +913,15 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
           type: 'text',
           text: `Mesh room (MMP §5.8):\n` +
             `  room: ${ROOM}\n` +
+            `  room source: ${ROOM_SOURCE}\n` +
             `  service type: ${SERVICE_TYPE}\n` +
             `  node: ${NODE_NAME} (${node.nodeId?.slice(0, 8) || '?'})\n` +
             `  peers in room: ${s.peerCount || 0}\n` +
             peerLines + `\n\n` +
+            (ROOM === 'default' && !process.env.SYM_ROOM
+              ? `NOTE: 'default' is the fallback, not a configured choice — nothing set this room. ` +
+                `A teammate in a named room is invisible from here and nothing will error.\n`
+              : '') +
             `To join a different room, restart the sym-mesh-channel MCP server with env var SYM_ROOM=<name> or SYM_SERVICE_TYPE=<_foo._tcp>.`,
         }],
       };
@@ -1037,6 +1074,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
       // dedup after the swap must be re-issued, not suppressed (E8 variant c).
       deliveredCmbKeys = new Set();
       ROOM = room;
+      // Keep the source honest after a hot-swap: reporting a stale `SYM_ROOM env`
+      // here would explain the room by something that is no longer why it is set.
+      ROOM_SOURCE = 'sym_join_room at runtime (not persisted to this server\'s env)';
       SERVICE_TYPE = newServiceType;
       RELAY_URL = relayUrl;
       RELAY_TOKEN = relayToken;
@@ -1306,12 +1346,45 @@ function stopRoomBeacon() {
   roomBeacon = null;
 }
 
+// One line that would have saved a night: the resolved room, and WHERE it came
+// from. A node in the wrong room fails by going quiet, and quiet is the one
+// symptom that looks identical to "nobody is talking right now".
+function announceRoom() {
+  process.stderr.write(
+    `sym-mesh-channel: node '${NODE_NAME}' in room '${ROOM}' (${SERVICE_TYPE}) ` +
+    `— room source: ${ROOM_SOURCE}\n`,
+  );
+  if (ROOM === 'default' && !process.env.SYM_ROOM) {
+    process.stderr.write(
+      `sym-mesh-channel: room 'default' was not configured anywhere — it is the fallback. ` +
+      `If a teammate is in a named room you will NOT discover them and nothing will error. ` +
+      `Set SYM_ROOM=<room> in this MCP server's env, or run sym_join_room.\n`,
+    );
+  }
+  // The daemon keeps its room in ~/.sym/room; this server does not read that
+  // file. Two sym nodes on one host, two sources of truth — so when they
+  // disagree the host is partitioned against ITSELF, which reads exactly like
+  // a network problem and is not one.
+  try {
+    const fs = require('fs'), os = require('os'), path = require('path');
+    const daemonRoom = fs.readFileSync(path.join(os.homedir(), '.sym', 'room'), 'utf8').trim();
+    if (daemonRoom && daemonRoom !== ROOM) {
+      process.stderr.write(
+        `sym-mesh-channel: WARNING — the sym daemon is in room '${daemonRoom}' ` +
+        `(~/.sym/room) but this MCP node resolved '${ROOM}' from ${ROOM_SOURCE}. ` +
+        `They will not see each other. Make them match, or run sym_join_room ${daemonRoom}.\n`,
+      );
+    }
+  } catch { /* no daemon room file is the normal single-node case */ }
+}
+
 async function main() {
   // Start SymNode — connects to relay as a peer. The startup primer is
   // computed at module-load time (see BASE_INSTRUCTIONS above) and is
   // already embedded in the MCP server's initialize-response payload.
   await node.start();
 
+  announceRoom();
   publishRoomBeacon();
 
   // Start MCP server — communicates with Claude Code via stdio
