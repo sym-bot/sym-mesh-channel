@@ -507,6 +507,38 @@ try {
   process.stderr.write(`sym-mesh-channel startup primer skipped: ${err?.message || err}\n`);
 }
 
+// A room misconfiguration is INVISIBLE on stderr in some MCP hosts — verified on
+// Codex CLI 0.144.0, which displays none of a child's non-fatal stderr, so the
+// startup warnings below reach nobody there. And `required = true` cannot catch
+// this class at all: a wrong room starts perfectly well, it just talks to no one.
+// So the warning has to travel IN BAND, where the agent actually reads: in the
+// initialize instructions, and again on the tools an agent calls when it wonders
+// why the mesh is quiet.
+function roomAdvisory() {
+  const lines = [];
+  if (ROOM === 'default' && !process.env.SYM_ROOM) {
+    lines.push(
+      `MESH ROOM ADVISORY: this node is in room 'default', which nothing configured — ` +
+      `it is the fallback. Peers in a named room are INVISIBLE from here and no error ` +
+      `will be raised. Set SYM_ROOM in this MCP server's env, or call sym_join_room.`,
+    );
+  }
+  try {
+    const fs = require('fs'), os = require('os'), path = require('path');
+    const daemonRoom = fs.readFileSync(path.join(os.homedir(), '.sym', 'room'), 'utf8').trim();
+    if (daemonRoom && daemonRoom !== ROOM) {
+      lines.push(
+        `MESH ROOM ADVISORY: the sym daemon is in room '${daemonRoom}' (~/.sym/room) but ` +
+        `this node resolved '${ROOM}' from ${ROOM_SOURCE}. They cannot see each other. ` +
+        `Call sym_join_room with room="${daemonRoom}", or fix the config to match.`,
+      );
+    }
+  } catch { /* absent daemon room file is the normal single-node case */ }
+  return lines;
+}
+
+const startupAdvisory = roomAdvisory();
+
 const mcp = new Server(
   { name: 'sym-mesh', version: '0.1.0' },
   {
@@ -514,7 +546,9 @@ const mcp = new Server(
       tools: {},
       experimental: { 'claude/channel': {} },
     },
-    instructions: BASE_INSTRUCTIONS + primerText,
+    instructions: BASE_INSTRUCTIONS
+      + (startupAdvisory.length ? `\n\n${startupAdvisory.join('\n')}` : '')
+      + primerText,
   },
 );
 
@@ -794,11 +828,26 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     case 'sym_peers': {
       const peers = node.peers();
+      // "No peers" is the exact moment someone asks why the mesh is quiet, and a
+      // wrong room is the commonest answer. Answer it here rather than making them
+      // find stderr the host may never show them.
+      const advisory = roomAdvisory();
+      const advisoryText = advisory.length ? `\n\n${advisory.join('\n')}` : '';
       if (peers.length === 0) {
-        return { content: [{ type: 'text', text: 'No peers connected.' }] };
+        return {
+          content: [{
+            type: 'text',
+            text: `No peers connected. (room '${ROOM}' — source: ${ROOM_SOURCE})${advisoryText}`,
+          }],
+        };
       }
       const lines = peers.map(p => `${p.name} via ${p.source || 'unknown'}`);
-      return { content: [{ type: 'text', text: `${peers.length} peer(s):\n${lines.join('\n')}` }] };
+      return {
+        content: [{
+          type: 'text',
+          text: `${peers.length} peer(s) in room '${ROOM}':\n${lines.join('\n')}${advisoryText}`,
+        }],
+      };
     }
 
     case 'sym_fetch': {
