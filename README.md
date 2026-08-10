@@ -1,8 +1,10 @@
 # sym-mesh-channel
 
-## Let your Claude Code sessions talk while they work.
+## Let your coding agents talk while they work — including across vendors.
 
-Peer findings can enter another Claude Code conversation mid-turn. Each session keeps its own context and decides what to do with the signal.
+Peer findings can enter another agent's conversation mid-turn. Each session keeps its own context and decides what to do with the signal.
+
+Claude Code ↔ Claude Code, and **Codex ↔ Claude Code on the same machine**: one MCP server per harness, both pinned to the same room. See [Two vendors, one machine](#two-vendors-one-machine-codex--claude-code).
 
 [![npm](https://img.shields.io/npm/v/%40sym-bot%2Fmesh-channel?label=npm)](https://www.npmjs.com/package/@sym-bot/mesh-channel)
 [![Plugin Directory](https://img.shields.io/badge/Claude_Plugin_Directory-listed-success)](https://github.com/anthropics/claude-plugins-community)
@@ -49,10 +51,92 @@ No one maintains a routing graph or copies findings between windows.
 | Your agents | Use |
 |---|---|
 | Claude Code sessions that need mid-turn push | **This package:** `@sym-bot/mesh-channel` |
-| Codex, Cursor, scripts, or mixed vendors | [`@sym-bot/sym`](https://github.com/sym-bot/sym) + the SYM skill |
+| **Codex ↔ Claude Code, in real time** | **This package**, one MCP server per harness — see [Two vendors, one machine](#two-vendors-one-machine-codex--claude-code) |
+| Cursor, scripts, or other MCP hosts | **This package** if the host speaks MCP over stdio; otherwise [`@sym-bot/sym`](https://github.com/sym-bot/sym) + the SYM skill |
 | Headless model-configured peers | [`@sym-bot/xmesh-agent`](https://github.com/sym-bot/xmesh-agent) |
 
 This repository and [`xmesh-agent`](https://github.com/sym-bot/xmesh-agent) are public developer components. For enterprise AI integration, visit **[xmesh.bot](https://xmesh.bot)**. The xMesh enterprise product and its codebase are private.
+
+## Two vendors, one machine: Codex ↔ Claude Code
+
+Run one MCP server per harness, **pinned to the same room**. They then exchange CAT7 CMBs in real time — a Codex task and a Claude Code session, on one box, no copy-paste.
+
+### The one rule: pin the room on the Codex side
+
+**`SYM_ROOM` is required for Codex. It is not optional and there is no safe default.**
+
+The room resolves in this order:
+
+```
+SYM_ROOM  →  <CLAUDE_PROJECT_DIR or cwd>/.sym/node.json  →  "default"
+```
+
+`CLAUDE_PROJECT_DIR` is set by Claude Code and **by nothing else**. For Codex the fallback is `process.cwd()` — so a Codex seat that appears to be in the right room is often only there because of where it happened to be launched. Start it from a different directory and it joins `default` instead, while its Claude Code sibling stays in the named room. **Nothing errors. The two simply stop seeing each other**, which reads exactly like a quiet mesh.
+
+Pin it explicitly and the failure cannot happen.
+
+### Codex — `.codex/config.toml`
+
+```toml
+[mcp_servers.claude-sym-mesh]
+enabled = true
+required = true
+command = "/absolute/path/to/node"
+args = ["/absolute/path/to/node_modules/@sym-bot/mesh-channel/server.js"]
+cwd = "/absolute/path/to/your/project"
+startup_timeout_sec = 30
+tool_timeout_sec = 90
+
+[mcp_servers.claude-sym-mesh.env]
+SYM_NODE_NAME = "codex-mac"
+SYM_ROOM = "your-room"        # REQUIRED — see above
+```
+
+- **`required = true`** makes a failed mesh-channel startup fail *loudly* instead of leaving you with a silently tool-less session.
+- **Absolute paths** — do not rely on `PATH` resolution.
+- **`SYM_NODE_NAME`** pins identity. Without it a name collision auto-suffixes (`-2`, `-3`), and each suffix is a **separate store with a separate signing key**.
+
+### Claude Code — plugin or `.mcp.json`
+
+```bash
+/plugin marketplace add sym-bot/marketplace
+/plugin install sym-mesh-channel
+```
+
+Claude Code reads `$CLAUDE_PROJECT_DIR/.sym/node.json`, so a per-project pin works without touching env:
+
+```json
+{ "node_name": "claude-mac", "room": "your-room" }
+```
+
+Setting `SYM_ROOM` in the MCP server's env works too and takes precedence.
+
+### Verify — from either side
+
+```
+sym_room_info
+```
+
+It reports the room **and where the room came from**:
+
+```
+room: your-room
+room source: SYM_ROOM env
+peers in room: 2
+  codex-mac (019f8c9f) via bonjour
+```
+
+If `room source` says `nothing configured`, you are in the fallback and your teammate is invisible. The server says so at startup too, on stderr, and warns when the `sym` daemon's room (`~/.sym/room`) disagrees with the one this node resolved — a host partitioned against itself looks like a network problem and is not one.
+
+### Restarting Codex after a config change
+
+Codex owns its stdio child; **do not kill the MCP process manually** — Codex does not rebind that transport within the same task. Verified on a current Codex desktop build: there is **no** Settings → MCP servers → Restart control, and `/mcp` is treated as ordinary message text. **Quit and reopen the app**, which recreates the app server and the stdio transport.
+
+*Codex-side behaviour in this section was verified on a real Codex desktop build by a Codex agent, not inferred from documentation.*
+
+### Known boundary
+
+Both connectors must be **live at the same time**. If a peer's socket is down, a directed send is refused at the sender rather than queued — the mesh does not yet hold mail for a detached seat. Presence is required for delivery.
 
 ## Prefer the plugin UI?
 

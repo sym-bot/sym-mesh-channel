@@ -1,5 +1,67 @@
 # Changelog
 
+## 0.6.3 (2026-08-10)
+
+**Codex ↔ Claude Code duplex is now a supported, documented setup** — and the failure that made
+it hard to reach now announces itself.
+
+### Added — the room says where it came from
+
+A node in the wrong room fails by going *quiet*, and quiet is the one symptom indistinguishable
+from "nobody is talking right now". Three new signals:
+
+- **Startup line naming the resolved room AND its source**:
+  `node 'x' in room 'y' (_y._tcp) — room source: SYM_ROOM env`. Sources are `SYM_ROOM env`,
+  the `.sym/node.json` path, `SYM_SERVICE_TYPE env`, or
+  `nothing configured — this is the fallback, not a choice`.
+- **`sym_room_info` reports `room source`** too, and says plainly when `default` was never chosen.
+- **A warning when the `sym` daemon disagrees.** The daemon resolves its room from `~/.sym/room`;
+  this server does not read that file. Two sym nodes on one host with two sources of truth means
+  a host can partition against *itself*, which reads like a network problem and is not one.
+
+Resolution and reporting now come from **one function**, so the answer and the explanation cannot
+drift apart.
+
+### Fixed
+
+- **A malformed `.sym/node.json` was indistinguishable from an absent one.** Both collapsed to
+  "no config", so a typo'd file left you in `default` with the file sitting there looking obeyed.
+  Absent stays quiet; unreadable now says so and names the path.
+
+### Docs
+
+- **New: [Two vendors, one machine](README.md#two-vendors-one-machine-codex--claude-code).**
+  Verified configs for both harnesses, and the rule that matters: **`SYM_ROOM` is required on the
+  Codex side.** `CLAUDE_PROJECT_DIR` is set by Claude Code and nothing else, so Codex falls back to
+  `process.cwd()` — a Codex seat is often in the right room only because of where it was launched.
+- **Corrected routing table.** It sent Codex users to a different package. This one drives Codex
+  directly over MCP stdio.
+- Codex-side behaviour (config keys, and that a current desktop build has **no** Settings → MCP
+  servers → Restart, treats `/mcp` as message text, and needs a full quit/reopen) was verified on a
+  real build by a Codex agent rather than inferred from documentation.
+
+### Known boundary, stated in the README
+
+Both connectors must be live simultaneously. A directed send to a peer whose socket is down is
+refused at the sender, not queued. Presence is required for delivery.
+
+## 0.6.2 (2026-08-10)
+
+### Fixed
+
+- **The room rename was half-done and split across two packages.** 0.6.1 read `SYM_GROUP` while
+  `sym` 0.11.1 wrote `SYM_ROOM` — 105 `group` occurrences, zero `SYM_ROOM`. A user setting
+  `SYM_ROOM` got the daemon in the right room and the MCP node in `default`, with no error.
+  Neither repo's tests could see it, because the two halves lived in different packages.
+- `--group` → `--room` throughout the CLI, and the docs that still taught the old flag.
+
+## 0.6.1 (2026-08-09)
+
+### Fixed
+
+- **The plugin manifest and `.mcp.json` launch pin still pointed at 0.6.0.** The published package
+  and the version that actually launched disagreed.
+
 ## 0.6.0 (2026-08-07)
 
 ### Changed
