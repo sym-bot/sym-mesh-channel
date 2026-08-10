@@ -35,7 +35,7 @@
 > ⚠️ **唯一前提：同一「房间」**  
 > 会话仅在处于**同一网格组**（即共享「房间」）时才能相互发现。请先将所有需要协同的会话加入同一组，上述协同流程即可自动发生。  
 > - 同一局域网下，默认网格 `_sym._tcp` 已支持自动发现同位置会话  
-> - 如需私有团队房间，请在每个会话中执行 `sym_join_group "your-team"` 指向同一组名  
+> - 如需私有团队房间，请在每个会话中执行 `sym_join_room "your-team"` 指向同一组名  
 > - **不同组的会话彼此完全不可见** —— 这是「同 Wi-Fi 但对等节点不出现」问题的首要排查点  
 > 完整机制详见 [团队网格组](#团队网格组) 章节
 
@@ -85,7 +85,7 @@ npx @sym-bot/mesh-channel@latest start
 启动一个持久的**命名**智能体，或加入团队房间：
 
 ```
-npx @sym-bot/mesh-channel@latest start --name cto --group my-team
+npx @sym-bot/mesh-channel@latest start --name cto --room my-team
 ```
 
 （`start --print` 只打印将要执行的 `claude …` 命令而不启动；`--` 之后的所有参数都会原样传给 `claude`，例如 `… start -- --resume`。）
@@ -122,11 +122,11 @@ claude --dangerously-load-development-channels plugin:sym-mesh-channel@claude-co
 | `sym_fetch` | 通过紧凑频道头部 ID 获取单个 CMB 的完整内容 |
 | `sym_peers` | 列出已发现的对等节点（通过 Bonjour 或中继） |
 | `sym_status` | 查询节点身份、中继状态、对等节点数、记忆块数量、当前网格组 |
-| `sym_group_info` | 报告当前节点所属网格组，含服务类型及组内对等节点清单 |
+| `sym_room_info` | 报告当前节点所属网格组，含服务类型及组内对等节点清单 |
 | `sym_invite_create` | 为指定组生成可分享的邀请链接（支持局域网或跨网络模式） |
-| `sym_invite_info` | 解析网格邀请链接，返回可直接调用的 `sym_join_group` 参数 |
-| `sym_join_group` | **热切换**当前节点至其他网格组，无需重启 Claude Code |
-| `sym_groups_discover` | 列出当前局域网内通过 Bonjour/mDNS 广播的 SYM 网格组 |
+| `sym_invite_info` | 解析网格邀请链接，返回可直接调用的 `sym_join_room` 参数 |
+| `sym_join_room` | **热切换**当前节点至其他网格组，无需重启 Claude Code |
+| `sym_rooms_discover` | 列出当前局域网内通过 Bonjour/mDNS 广播的 SYM 网格组 |
 
 ✅ 启用 Channels 标志后，实时推送为双向：对等事件可在对话中途无工具调用即时送达 Claude 上下文；  
 ❌ 未启用标志时，上述工具仍可按需调用，但无异步推送能力。
@@ -138,7 +138,7 @@ claude --dangerously-load-development-channels plugin:sym-mesh-channel@claude-co
 默认情况下，每个 `sym-mesh-channel` 节点加入全局 `_sym._tcp` 网格 —— 网络内所有节点彼此可见。对于多团队企业场景，这可能导致信息过载。网格组（MMP §5.8）在 mDNS 层实现团队隔离，使 `backend-team` 与 `frontend-team` 的信号完全互不可见。
 
 > 🔍 **自 sym CLI v0.3.6 起支持组发现**  
-> 本节点通过共享的 `_symgroups._tcp` 发现信标广播其所属组，因此 `sym groups` 命令可将本 Claude/MCP 节点与 CLI 守护进程节点并列展示 —— 跨平台支持（含 Windows，无需依赖 Apple `dns-sd`）。  
+> 本节点通过共享的 `_symrooms._tcp` 发现信标广播其所属组，因此 `sym rooms` 命令可将本 Claude/MCP 节点与 CLI 守护进程节点并列展示 —— 跨平台支持（含 Windows，无需依赖 Apple `dns-sd`）。  
 > ⚠️ 仅用于发现；通信仍隔离于各组专属服务类型。（2026-05-01 前启动的会话需重启方可开始广播）
 
 ### 同一办公区（局域网）
@@ -146,12 +146,12 @@ claude --dangerously-load-development-channels plugin:sym-mesh-channel@claude-co
 **团队负责人从任意 Claude Code 会话创建组：**
 
 ```bash
-> sym_invite_create { "group": "backend-team" }
+> sym_invite_create { "room": "backend-team" }
 
 邀请链接（仅局域网 / Bonjour）:
-    sym://group/backend-team
+    sym://room/backend-team
 
-> sym_join_group { "group": "backend-team" }
+> sym_join_room { "room": "backend-team" }
 已从组 "default" (_sym._tcp) 热切换至 "backend-team" (_backend-team._tcp)
 ```
 
@@ -160,32 +160,32 @@ claude --dangerously-load-development-channels plugin:sym-mesh-channel@claude-co
 **每位成员在其 Claude Code 会话中粘贴链接：**
 
 ```bash
-> sym_invite_info { "url": "sym://group/backend-team" }
-已解析邀请: sym://group/backend-team
+> sym_invite_info { "url": "sym://room/backend-team" }
+已解析邀请: sym://room/backend-team
 
-> sym_join_group { "group": "backend-team" }
+> sym_join_room { "room": "backend-team" }
 已从组 "default" 热切换至 "backend-team"
 ```
 
 ✅ 无需重启当前会话。同局域网成员即刻可见；`backend-team` 与 `frontend-team` 处于隔离的 mDNS 空间。
 
-> 🔹 **`sym_join_group` 为运行时操作**  
-> 下次启动 Claude Code 时，节点将从 `~/.claude.json` 配置重启 —— 若 `SYM_GROUP` 未持久化，将回退至全局网格，导致对等节点数静默归零。请在关闭会话前持久化组成员身份（见下文）。
+> 🔹 **`sym_join_room` 为运行时操作**  
+> 下次启动 Claude Code 时，节点将从 `~/.claude.json` 配置重启 —— 若 `SYM_ROOM` 未持久化，将回退至全局网格，导致对等节点数静默归零。请在关闭会话前持久化组成员身份（见下文）。
 
 ### 跨重启持久化组成员身份
 
 热切换适合临时测试，但团队正式部署需将组信息写入 MCP 环境变量块，确保每次启动自动加入。两种方案：
 
 ```bash
-# 方案 (a)：重装时指定 --group 标志
+# 方案 (a)：重装时指定 --room 标志
 #   - 保留现有条目的 SYM_NODE_NAME
-#   - 添加 SYM_GROUP
+#   - 添加 SYM_ROOM
 #   - 原子重写 ~/.claude.json
-npx @sym-bot/mesh-channel init --force --group backend-team
+npx @sym-bot/mesh-channel init --force --room backend-team
 
 # 方案 (b)：项目级安装（多项目笔记本场景）
 cd path/to/project
-SYM_NODE_NAME=claude-myproject npx @sym-bot/mesh-channel init --project --group backend-team
+SYM_NODE_NAME=claude-myproject npx @sym-bot/mesh-channel init --project --room backend-team
 ```
 
 执行后重启 Claude Code 一次，后续会话将自动加入指定组。
@@ -193,14 +193,14 @@ SYM_NODE_NAME=claude-myproject npx @sym-bot/mesh-channel init --project --group 
 🔁 **在线切换组**（对已持久化条目）：
 ```bash
 # 从一组切换至另一组（单命令）:
-npx @sym-bot/mesh-channel init --force --group new-team
+npx @sym-bot/mesh-channel init --force --room new-team
 
 # 回退至全局网格（逃生通道）:
-npx @sym-bot/mesh-channel init --force --group default
+npx @sym-bot/mesh-channel init --force --room default
 ```
 
 > 📌 **优先级规则**：  
-> - 无 `--force` 时：已持久化的 `SYM_GROUP` 优先（修复路径职责：常规重装不丢失用户状态）  
+> - 无 `--force` 时：已持久化的 `SYM_ROOM` 优先（修复路径职责：常规重装不丢失用户状态）  
 > - 有 `--force` 时：命令行/环境变量显式值优先（支持单命令覆盖）
 
 🔧 随时运行 `npx @sym-bot/mesh-channel doctor` 查看各 `claude-sym-mesh` 条目的配置组。该命令会显式标记用户全局与项目级配置间的组不匹配 —— 这是「同 Wi-Fi 但对等节点不出现」问题的最常见原因。
@@ -211,7 +211,7 @@ npx @sym-bot/mesh-channel init --force --group default
 
 ```bash
 > sym_invite_create {
-    "group": "eng-team",
+    "room": "eng-team",
     "relay_url": "wss://sym-relay.onrender.com",
     "relay_token": "any-shared-secret-the-team-agrees-on"
   }
@@ -220,17 +220,17 @@ npx @sym-bot/mesh-channel init --force --group default
     sym://team/eng-team?relay=wss%3A%2F%2Fsym-relay.onrender.com&token=any-shared-secret-...
 ```
 
-成员粘贴链接后，`sym_invite_info` 自动提取中继与令牌参数，`sym_join_group` 以相同参数热切换。共享同一令牌的成员即加入同一中继通道；不同令牌 = 同一中继主机上的不同通道。
+成员粘贴链接后，`sym_invite_info` 自动提取中继与令牌参数，`sym_join_room` 以相同参数热切换。共享同一令牌的成员即加入同一中继通道；不同令牌 = 同一中继主机上的不同通道。
 
 ### 发现当前可用网格
 
 ```bash
-> sym_groups_discover
+> sym_rooms_discover
 
 当前局域网可见的 SYM 网格组（3 个）:
-  _sym._tcp           group="sym"
-  _backend-team._tcp  group="backend-team"   (← 您当前所在组)
-  _frontend-team._tcp group="frontend-team"
+  _sym._tcp           room="sym"
+  _backend-team._tcp  room="backend-team"   (← 您当前所在组)
+  _frontend-team._tcp room="frontend-team"
 ```
 
 > ℹ️ 仅显示当前至少有一个节点在线的组 —— 去中心化架构下无离线组中央目录。跨网络中继组需通过邀请链接带外分享中继地址与令牌。
@@ -355,7 +355,7 @@ cd sym-relay && npm install && npm start
   若同 Wi-Fi 下发现失败，请切换至中继模式
 
 - 🔸 **无离线组目录**  
-  `sym_groups_discover` 仅显示当前在线组；跨网络中继组需带外分享邀请链接
+  `sym_rooms_discover` 仅显示当前在线组；跨网络中继组需带外分享邀请链接
 
 - 🔸 **单进程单身份**  
   同一机器上两个 Claude Code 会话若使用相同 `SYM_NODE_NAME` 将冲突（第二进程报 `EIDENTITYLOCK` 退出）→ 请使用不同名称或项目级安装
@@ -385,17 +385,17 @@ npx -y @sym-bot/mesh-channel init
 
 ### 对等节点连接正常（Claude Code 启动无报错），但 `sym_peers` 中不显示
 
-**几乎总是网格组不匹配** —— Bonjour 按服务类型（`_<group>._tcp`）隔离发现范围，因此 `default` 与 `backend-team` 节点即使同 Wi-Fi 也彼此不可见。
+**几乎总是网格组不匹配** —— Bonjour 按服务类型（`_<room>._tcp`）隔离发现范围，因此 `default` 与 `backend-team` 节点即使同 Wi-Fi 也彼此不可见。
 
 🔍 两步诊断：
 ```bash
-> sym_status          # 显示: Group: <name> (<service-type>)
-> sym_groups_discover # 显示当前局域网内所有广播中的组
+> sym_status          # 显示: Room: <name> (<service-type>)
+> sym_rooms_discover # 显示当前局域网内所有广播中的组
 ```
 
 若队友节点处于不同组：
-- 当前会话：用 `sym_join_group` 临时切换  
-- 后续会话：用 `init --group <name>` 持久化配置  
+- 当前会话：用 `sym_join_room` 临时切换  
+- 后续会话：用 `init --room <name>` 持久化配置  
 - 验证：运行 `doctor` 确认各条目持久化组配置，该命令会显式标记跨作用域的组不匹配
 
 > 💡 这是典型「表面健康但协同失败」场景：`sym_status` 显示 `Peers: 0`，但底层 SymNode 正常、mDNS 服务已注册、中继（若配置）已连接 —— 仅因服务类型不匹配导致彼此不可见。
@@ -435,8 +435,8 @@ npx -y @sym-bot/mesh-channel init
 以上全部基于插件——这是大多数用户所需的全部。**仅当**您需要以下能力之一时，才改为将引擎安装为 npm 包 / MCP 服务器：
 
 - **持久化的*命名*智能体。** 插件会为每个会话自动命名（如 `claude-myrepo-3f9a`）；而服务器安装允许您固定 `SYM_NODE_NAME=cto`，使该节点在 `sym_peers`、网格记忆与 CMB 血缘中始终以同一名称出现——这是持久的智能体身份，而非匿名会话。
-- **提交至仓库的团队配置。** 配置存于项目 `.mcp.json` 中，因此您可将 `SYM_GROUP=backend-team`（及中继 URL / 令牌）提交进仓库——任何在 Claude Code 中打开该仓库的人都会自动加入团队房间，无需任何人工配置。
-- **`sym` CLI 与非 Claude 智能体。** 此方式同时安装 [`@sym-bot/sym`](https://github.com/sym-bot/sym)，让您在终端使用 `sym ask` / `sym groups`，并提供一个可供其他智能体、脚本与多语言环境共享的引擎。
+- **提交至仓库的团队配置。** 配置存于项目 `.mcp.json` 中，因此您可将 `SYM_ROOM=backend-team`（及中继 URL / 令牌）提交进仓库——任何在 Claude Code 中打开该仓库的人都会自动加入团队房间，无需任何人工配置。
+- **`sym` CLI 与非 Claude 智能体。** 此方式同时安装 [`@sym-bot/sym`](https://github.com/sym-bot/sym)，让您在终端使用 `sym ask` / `sym rooms`，并提供一个可供其他智能体、脚本与多语言环境共享的引擎。
 
 ```bash
 npm install -g @sym-bot/mesh-channel

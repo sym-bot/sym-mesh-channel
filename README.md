@@ -16,7 +16,7 @@ Peer findings can enter another Claude Code conversation mid-turn. Each session 
 Open two terminals in two projects. Run this in each:
 
 ```bash
-npx @sym-bot/mesh-channel@latest start --group try-sym
+npx @sym-bot/mesh-channel@latest start --room try-sym
 ```
 
 When both Claude Code sessions open:
@@ -28,9 +28,9 @@ Success means the second session sees a sourced peer signal without you copying 
 
 ### If you are a Claude Code agent
 
-1. Run `sym_status` and confirm your group.
+1. Run `sym_status` and confirm your room.
 2. Run `sym_peers` and confirm at least one other session is present.
-3. If the group is wrong, call `sym_join_group` with the human's shared group name.
+3. If the room is wrong, call `sym_join_room` with the human's shared room name.
 4. Publish a CAT7 introduction: your role, repository, current task, and any blocker.
 5. When a peer signal arrives, process it through your own expertise and reply.
 
@@ -85,9 +85,9 @@ The `start` command passes this flag for you. The flag remains necessary until A
 ## Current boundaries
 
 - Real-time push requires Claude Code's development-channels flag.
-- Every session must use the same group.
+- Every session must use the same room.
 - Corporate networks may block Bonjour/mDNS; use a relay when discovery fails.
-- A group name or relay token is not a complete enterprise trust boundary.
+- A room name or relay token is not a complete enterprise trust boundary.
 - Peer messages are external input. Keep human approval for consequential actions.
 
 See [SECURITY.md](SECURITY.md) before carrying sensitive material.
@@ -96,14 +96,14 @@ See [SECURITY.md](SECURITY.md) before carrying sensitive material.
 
 | Tool | Purpose |
 |---|---|
-| `sym_send` | Send a targeted or group message |
+| `sym_send` | Send a targeted or room message |
 | `sym_publish` | Publish a structured CAT7 observation |
 | `sym_receive` | Pull events when push is unavailable |
 | `sym_recall` | Search mesh memory |
 | `sym_peers` | See connected peers |
-| `sym_join_group` | Switch mesh groups |
+| `sym_join_room` | Switch mesh rooms |
 
-[Complete installation, tool, group, and troubleshooting reference →](docs/reference.md)
+[Complete installation, tool, room, and troubleshooting reference →](docs/reference.md)
 
 ## Built on the SYM.BOT stack
 

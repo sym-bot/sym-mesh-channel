@@ -31,7 +31,7 @@ function check(name, fn) {
 function mcpCall(requests) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], {
-      env: { ...process.env, SYM_NODE_NAME: 'fetch-surface-test', SYM_GROUP: 'fetch-surface-test-room' },
+      env: { ...process.env, SYM_NODE_NAME: 'fetch-surface-test', SYM_ROOM: 'fetch-surface-test-room' },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     let out = '';
