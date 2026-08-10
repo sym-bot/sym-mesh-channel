@@ -36,19 +36,36 @@ test('pinned resolution does not depend on any lockfile / pid state', () => {
   assert.equal(resolveIdentity.length <= 1, true, 'pure single-arg resolver — no pid/lock parameters');
 });
 
-test('an unpinned session falls back to the default name with engine auto-suffix ON', () => {
+// INVERTED 2026-08-10, founder ruling "never -2, never -3". This test used to
+// assert autoSuffix ON for unpinned sessions and is kept, reversed, rather than
+// deleted: a suffix is not a milder outcome than an error, it is a SEPARATE
+// STORE WITH A SEPARATE SIGNING KEY wearing the same name in conversation.
+test('an unpinned session takes the default name and STILL never auto-suffixes', () => {
   const r = resolveIdentity({ pinnedName: undefined, defaultName: 'claude-xmesh-a1b2c3' });
   assert.equal(r.name, 'claude-xmesh-a1b2c3');
   assert.equal(r.pinned, false);
-  assert.equal(r.autoSuffix, true, 'unpinned default delegates collision to the engine (start-time-verified)');
+  assert.equal(r.autoSuffix, false, 'NEVER -2/-3: a collision is a hard failure, not a new identity');
 });
 
-test('blank / whitespace pinned names are treated as unpinned', () => {
+test('blank / whitespace pinned names are treated as unpinned — and still never suffix', () => {
   for (const blank of ['', '   ', null, undefined]) {
     const r = resolveIdentity({ pinnedName: blank, defaultName: 'def' });
     assert.equal(r.name, 'def', `blank ${JSON.stringify(blank)} should fall through to default`);
     assert.equal(r.pinned, false);
-    assert.equal(r.autoSuffix, true);
+    assert.equal(r.autoSuffix, false);
+  }
+});
+
+test('NO input shape can produce autoSuffix — the -2/-3 path does not exist', () => {
+  const inputs = [
+    { pinnedName: 'a', defaultName: 'b' },
+    { pinnedName: undefined, defaultName: 'b' },
+    { pinnedName: '', defaultName: 'b' },
+    { pinnedName: '  ', defaultName: 'b' },
+    { pinnedName: null, defaultName: 'b' },
+  ];
+  for (const i of inputs) {
+    assert.equal(resolveIdentity(i).autoSuffix, false, `autoSuffix must be false for ${JSON.stringify(i)}`);
   }
 });
 

@@ -1371,6 +1371,25 @@ process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT',  () => shutdown('SIGINT'));
 process.on('SIGHUP',  () => shutdown('SIGHUP'));
 
+// A STDIO SERVER WHOSE STDIN HAS CLOSED IS ALREADY DEAD — it can never receive
+// another request, because the only channel a client could speak on is gone.
+// Signals alone are not enough: not every host signals its children on the way
+// out. Codex quits without one, which left a `codex-mac` connector running with
+// PPID 1 for twenty minutes past its parent, still holding the pinned identity.
+// The next launch then hit EIDENTITYLOCK and — correctly, with required=true —
+// died reporting a conflict with a process that could no longer serve anyone.
+//
+// This is also where the -2/-3 identity forks come from: an orphan holding a
+// name is what makes the next start collide, and a collision is what mints a
+// second store with a second signing key.
+//
+// Exiting on stdin EOF closes all of it: the node leaves the mesh cleanly, the
+// identity lock is released, and restarting the same node is just a restart.
+process.stdin.on('end', () => shutdown('stdin-eof'));
+process.stdin.on('close', () => shutdown('stdin-close'));
+// A stdin that errors (parent died mid-write) is the same condition.
+process.stdin.on('error', () => shutdown('stdin-error'));
+
 // ── Room discovery beacon (MMP §5.8) ──────────────────────────
 // Mirror the sym CLI daemon: advertise this node's room on the shared
 // `_symrooms._tcp` service (room name in TXT) via the pure-JS bonjour-service,
