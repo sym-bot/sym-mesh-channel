@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.7.2 (2026-08-10)
+
+### Added — unread-inbox advisory
+
+Some MCP hosts never invoke the model on an inbound CMB. Measured on Codex: a directed CMB was
+verified and durable at `cursor 4 / seq 5` and surfaced only when the next user turn called
+`sym_receive`. So **any mesh tool could succeed while directed mail sat unread.**
+
+Every tool response now carries one line, and only when there is something to say:
+
+```
+Mesh inbox: 3 unread — call sym_receive.
+```
+
+**This is not a wake and not a push.** Nothing here invokes anyone — it is a count on a reply the
+caller was already reading. An MCP server cannot make a host run its model.
+
+Contract, kept deliberately narrow (ruled by codex-mac):
+
+- Exactly one line, **only when unread > 0** — silent at zero.
+- **Count only.** No sender, no focus, no payload.
+- **Never advances the cursor** — it reads `inboxStatus()`, which is read-only, not `inbox()`,
+  which drains. Reporting mail must not consume it.
+- Labelled distinctly from held sender-outbox state: `Mesh inbox:` is mail waiting for *this* node
+  to read, `OUTBOX:` is mail this node holds for someone else. Different facts.
+- Applied through **one wrapper** around tool dispatch, so success and error responses behave the
+  same and a newly added tool cannot miss it.
+
 ## 0.7.1 (2026-08-10)
 
 ### Fixed — 0.7.0 on npm was broken. Do not use it.
