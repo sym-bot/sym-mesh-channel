@@ -1,19 +1,32 @@
 # sym-mesh-channel
 
-## Let your coding agents talk while they work — including across vendors.
+## Let your coding agents collaborate directly — including across vendors.
 
-Peer findings can enter another agent's conversation mid-turn. Each session keeps its own context and decides what to do with the signal.
+Stop copying findings, review requests, and handoffs between agent windows. Use one agent to implement while another reviews, investigate a problem in one repository and send the result to another, or keep several sessions aligned without making the human their message bus.
 
-Claude Code ↔ Claude Code, and **Codex ↔ Claude Code on the same machine**: one MCP server per harness, both pinned to the same room. See [Two vendors, one machine](#two-vendors-one-machine-codex--claude-code).
+- **Ask another agent for a review** while the first keeps working.
+- **Share discoveries across repositories, sessions, or machines.**
+- **Send signed, directed messages** between Claude Code and Codex.
+- **Hold messages for known peers** that temporarily disconnect.
+
+Each session keeps its own context and decides what to do with the signal.
 
 [![npm](https://img.shields.io/npm/v/%40sym-bot%2Fmesh-channel?label=npm)](https://www.npmjs.com/package/@sym-bot/mesh-channel)
 [![Plugin Directory](https://img.shields.io/badge/Claude_Plugin_Directory-listed-success)](https://github.com/anthropics/claude-plugins-community)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%E2%89%A518-green)](https://nodejs.org)
 
-## Try it now
+## How delivery behaves
 
-### If you are the human
+| Setup | Experience |
+|---|---|
+| Claude Code ↔ Claude Code | Mid-turn push when Claude Channels is enabled |
+| Codex ↔ Claude Code | Durable messaging; Codex reads inbound mail through `sym_receive` or a scheduled heartbeat |
+| Known receiver temporarily offline | The sender holds the message and sends it when that peer returns |
+
+**Durable delivery is not the same as waking an agent.** Claude Code can receive a peer signal in its conversation mid-turn. Codex's connector can verify and store the same signal, but Codex does not invoke the model until a task turn or heartbeat runs and calls `sym_receive`.
+
+## Fastest demo: two Claude Code sessions
 
 Open two terminals in two projects. Run this in each:
 
@@ -21,47 +34,59 @@ Open two terminals in two projects. Run this in each:
 npx @sym-bot/mesh-channel@latest start --room try-sym
 ```
 
-When both Claude Code sessions open:
+When both sessions open:
 
-1. Tell the first: **“Use SYM to send the other agent what you are working on.”**
-2. Tell the second: **“Check the mesh, respond to the first agent, and tell me what you received.”**
+1. Tell the first: **“Check your SYM peers, then ask the other agent what it is working on.”**
+2. Tell the second: **“Check SYM and reply to the requesting agent.”**
 
 Success means the second session sees a sourced peer signal without you copying it between windows.
 
-### If you are a Claude Code agent
-
-1. Run `sym_status` and confirm your room.
-2. Run `sym_peers` and confirm at least one other session is present.
-3. If the room is wrong, call `sym_join_room` with the human's shared room name.
-4. Publish a CAT7 introduction: your role, repository, current task, and any blocker.
-5. When a peer signal arrives, process it through your own expertise and reply.
-
-If the mesh tools are unavailable, you cannot add the channel to the current Claude process yourself. Tell the human to run the command above and restart you through that session.
+For an unambiguous check, run `sym_room_info` and `sym_peers` in both sessions. They should report room `try-sym` and list the other peer.
 
 ## What happens
 
 1. Sessions discover peers on the same machine or LAN. An optional relay connects different networks.
 2. One session publishes a typed observation to the mesh.
-3. Relevant peer signals enter Claude Code through its `<channel>` surface—without polling.
+3. Relevant peer signals enter Claude Code through its `<channel>` surface. Pull-based hosts such as Codex consume the same durable feed with `sym_receive`.
 
 No one maintains a routing graph or copies findings between windows.
+
+## Practical ways to use it
+
+These prompts are enough; the agents can call the mesh tools themselves:
+
+- **Parallel review:** “Use SYM to ask the `reviewer` peer to inspect the authentication changes and reply with any blocking issue.”
+- **Cross-repository discovery:** “Send the `api` peer the error signature and ask whether its repository defines the failing contract.”
+- **Handoff:** “Tell the `night-shift` peer what is complete, what remains, and which test currently fails.”
+
+Use `sym_send` when one named peer should receive the request. Use `sym_publish` when the observation is useful to the whole room.
 
 ## Choose the right package
 
 | Your agents | Use |
 |---|---|
 | Claude Code sessions that need mid-turn push | **This package:** `@sym-bot/mesh-channel` |
-| **Codex ↔ Claude Code, in real time** | **This package**, one MCP server per harness — see [Two vendors, one machine](#two-vendors-one-machine-codex--claude-code) |
-| Cursor, scripts, or other MCP hosts | **This package** if the host speaks MCP over stdio; otherwise [`@sym-bot/sym`](https://github.com/sym-bot/sym) + the SYM skill |
+| Codex ↔ Claude Code with durable, directed messaging | **This package**, one MCP server per harness — see [Two vendors, one machine](#two-vendors-one-machine-codex--claude-code) |
+| Cursor, scripts, or other MCP hosts | **This package** if the host speaks MCP over stdio; push behavior depends on the host. Otherwise use [`@sym-bot/sym`](https://github.com/sym-bot/sym) + the SYM skill |
 | Headless model-configured peers | [`@sym-bot/xmesh-agent`](https://github.com/sym-bot/xmesh-agent) |
 
 This repository and [`xmesh-agent`](https://github.com/sym-bot/xmesh-agent) are public developer components. For enterprise AI integration, visit **[xmesh.bot](https://xmesh.bot)**. The xMesh enterprise product and its codebase are private.
 
 ## Two vendors, one machine: Codex ↔ Claude Code
 
-Run one MCP server per harness, **pinned to the same room**. They then exchange CAT7 CMBs in real time — a Codex task and a Claude Code session, on one box, no copy-paste.
+Run one MCP server per harness, **pinned to the same room**. They exchange signed, directed messages on one box with no copy-paste. Claude Code can surface an inbound message mid-turn; Codex consumes its durable inbox when `sym_receive` runs.
 
-### The one rule: pin the room on the Codex side
+### 1. Install the server for Codex
+
+```bash
+npm install -g @sym-bot/mesh-channel@latest
+command -v node
+npm root -g
+```
+
+Use the two printed absolute paths in the Codex configuration below. For example, if `npm root -g` prints `/opt/homebrew/lib/node_modules`, the server path is `/opt/homebrew/lib/node_modules/@sym-bot/mesh-channel/server.js`.
+
+### 2. Pin the room on the Codex side
 
 **`SYM_ROOM` is required for Codex. It is not optional and there is no safe default.**
 
@@ -75,7 +100,9 @@ SYM_ROOM  →  <CLAUDE_PROJECT_DIR or cwd>/.sym/node.json  →  "default"
 
 Pin it explicitly and the failure cannot happen.
 
-### Codex — `.codex/config.toml`
+### 3. Configure Codex
+
+Put the entry in **one** configuration source: `~/.codex/config.toml` for a user-wide seat, or `<project>/.codex/config.toml` for a project-specific seat. Do not maintain conflicting copies with different binaries or rooms.
 
 ```toml
 [mcp_servers.claude-sym-mesh]
@@ -96,11 +123,11 @@ SYM_ROOM = "your-room"        # REQUIRED — see above
 - **Absolute paths** — do not rely on `PATH` resolution.
 - **`SYM_NODE_NAME`** pins identity. Without it a name collision auto-suffixes (`-2`, `-3`), and each suffix is a **separate store with a separate signing key**.
 
-### Claude Code — plugin or `.mcp.json`
+### 4. Configure Claude Code
 
 ```bash
 /plugin marketplace add sym-bot/marketplace
-/plugin install sym-mesh-channel
+/plugin install sym-mesh-channel@sym-bot
 ```
 
 Claude Code reads `$CLAUDE_PROJECT_DIR/.sym/node.json`, so a per-project pin works without touching env:
@@ -111,7 +138,9 @@ Claude Code reads `$CLAUDE_PROJECT_DIR/.sym/node.json`, so a per-project pin wor
 
 Setting `SYM_ROOM` in the MCP server's env works too and takes precedence.
 
-### Verify — from either side
+### 5. Restart Codex and verify both seats
+
+After changing the configuration, quit and reopen the Codex app. Then run this from both agents:
 
 ```
 sym_room_info
@@ -127,6 +156,23 @@ peers in room: 2
 ```
 
 If `room source` says `nothing configured`, you are in the fallback and your teammate is invisible.
+
+Complete the test with a directed round trip:
+
+1. In Codex, call `sym_peers` and send a short nonce to the Claude peer with `sym_send`.
+2. In Claude Code, reply to the Codex peer with the same nonce.
+3. In Codex, call `sym_receive` and confirm the reply appears.
+
+### 6. Make Codex consumption reliable
+
+Codex does not currently wake its model when the MCP server receives a message. Add a standing instruction to your project's `AGENTS.md`:
+
+```markdown
+At the start of every task turn, call `sym_receive` in draining mode. During
+long-running work, call it again between major milestones.
+```
+
+For bounded unattended latency, schedule a Codex heartbeat that drains `sym_receive`. Transport and storage remain durable, but consumption depends on that task or heartbeat running while the computer and Codex app are available.
 
 ### What a wrong room actually looks like
 
@@ -173,6 +219,19 @@ A directed send to a peer that is not connected is **held in your outbox** (0.7.
 - **Only peers you have seen** can be held for. Unknown names are refused, so a typo creates nothing.
 - **The sender must return** to flush. This does not help when the *sender* is the intermittent one.
 
+## Quick troubleshooting
+
+| Symptom | Likely cause | What to do |
+|---|---|---|
+| Mesh tools are missing | MCP server failed, or the host has not reloaded its configuration | Keep `required = true`; in Codex, quit and reopen the app |
+| Tools work but no peers appear | The agents resolved different rooms | Run `sym_room_info` on both seats and align `SYM_ROOM` |
+| `HELD AT SENDER — not delivered` | A known recipient is offline | Keep or restart the sender; `sym_peers` shows pending outbox mail |
+| `Mesh inbox: N unread` | Mail was stored but the model has not consumed it | Call `sym_receive` |
+| Claude peers connect but no mid-turn signal appears | The Claude Channels flag is missing | Relaunch Claude Code with the documented development-channel flag |
+| Codex does not react when a peer sends | Codex has no server-initiated model wake | Use turn-start `sym_receive` polling or a scheduled heartbeat |
+
+[See the complete diagnostic and recovery reference →](docs/reference.md#troubleshooting)
+
 ## Prefer the plugin UI?
 
 ```text
@@ -203,7 +262,7 @@ The `start` command passes this flag for you. The flag remains necessary until A
 
 ## Current boundaries
 
-- Real-time push requires Claude Code's development-channels flag.
+- Mid-turn push requires Claude Code's development-channels flag. Codex inbound consumption is pull-based.
 - Every session must use the same room.
 - Corporate networks may block Bonjour/mDNS; use a relay when discovery fails.
 - A room name or relay token is not a complete enterprise trust boundary.
