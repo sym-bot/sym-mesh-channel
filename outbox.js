@@ -75,9 +75,14 @@ function isKnownPeer(nodeName, name) {
 
 // ── Outbox ───────────────────────────────────────────────────
 function load(nodeName) {
+  // One-time upgrade of items persisted under the pre-rename key. This is a load-time
+  // MIGRATION, not a runtime fallback: after the first save the old key no longer exists.
   const d = readJson(outboxFile(nodeName), { seq: 0, items: [] });
   if (!Array.isArray(d.items)) d.items = [];
   if (typeof d.seq !== 'number') d.seq = 0;
+  for (const it of d.items) {
+    if (it && it.fields !== undefined && it.categories === undefined) { it.categories = it.fields; delete it.fields; }
+  }
   return d;
 }
 
@@ -85,9 +90,9 @@ function load(nodeName) {
  * Hold an envelope for a peer that is not currently connected.
  * @returns {{held: true, seq: number, queued: number} | {held: false, reason: string}}
  */
-function hold(nodeName, to, fields, opts) {
+function hold(nodeName, to, categories, opts) {
   const d = load(nodeName);
-  const bytes = Buffer.byteLength(JSON.stringify({ fields, opts }));
+  const bytes = Buffer.byteLength(JSON.stringify({ categories, opts }));
   if (bytes > MAX_BYTES) return { held: false, reason: 'envelope-too-large' };
 
   const used = Buffer.byteLength(JSON.stringify(d.items));
@@ -98,7 +103,7 @@ function hold(nodeName, to, fields, opts) {
   }
 
   d.seq += 1;
-  d.items.push({ seq: d.seq, to, fields, opts: opts || {}, heldAt: null });
+  d.items.push({ seq: d.seq, to, categories, opts: opts || {}, heldAt: null });
   writeJsonAtomic(outboxFile(nodeName), d);
   return { held: true, seq: d.seq, queued: d.items.length };
 }
