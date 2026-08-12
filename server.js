@@ -316,8 +316,8 @@ let node = new SymNode({
 });
 
 // ── Send-path delivery integrity (E8 variant c) ──────────────────────────────
-// SymNode.remember() dedups on the content hash of the CAT7 fields, returning null
-// when identical fields are already in the LOCAL store — and the send/publish
+// SymNode.remember() dedups on the content hash of the CAT7 categories, returning null
+// when identical categories are already in the LOCAL store — and the send/publish
 // handlers reported that null as "Duplicate — not re-broadcast". But a local-store
 // hit is NOT proof of delivery: a CMB stored while this node had no connected peer,
 // or on a prior send before a reconnect, blocks its own identical re-send forever,
@@ -333,7 +333,7 @@ const crypto = require('crypto');
 // ── input hygiene (0.3.39) — silent semantic drops must fail loudly ──────────────
 // Root-caused 2026-07-18: minds habitually call sym_publish/sym_send with a single
 // `content` param; the schema tolerated it as an unknown property and DROPPED it,
-// producing constant all-default fields whose hash collides — every call after the
+// producing constant all-default categories whose hash collides — every call after the
 // first answered "Duplicate" while the mind's actual content never reached the mesh.
 // Two rails: `content` maps to `focus` (the semantic repair — the habitual call now
 // carries meaning), and any OTHER unknown top-level param is a loud error.
@@ -349,13 +349,13 @@ function vetCmbArgs(args, extraKeys) {
 
 let deliveredCmbKeys = new Set();   // reset on hot-swap (sym_join_room)
 
-function cmbContentKey(fields) {
-  return crypto.createHash('sha256').update(JSON.stringify(fields)).digest('hex').slice(0, 32);
+function cmbContentKey(categories) {
+  return crypto.createHash('sha256').update(JSON.stringify(categories)).digest('hex').slice(0, 32);
 }
 // Directed deliveries are tagged per (contentKey, target) so identical content can
 // still be delivered to a different peer; broadcasts are tagged by content key only.
-function deliveryTag(fields, targetPeerId) {
-  return targetPeerId ? `${cmbContentKey(fields)}|${targetPeerId}` : cmbContentKey(fields);
+function deliveryTag(categories, targetPeerId) {
+  return targetPeerId ? `${cmbContentKey(categories)}|${targetPeerId}` : cmbContentKey(categories);
 }
 function connectedPeerCount(n) {
   try { const s = n.status && n.status(); return (s && s.peerCount) || (n.peers && n.peers().length) || 0; }
@@ -368,7 +368,7 @@ function connectedPeerCount(n) {
 // disambiguating salt so the operator's send reaches the mesh. okSummary(entry,
 // connected) builds the happy-path text so each caller keeps its verb; `now` is
 // injectable for deterministic tests. Returns { text, isError? }.
-function explicitSend(n, delivered, fields, sendOpts, okSummary, now) {
+function explicitSend(n, delivered, categories, sendOpts, okSummary, now) {
   const stamp = now || (() => new Date().toISOString());
   const targetPeerId = sendOpts.to || null;
   // A directed send resolved its target from the connected-peer list already, so its
@@ -376,15 +376,15 @@ function explicitSend(n, delivered, fields, sendOpts, okSummary, now) {
   // is connected to receive the fanned-out frame.
   const connected = targetPeerId ? true : connectedPeerCount(n) > 0;
 
-  const entry = n.remember(fields, sendOpts);
+  const entry = n.remember(categories, sendOpts);
   if (entry) {
-    if (connected) delivered.add(deliveryTag(fields, targetPeerId));
+    if (connected) delivered.add(deliveryTag(categories, targetPeerId));
     return { text: okSummary(entry, connected) };
   }
-  if (delivered.has(deliveryTag(fields, targetPeerId))) {
+  if (delivered.has(deliveryTag(categories, targetPeerId))) {
     return { text: `Duplicate — identical CMB already delivered${targetPeerId ? '' : ' to the room'}, not re-broadcast.` };
   }
-  const salted = Object.assign({}, fields, { focus: `${fields.focus} [re-sent ${stamp()}]` });
+  const salted = Object.assign({}, categories, { focus: `${categories.focus} [re-sent ${stamp()}]` });
   const retry = n.remember(salted, sendOpts);
   if (!retry) {
     return { text: 'Send failed: the prior copy was undelivered and the disambiguated re-send did not store (persist error). Nothing broadcast.', isError: true };
@@ -412,7 +412,7 @@ async function flushOutboxFor(peerName, peerId) {
     try {
       const opts = { to: peerId };
       if (item.opts && item.opts.payload !== undefined) opts.payload = item.opts.payload;
-      const r = explicitSend(node, deliveredCmbKeys, item.fields, opts, (entry) => `flushed ${entry.key}`);
+      const r = explicitSend(node, deliveredCmbKeys, item.categories, opts, (entry) => `flushed ${entry.key}`);
       if (!r.isError) sent.push(item.seq);
     } catch (e) {
       process.stderr.write(`sym-mesh-channel: outbox flush failed for #${item.seq}: ${e?.message || e}\n`);
@@ -462,15 +462,15 @@ function registerNodeHandlers(n) {
     if (entry.source === NODE_NAME || entry.cmb?.createdBy === NODE_NAME) return;
     const source = entry.source || entry.cmb?.createdBy || 'unknown';
     if (!isPeerAllowed(source)) return;
-    const fields = entry.cmb?.categories || {};
+    const categories = entry.cmb?.categories || {};
     const payload = entry.cmb?.payload;
-    const sec = checkSecurity(source, fields, payload);
+    const sec = checkSecurity(source, categories, payload);
     if (!sec.safe) { securityAudit(sec.reason, source, sec.excerpt); return; }
-    const focus = fields?.focus?.text || entry.content || '';
-    const mood = fields?.mood?.text || '';
+    const focus = categories?.focus?.text || entry.content || '';
+    const mood = categories?.mood?.text || '';
     const moodSuffix = mood && mood !== 'neutral' ? ` (mood: ${mood})` : '';
     // Store the rendered CMB body so the agent can sym_fetch it by [mNNN] ID.
-    // When the CMB carries an opaque payload alongside CAT7 fields, append a
+    // When the CMB carries an opaque payload alongside CAT7 categories, append a
     // PAYLOAD section to the stored body so sym_fetch returns it intact;
     // header gains a [+payload Nb] indicator so the receiver knows there's
     // structured data beyond CAT7 and should sym_fetch to consume it.
@@ -639,7 +639,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
           payload: {
             description:
-              'Optional opaque payload riding alongside CAT7 fields. Use when carrying data beyond ' +
+              'Optional opaque payload riding alongside CAT7 categories. Use when carrying data beyond ' +
               'CAT7 — e.g. an LLM request/response substrate protocol puts the prompt + request_id ' +
               'in `payload` rather than smuggling JSON through `motivation` (which is reserved for ' +
               'CAT7 semantics). Receivers see the payload via sym_fetch on the channel notification. ' +
@@ -674,7 +674,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
           payload: {
             description:
-              'Optional opaque payload riding alongside CAT7 fields. Use when broadcasting data ' +
+              'Optional opaque payload riding alongside CAT7 categories. Use when broadcasting data ' +
               'beyond CAT7 (e.g. llm-capability-advertise carrying served_capabilities). ' +
               'Any JSON-serializable value.',
           },
@@ -827,7 +827,7 @@ async function dispatchTool(request) {
       // route as a targeted send (§4.4.4); otherwise broadcast. Receivers
       // run SVAF (§9.2) and remix-store on accept — no separate "message"
       // frame path, no raw-text channel.
-      const fields = {
+      const categories = {
         focus: args.focus || 'directive',
         issue: args.issue || 'none',
         intent: args.intent || 'directive',
@@ -870,7 +870,7 @@ async function dispatchTool(request) {
               isError: true,
             };
           }
-          const h = outbox.hold(NODE_NAME, args.to, fields, {
+          const h = outbox.hold(NODE_NAME, args.to, categories, {
             payload: args.payload !== undefined ? args.payload : undefined,
           });
           if (!h.held) {
@@ -909,7 +909,7 @@ async function dispatchTool(request) {
       const sendOpts = {};
       if (targetPeerId) sendOpts.to = targetPeerId;
       if (args.payload !== undefined && args.payload !== null) sendOpts.payload = args.payload;
-      const r = explicitSend(node, deliveredCmbKeys, fields, sendOpts, (entry, connected) =>
+      const r = explicitSend(node, deliveredCmbKeys, categories, sendOpts, (entry, connected) =>
         targetPeerId
           ? `Sent CMB ${entry.key} to ${args.to}`
           : (connected
@@ -923,7 +923,7 @@ async function dispatchTool(request) {
         const argErr = vetCmbArgs(args, []);
         if (argErr) return { content: [{ type: 'text', text: argErr }], isError: true };
       }
-      const fields = {
+      const categories = {
         focus: args.focus || 'observation',
         issue: args.issue || 'none',
         intent: args.intent || 'observation',
@@ -934,7 +934,7 @@ async function dispatchTool(request) {
       };
       const observeOpts = {};
       if (args.payload !== undefined && args.payload !== null) observeOpts.payload = args.payload;
-      const r = explicitSend(node, deliveredCmbKeys, fields, observeOpts, (entry, connected) =>
+      const r = explicitSend(node, deliveredCmbKeys, categories, observeOpts, (entry, connected) =>
         connected
           ? `Published: ${entry.key}`
           : `Published locally: ${entry.key} — but NO peers are connected, so no one received it (not silently dropped).`);
@@ -1050,7 +1050,7 @@ async function dispatchTool(request) {
         // The security layer still gates the pull path: peer allowlist +
         // prompt-injection filter run on every message before it enters context.
         if (!isPeerAllowed(m.from)) return null;
-        // payload lives at m.payload (sibling of fields), not m.categories.payload.
+        // payload lives at m.payload (sibling of categories), not m.categories.payload.
         const sec = checkSecurity(m.from, m.categories || {}, m.payload);
         if (!sec.safe) { securityAudit(sec.reason, m.from, sec.excerpt); return null; }
         const age = Math.round((now - m.receivedAt) / 1000);
@@ -1367,13 +1367,13 @@ function isPeerAllowed(peerName) {
 // the last line of defence before content enters Claude's context.
 //
 // Attack model: a peer with a valid Ed25519 identity sends a CMB
-// whose fields look topically relevant (passes SVAF) but whose
+// whose categories look topically relevant (passes SVAF) but whose
 // content contains instruction-override patterns designed to hijack
 // the receiving Claude session ("ignore previous instructions",
 // role-play overrides, tool-call fabrication, etc.).
 //
 // Strategy: pattern-match on the serialized content of all CAT7
-// fields and the opaque payload. On match: block + audit-log to
+// categories and the opaque payload. On match: block + audit-log to
 // stderr. Never silently drop — the operator must be able to see
 // what was rejected and why.
 
@@ -1428,7 +1428,7 @@ function securityAudit(reason, peer, excerpt) {
 }
 
 // Returns { safe: true } or { safe: false, reason, excerpt }.
-function checkSecurity(peer, fields, payload) {
+function checkSecurity(peer, categories, payload) {
   // 1. Rate limit
   if (isRateLimited(peer)) {
     return { safe: false, reason: 'rate-limit', excerpt: `>${RATE_LIMIT} CMBs/min` };
@@ -1444,7 +1444,7 @@ function checkSecurity(peer, fields, payload) {
 
   // 3. Prompt injection scan across all text surfaces
   const surfaces = [
-    ...Object.values(fields || {}).map(v =>
+    ...Object.values(categories || {}).map(v =>
       typeof v === 'string' ? v : (typeof v === 'object' && v?.text ? v.text : '')
     ),
     payload !== undefined && payload !== null
