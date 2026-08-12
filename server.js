@@ -188,7 +188,7 @@ async function discoverRooms() {
 
 // ── Engineering-domain field weights (SVAF α_f) ──────────────
 
-const FIELD_WEIGHTS = {
+const CATEGORY_WEIGHTS = {
   focus: 2.0,       // code, architecture, technical decisions
   issue: 2.0,       // bugs, blockers, technical debt
   intent: 1.5,      // what needs building
@@ -306,7 +306,7 @@ let node = new SymNode({
   name: NODE_NAME,
   autoSuffix: NODE_AUTOSUFFIX,   // engine handles collision (start-time-verified); off for pinned names
   cognitiveProfile: 'Engineering node. Code, architecture, debugging, technical decisions.',
-  svafFieldWeights: FIELD_WEIGHTS,
+  svafFieldWeights: CATEGORY_WEIGHTS,
   svafFreshnessSeconds: 7200, // 2hr — session-length context
   discoveryServiceType: SERVICE_TYPE,
   room: ROOM,
@@ -1237,7 +1237,7 @@ async function dispatchTool(request) {
         name: NODE_NAME,
         autoSuffix: NODE_AUTOSUFFIX,   // same stable identity across a room hot-swap
         cognitiveProfile: 'Engineering node. Code, architecture, debugging, technical decisions.',
-        svafFieldWeights: FIELD_WEIGHTS,
+        svafFieldWeights: CATEGORY_WEIGHTS,
         svafFreshnessSeconds: 7200,
         discoveryServiceType: newServiceType,
         room,
