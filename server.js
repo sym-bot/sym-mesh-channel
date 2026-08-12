@@ -62,11 +62,11 @@ const KEBAB_CASE_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 //    a module-level function so it's trivially unit-testable and the
 //    same regex doesn't drift between two call sites.
 
-// `group` stays accepted FOREVER: invites are parsed by SHIPPED apps and emitted by shipped
-// apps, and neither can be updated retroactively. The rename to `room` is vocabulary for
-// humans and new code; the wire accepts both. (The previous regex read `room|room` — a blind
-// replace had clobbered the legacy alternative, so shipped MeloTune invites were rejected.)
-const INVITE_URL_RE = /^([a-z][a-z0-9-]+):\/\/(?:group|room|team)\/([^/?#]+)(?:\/([^?#]+))?(?:\?(.+))?$/i;
+// ONE VOCABULARY: room (LAN) and team (relay). Founder ruling 2026-08-12 — the legacy scheme
+// is removed everywhere rather than carried, to keep one name in front of users. RELEASE
+// ORDER IS LOAD-BEARING: this ships only after the App-side parsers accept sym://room, so the
+// fix precedes the break it would otherwise cause in shipped apps.
+const INVITE_URL_RE = /^([a-z][a-z0-9-]+):\/\/(?:room|team)\/([^/?#]+)(?:\/([^?#]+))?(?:\?(.+))?$/i;
 
 function parseInviteURL(url) {
   const m = INVITE_URL_RE.exec(url);
@@ -1147,13 +1147,7 @@ async function dispatchTool(request) {
         url = `sym://team/${room}?${params.join('&')}`;
         flavor = 'cross-network (relay)';
       } else {
-        // EMIT THE LEGACY SCHEME, deliberately. Shipped MeloTune parses only sym://group/
-        // (SymMeshService.swift:352) and an App Store binary cannot be updated from here.
-        // Parsers on THIS side accept both (see INVITE_URL_RE), so emitting the old form is
-        // compatible with everyone; emitting the new form is compatible only with ourselves.
-        // Flip to sym://room/ only after the installed parser fleet accepts both — readers
-        // migrate first, the emitter flips last. Same order as every wire rename here.
-        url = `sym://group/${room}`;
+        url = `sym://room/${room}`;
         flavor = 'LAN-only (Bonjour)';
       }
       const youRunning = ROOM === room
