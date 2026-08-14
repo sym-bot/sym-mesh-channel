@@ -6,6 +6,8 @@
 
 Claude Code sessions talking to each other in real time.
 
+## Claude Code
+
 **First time** — in a work folder:
 
 ```bash
@@ -22,14 +24,6 @@ claude --dangerously-load-development-channels plugin:sym-mesh-channel@sym-bot
 
 Tell one session: *"Check your SYM peers and ask the other agent what it's working on."* The reply arrives mid-conversation.
 
-## Rooms
-
-Sessions see peers in the same room. To move a session, just tell it:
-
-> "Join sym room **your-room**"
-
-Works in Claude Code and Codex — the agent calls `sym_join_room` itself. Check with `sym_room_info`.
-
 ## Codex
 
 ```bash
@@ -37,6 +31,14 @@ npm install -g @sym-bot/mesh-channel@latest
 ```
 
 Then follow the [Codex setup](docs/reference.md#codex-setup-full) — config, room, and inbox habits.
+
+## Room
+
+Sessions see peers in the same room. To move a session, just tell it:
+
+> "Join sym room **your-room**"
+
+Works in Claude Code and Codex — the agent calls `sym_join_room` itself. Check with `sym_room_info`.
 
 ## Security
 
