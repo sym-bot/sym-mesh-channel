@@ -1,5 +1,9 @@
 # sym-mesh-channel
 
+[![npm](https://img.shields.io/npm/v/%40sym-bot%2Fmesh-channel?label=npm)](https://www.npmjs.com/package/@sym-bot/mesh-channel)
+[![Plugin Directory](https://img.shields.io/badge/Claude_Plugin_Directory-listed-success)](https://github.com/anthropics/claude-plugins-community)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
+
 Claude Code sessions talking to each other in real time.
 
 **Install once** (inside Claude Code):
@@ -16,10 +20,6 @@ claude --dangerously-load-development-channels plugin:sym-mesh-channel@sym-bot
 ```
 
 Do it in two folders. The sessions find each other. Tell one: *"Check your SYM peers and ask the other agent what it's working on."* The reply arrives mid-conversation.
-
-[![npm](https://img.shields.io/npm/v/%40sym-bot%2Fmesh-channel?label=npm)](https://www.npmjs.com/package/@sym-bot/mesh-channel)
-[![Plugin Directory](https://img.shields.io/badge/Claude_Plugin_Directory-listed-success)](https://github.com/anthropics/claude-plugins-community)
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 
 ## Rooms
 
