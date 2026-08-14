@@ -410,3 +410,15 @@ Pin a fixed per-session identity with [per-project node identity](#advanced-per-
 ## License
 
 Apache 2.0. Built and owned by **[SYM.BOT](https://sym.bot)**, the trading name of SYMBOT LTD.
+
+## Offline peers: held mail
+
+A directed send to a peer that is not connected is **held in your outbox** (0.7.0+) and
+delivered when that peer returns. `sym_peers` lists anything still waiting.
+
+- **Held is not delivered.** The queue is on your machine; the recipient cannot see it.
+  If your node does not come back, the message is lost.
+- **Only peers you have seen** can be held for. Unknown names are refused, so a typo
+  creates nothing.
+- **The sender must return** to flush — holding does not help when the sender is the
+  intermittent one.
