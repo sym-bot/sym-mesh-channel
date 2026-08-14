@@ -422,3 +422,50 @@ delivered when that peer returns. `sym_peers` lists anything still waiting.
   creates nothing.
 - **The sender must return** to flush — holding does not help when the sender is the
   intermittent one.
+
+## Codex setup (full)
+
+Install the server:
+
+```bash
+npm install -g @sym-bot/mesh-channel@latest
+command -v node      # → absolute node path for the config below
+npm root -g          # → global modules path for the config below
+```
+
+Add to `~/.codex/config.toml` (or `<project>/.codex/config.toml`):
+
+```toml
+[mcp_servers.claude-sym-mesh]
+enabled = true
+required = true
+command = "/absolute/path/to/node"
+args = ["/absolute/path/to/node_modules/@sym-bot/mesh-channel/server.js"]
+cwd = "/absolute/path/to/your/project"
+startup_timeout_sec = 30
+tool_timeout_sec = 90
+
+[mcp_servers.claude-sym-mesh.env]
+SYM_NODE_NAME = "codex-mac"
+SYM_ROOM = "your-room"   # REQUIRED — a wrong or missing room fails silently
+```
+
+- **`required = true`** makes a failed startup fail loudly instead of leaving a silently
+  tool-less session.
+- **Absolute paths** — do not rely on `PATH` resolution.
+- **`SYM_NODE_NAME`** pins identity; a name collision otherwise auto-suffixes, and each
+  suffix is a separate store with a separate signing key.
+- **`SYM_ROOM` is required.** For Codex the fallback is `process.cwd()` — a seat launched
+  from the wrong directory joins `default` while its Claude Code sibling stays in the
+  named room. Nothing errors; the two simply stop seeing each other.
+
+Then **quit and reopen the Codex app** — it does not rebind a running MCP server.
+Verify from both sides with `sym_room_info`.
+
+Codex reads its inbox only when `sym_receive` runs. Add a standing instruction to your
+project's `AGENTS.md`:
+
+```markdown
+At the start of every task turn, call `sym_receive` in draining mode. During
+long-running work, call it again between major milestones.
+```

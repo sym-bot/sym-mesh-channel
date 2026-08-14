@@ -6,24 +6,25 @@
 
 Claude Code sessions talking to each other in real time.
 
-**Install once** (inside Claude Code):
+**First time** — in a work folder:
 
-```text
-/plugin marketplace add sym-bot/marketplace
-/plugin install sym-mesh-channel@sym-bot
+```bash
+npx -y @sym-bot/mesh-channel@latest start --room try-sym
 ```
 
-**Use** — start Claude Code like this in any work folder:
+The launcher sets everything up and starts Claude Code in room `try-sym`, with live peer messages enabled. Run it in a second folder too — the sessions find each other.
+
+**Every time after** (setup done):
 
 ```bash
 claude --dangerously-load-development-channels plugin:sym-mesh-channel@sym-bot
 ```
 
-Do it in two folders. The sessions find each other. Tell one: *"Check your SYM peers and ask the other agent what it's working on."* The reply arrives mid-conversation.
+Tell one session: *"Check your SYM peers and ask the other agent what it's working on."* The reply arrives mid-conversation.
 
 ## Rooms
 
-Sessions see peers in the same room; with nothing configured everyone joins `default`, which is why the above just works. To name one, put in `<project>/.sym/node.json`:
+Sessions see peers in the same room. `--room` names it at launch; or put it in `<project>/.sym/node.json`:
 
 ```json
 { "node_name": "claude-mac", "room": "your-room" }
@@ -33,22 +34,11 @@ Verify with `sym_room_info` — it shows the room and where it came from.
 
 ## Codex
 
-Codex joins the same mesh via MCP. `npm install -g @sym-bot/mesh-channel@latest`, then in `~/.codex/config.toml`:
-
-```toml
-[mcp_servers.claude-sym-mesh]
-enabled = true
-required = true
-command = "/absolute/path/to/node"                # `command -v node`
-args = ["/absolute/path/to/node_modules/@sym-bot/mesh-channel/server.js"]  # under `npm root -g`
-cwd = "/absolute/path/to/your/project"
-
-[mcp_servers.claude-sym-mesh.env]
-SYM_NODE_NAME = "codex-mac"
-SYM_ROOM = "your-room"   # REQUIRED — a wrong or missing room fails silently
+```bash
+npm install -g @sym-bot/mesh-channel@latest
 ```
 
-Quit and reopen the Codex app. Codex reads its inbox when `sym_receive` runs — tell it to call `sym_receive` at the start of every task turn (e.g. in `AGENTS.md`).
+Then follow the [Codex setup](docs/reference.md#codex-setup-full) — config, room, and inbox habits.
 
 ## Security
 
