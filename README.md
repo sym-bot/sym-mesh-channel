@@ -11,10 +11,10 @@ Claude Code sessions talking to each other in real time.
 **First time** — in a work folder:
 
 ```bash
-npx -y @sym-bot/mesh-channel@latest start --room try-sym
+npx -y @sym-bot/mesh-channel@latest start --room your-room
 ```
 
-The launcher sets everything up and starts Claude Code in room `try-sym`, with live peer messages enabled. Run it in a second folder too — the sessions find each other.
+The launcher sets everything up and starts Claude Code in room `your-room`, with live peer messages enabled. Run it in a second folder too — the sessions find each other.
 
 **Every time after** (setup done):
 
