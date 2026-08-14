@@ -1,95 +1,59 @@
 # sym-mesh-channel
 
-**Real-time communication between Claude Code sessions.** Start two sessions with one command each; they discover each other and talk mid-conversation — no copy-paste, no polling, no human message bus.
+Claude Code sessions talking to each other in real time.
 
-[![npm](https://img.shields.io/npm/v/%40sym-bot%2Fmesh-channel?label=npm)](https://www.npmjs.com/package/@sym-bot/mesh-channel)
-[![Plugin Directory](https://img.shields.io/badge/Claude_Plugin_Directory-listed-success)](https://github.com/anthropics/claude-plugins-community)
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
-[![Node](https://img.shields.io/badge/node-%E2%89%A518-green)](https://nodejs.org)
-
-## Start
-
-**One-time setup** (inside any Claude Code session):
+**Install once** (inside Claude Code):
 
 ```text
 /plugin marketplace add sym-bot/marketplace
 /plugin install sym-mesh-channel@sym-bot
 ```
 
-**Then, every time:** go to a work folder and start Claude Code with real-time channels:
+**Use** — start Claude Code like this in any work folder:
 
 ```bash
-cd your-project
 claude --dangerously-load-development-channels plugin:sym-mesh-channel@sym-bot
 ```
 
-Do the same in a second folder — another terminal, another repository, or another machine on the same network. The sessions find each other automatically.
+Do it in two folders. The sessions find each other. Tell one: *"Check your SYM peers and ask the other agent what it's working on."* The reply arrives mid-conversation.
 
-Try it:
+[![npm](https://img.shields.io/npm/v/%40sym-bot%2Fmesh-channel?label=npm)](https://www.npmjs.com/package/@sym-bot/mesh-channel)
+[![Plugin Directory](https://img.shields.io/badge/Claude_Plugin_Directory-listed-success)](https://github.com/anthropics/claude-plugins-community)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 
-> **Session 1:** "Check your SYM peers, then ask the other agent what it is working on."
-> **Session 2:** "Check SYM and reply to the requesting agent."
+## Rooms
 
-The reply arrives in the middle of the other session's conversation. Run `sym_peers` in either session to confirm the link.
-
-## Join a room
-
-Sessions see only peers in the same room. With nothing configured, everyone joins `default` — that is why the start above just works.
-
-To put a session in a named room, create `<project>/.sym/node.json`:
+Sessions see peers in the same room; with nothing configured everyone joins `default`, which is why the above just works. To name one, put in `<project>/.sym/node.json`:
 
 ```json
 { "node_name": "claude-mac", "room": "your-room" }
 ```
 
-Or set `SYM_ROOM` in the environment (takes precedence). To switch a running session, ask it to call `sym_join_room`. Verify with `sym_room_info` — it reports the room **and where the room came from**.
+Verify with `sym_room_info` — it shows the room and where it came from.
 
-## Use with Codex
+## Codex
 
-Codex joins the same mesh through an MCP server. Install it:
-
-```bash
-npm install -g @sym-bot/mesh-channel@latest
-command -v node      # → the absolute node path for the config below
-npm root -g          # → the global modules path for the config below
-```
-
-Add to `~/.codex/config.toml` (or `<project>/.codex/config.toml`):
+Codex joins the same mesh via MCP. `npm install -g @sym-bot/mesh-channel@latest`, then in `~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.claude-sym-mesh]
 enabled = true
 required = true
-command = "/absolute/path/to/node"
-args = ["/absolute/path/to/node_modules/@sym-bot/mesh-channel/server.js"]
+command = "/absolute/path/to/node"                # `command -v node`
+args = ["/absolute/path/to/node_modules/@sym-bot/mesh-channel/server.js"]  # under `npm root -g`
 cwd = "/absolute/path/to/your/project"
-startup_timeout_sec = 30
-tool_timeout_sec = 90
 
 [mcp_servers.claude-sym-mesh.env]
 SYM_NODE_NAME = "codex-mac"
-SYM_ROOM = "your-room"        # REQUIRED — a wrong or missing room fails silently
+SYM_ROOM = "your-room"   # REQUIRED — a wrong or missing room fails silently
 ```
 
-Then **quit and reopen the Codex app** (it does not rebind a running MCP server), and verify from both sides with `sym_room_info`.
-
-Codex does not wake when a message arrives — it reads its inbox when `sym_receive` runs. Add to your project's `AGENTS.md`:
-
-```markdown
-At the start of every task turn, call `sym_receive` in draining mode. During
-long-running work, call it again between major milestones.
-```
+Quit and reopen the Codex app. Codex reads its inbox when `sym_receive` runs — tell it to call `sym_receive` at the start of every task turn (e.g. in `AGENTS.md`).
 
 ## Security
 
-- **Peer messages are external input.** Treat them like any untrusted content: keep human approval for consequential actions.
-- A room name or relay token is **not** a complete enterprise trust boundary.
-- Corporate networks may block Bonjour/mDNS; use a relay when discovery fails.
-
-Read [SECURITY.md](SECURITY.md) before carrying sensitive material.
+Peer messages are **external input** — keep human approval for consequential actions. A room name or relay token is not an enterprise trust boundary. See [SECURITY.md](SECURITY.md).
 
 ---
 
-Everything else — tools, rooms in depth, relays, offline delivery, troubleshooting — is in the **[reference](docs/reference.md)**.
-
-Built on the open [Mesh Memory Protocol (MMP)](https://meshcognition.org/spec/mmp) by **[SYM.BOT](https://sym.bot)** (SYMBOT LTD). Apache 2.0 — [LICENSE](LICENSE).
+Tools, relays, offline delivery, troubleshooting: **[reference](docs/reference.md)**. Built on [MMP](https://meshcognition.org/spec/mmp) by [SYM.BOT](https://sym.bot). Apache 2.0.
