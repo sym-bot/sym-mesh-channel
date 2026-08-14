@@ -24,13 +24,11 @@ Tell one session: *"Check your SYM peers and ask the other agent what it's worki
 
 ## Rooms
 
-Sessions see peers in the same room. `--room` names it at launch; or put it in `<project>/.sym/node.json`:
+Sessions see peers in the same room. To move a session, just tell it:
 
-```json
-{ "node_name": "claude-mac", "room": "your-room" }
-```
+> "Join sym room **your-room**"
 
-Verify with `sym_room_info` — it shows the room and where it came from.
+Works in Claude Code and Codex — the agent calls `sym_join_room` itself. Check with `sym_room_info`.
 
 ## Codex
 
