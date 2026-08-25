@@ -502,7 +502,11 @@ function registerNodeHandlers(n) {
     let header;
     if (risk.risky) {
       securityAudit(`classifier-risk:${risk.terms.join(',')}`, source, focus);
-      header = quarantineHeader(source, dirTag, risk.terms.length, `${memTag}${payloadSuffix}`);
+      // m122: a quarantined header that says only 'sym_fetch to view' gets ignored — the
+      // observed failure is the fetch round-trip NOT happening, twice this week (m034, the
+      // m053 original). Field NAMES and sizes are OUR vocabulary, not peer free-text, so the
+      // elision tag is safe here and tells the receiver substance exists and where.
+      header = quarantineHeader(source, dirTag, risk.terms.length, `${memTag}${payloadSuffix}${hiddenFieldsTag(categories)}`);
     } else {
       // m053: the header carries focus only — say what it cannot carry, explicitly.
       header = `[${source}${dirTag}] ${focus}${moodSuffix}${memTag}${payloadSuffix}${hiddenFieldsTag(categories)}`;

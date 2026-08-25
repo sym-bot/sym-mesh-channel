@@ -36,3 +36,10 @@ test('m053: multiple heavy fields are all named', () => {
 test('m053: plain-string categories (no .text wrapper) are read too', () => {
   assert.match(hiddenFieldsTag({ commitment: 'c'.repeat(200) }), /\+commitment 200b/);
 });
+
+test('m122: the quarantine header carries the elision tag — substance is announced even when text cannot be', () => {
+  // the tag is OUR vocabulary (field names + sizes), never peer free-text, so it is safe on
+  // the metadata-only quarantine surface — and it is what makes the fetch round-trip happen.
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src, /quarantineHeader\(source, dirTag, risk\.terms\.length, `\$\{memTag\}\$\{payloadSuffix\}\$\{hiddenFieldsTag\(categories\)\}`\)/);
+});
