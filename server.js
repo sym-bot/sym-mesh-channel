@@ -51,6 +51,7 @@ const {
 } = require('@modelcontextprotocol/sdk/types.js');
 const { SymNode } = require('@sym-bot/sym');
 const { scanClassifierRisk, quarantineHeader } = require('./classifier-risk.js');
+const { hiddenFieldsTag } = require('./surface-truth.js');
 const { resolveIdentity } = require('./identity.js');
 const outbox = require('./outbox.js');
 
@@ -503,7 +504,8 @@ function registerNodeHandlers(n) {
       securityAudit(`classifier-risk:${risk.terms.join(',')}`, source, focus);
       header = quarantineHeader(source, dirTag, risk.terms.length, `${memTag}${payloadSuffix}`);
     } else {
-      header = `[${source}${dirTag}] ${focus}${moodSuffix}${memTag}${payloadSuffix}`;
+      // m053: the header carries focus only — say what it cannot carry, explicitly.
+      header = `[${source}${dirTag}] ${focus}${moodSuffix}${memTag}${payloadSuffix}${hiddenFieldsTag(categories)}`;
     }
     const msgId = storeMessage(source, body, header);
     pushChannel('cmb', `${header} [${msgId}]`);
@@ -1061,7 +1063,10 @@ async function dispatchTool(request) {
         const payTag = (m.payload !== undefined && m.payload !== null) ? ' [+payload]' : '';
         const flat = String(focus).replace(/\s+/g, ' ');
         const cutTag = flat.length > 90 ? '\u2026' : '';
-        return `[${m.from}${dirTag}] ${flat.slice(0, 90)}${cutTag}${memTag}${payTag} [${m.id}] (${age}s ago)`;
+        // m053: this line shows the focus' first 90 chars and NOTHING of the other fields —
+        // a bare-focus CMB and one hauling 1.4KB of commitment were indistinguishable here,
+        // and a receiver replied to the header. The elision is now explicit.
+        return `[${m.from}${dirTag}] ${flat.slice(0, 90)}${cutTag}${memTag}${payTag}${hiddenFieldsTag(m.categories)} [${m.id}] (${age}s ago)`;
       }).filter(Boolean);
       if (!lines.length) {
         return { content: [{ type: 'text', text: 'Caught up — nothing new delivered since your last sym_receive.' }] };
