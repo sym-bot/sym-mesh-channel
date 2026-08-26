@@ -56,7 +56,7 @@ const { resolveIdentity } = require('./identity.js');
 const outbox = require('./outbox.js');
 
 // Kebab-case validator shared by room-related tools.
-const KEBAB_CASE_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const KEBAB_CASE_RE = /^[a-z0-9]+(?:--?[a-z0-9]+)*$/; // double hyphen = tenant-suffix grammar (ruling 2026-08-26); keep in lockstep with sym lib/rooms.js
 
 // ── Invite URL parsing (shared by sym_invite_info and the internal
 //    validation path for sym_join_room when passed a URL). Exposed as
