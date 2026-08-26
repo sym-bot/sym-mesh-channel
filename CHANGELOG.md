@@ -4,10 +4,12 @@
 
 ### Changed
 
-- **Surface truth ships (first publish since m053).** `sym_receive` lines, push headers and
-  quarantine headers carry the hidden-fields tag when SVAF muted categories — the read
-  surface says what it cannot show. Landed 2026-08-25; this is its first published release,
-  and the pack gate caught that the module had never entered the files allowlist.
+- **The read surface says what it cannot show.** `sym_receive` lines, push headers and
+  quarantine headers carry an explicit tag when the receiving membrane muted individual
+  fields of a message — an entry that shows less than its sender wrote now says so instead
+  of reading as complete. Landed in source on 2026-08-25; this is its first published
+  release, because this package's own publish gate refused to ship until the new module was
+  actually in the tarball. The published 0.8.0 predates the feature and was never affected.
 - **Tenant-suffixed room names are legal in `sym_invite_create` and the installer.** Both
   copies of the room grammar (server and `bin/install.js` — the persistence path) accept a
   double hyphen as a segment separator, in lockstep with sym 0.12.3; the validator's error
