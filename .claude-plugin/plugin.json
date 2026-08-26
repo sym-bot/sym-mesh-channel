@@ -1,6 +1,6 @@
 {
   "name": "sym-mesh-channel",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "Real-time Claude-to-Claude mesh. Sessions on one machine (loopback), a shared LAN (Bonjour), or across networks (WebSocket relay) discover each other and exchange typed cognitive signals as channel notifications \u2014 no polling.",
   "author": {
     "name": "Hongwei Xu",

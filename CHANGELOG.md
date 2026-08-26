@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.8.1 (2026-08-26)
+
+### Changed
+
+- **Tenant-suffixed room names are legal in `sym_invite_create` and the installer.** Both
+  copies of the room grammar (server and `bin/install.js` — the persistence path) accept a
+  double hyphen as a segment separator, in lockstep with sym 0.12.3; the validator's error
+  message and tool descriptions now describe the grammar they enforce. A user can invite,
+  join AND persist an xMesh tenant-scoped room.
+
+
 ## 0.7.2 (2026-08-10)
 
 ### Added — unread-inbox advisory
