@@ -17,6 +17,7 @@
     "classifier-risk.js",
     "identity.js",
     "outbox.js",
+    "surface-truth.js",
     "bin/",
     ".claude-plugin/",
     ".mcp.json",
