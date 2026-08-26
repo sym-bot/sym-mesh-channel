@@ -738,7 +738,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       inputSchema: {
         type: 'object',
         properties: {
-          room: { type: 'string', description: 'Kebab-case room name, e.g. "backend-team".' },
+          room: { type: 'string', description: 'Kebab-case room name (single or double hyphens), e.g. "backend-team" or a tenant-suffixed "x-review--team-…".' },
           relay_url: { type: 'string', description: 'Optional WebSocket relay URL, e.g. wss://sym-relay.onrender.com. Include for cross-network teams.' },
           relay_token: { type: 'string', description: 'Optional relay authentication token (shared secret for this team channel).' },
         },
@@ -760,7 +760,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       inputSchema: {
         type: 'object',
         properties: {
-          room: { type: 'string', description: 'Kebab-case room name, e.g. "backend-team". Pass "default" to return to the global mesh.' },
+          room: { type: 'string', description: 'Kebab-case room name (single or double hyphens), e.g. "backend-team" or a tenant-suffixed "x-review--team-…". Pass "default" to return to the global mesh.' },
           relay_url: { type: 'string', description: 'Optional WebSocket relay URL for cross-network teams. Leave empty for LAN-only.' },
           relay_token: { type: 'string', description: 'Optional relay authentication token.' },
         },
@@ -1140,7 +1140,7 @@ async function dispatchTool(request) {
         return {
           content: [{
             type: 'text',
-            text: `Invalid room name: "${room}". Must be kebab-case (lowercase alphanumerics + single hyphens), e.g. "backend-team".`,
+            text: `Invalid room name: "${room}". Must be kebab-case (lowercase alphanumerics + single or double hyphens), e.g. "backend-team" or "x-review--team-02779b…".`,
           }],
           isError: true,
         };

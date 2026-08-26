@@ -67,7 +67,7 @@ try {
   if (n) process.stderr.write(`[sym-mesh-channel] migrated ${n} node store(s): meshmem → cmbs\n`);
 } catch { /* SDK not resolvable or nothing to do — non-fatal */ }
 
-const KEBAB_CASE_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const KEBAB_CASE_RE = /^[a-z0-9]+(?:--?[a-z0-9]+)*$/; // lockstep with server.js and sym lib/rooms.js (grammar review F1: this fourth copy gated the PERSISTENCE path)
 function validateRoomValue(value, source) {
   if (!value) return;
   if (value === 'default') return;

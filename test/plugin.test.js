@@ -900,8 +900,8 @@ function spawnInstallerCapture(args, opts = {}) {
 // is the authoritative one; this mirror is kept tight and regenerated
 // if the authoritative version changes.
 
-const INVITE_URL_RE = /^([a-z][a-z0-9-]+):\/\/(?:room|room|team)\/([^/?#]+)(?:\/([^?#]+))?(?:\?(.+))?$/i;
-const KEBAB_CASE_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const INVITE_URL_RE = /^([a-z][a-z0-9-]+):\/\/(?:room|team)\/([^/?#]+)(?:\/([^?#]+))?(?:\?(.+))?$/i;
+const KEBAB_CASE_RE = /^[a-z0-9]+(?:--?[a-z0-9]+)*$/; // regenerated from server.js (grammar review F5: the mirror had drifted — stale grammar AND a duplicated alternative)
 
 function parseInviteURL(url) {
   const m = INVITE_URL_RE.exec(url);
@@ -988,6 +988,7 @@ console.log('\nInvite URL — create + round-trip:');
 
 test('buildInviteURL(room) returns sym://room/{name}', () => {
   assert.strictEqual(buildInviteURL({ room: 'backend-team' }), 'sym://room/backend-team');
+  assert.strictEqual(buildInviteURL({ room: 'x-review--team-02779b950c3d8d7378fd11d6' }), 'sym://room/x-review--team-02779b950c3d8d7378fd11d6'); // tenant-suffix grammar (ruling 2026-08-26)
 });
 
 test('buildInviteURL(room, relay, token) returns sym://team/ with query string', () => {
@@ -1005,6 +1006,7 @@ test('buildInviteURL rejects invalid room name', () => {
   assert.throws(() => buildInviteURL({ room: 'Bad Room' }), /invalid room/);
   assert.throws(() => buildInviteURL({ room: 'UPPERCASE' }), /invalid room/);
   assert.throws(() => buildInviteURL({ room: '-leading-hyphen' }), /invalid room/);
+  assert.throws(() => buildInviteURL({ room: 'a---b' }), /invalid room/); // triple stays out
   assert.throws(() => buildInviteURL({ room: 'trailing-hyphen-' }), /invalid room/);
 });
 
