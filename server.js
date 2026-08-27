@@ -55,8 +55,25 @@ const { hiddenFieldsTag } = require('./surface-truth.js');
 const { resolveIdentity } = require('./identity.js');
 const outbox = require('./outbox.js');
 
-// Kebab-case validator shared by room-related tools.
-const KEBAB_CASE_RE = /^[a-z0-9]+(?:--?[a-z0-9]+)*$/; // double hyphen = tenant-suffix grammar (ruling 2026-08-26); keep in lockstep with sym lib/rooms.js
+// Room-name grammar and the room->service-type mapping come from the SDK, which
+// is their single source of truth (@sym-bot/sym >= 0.12.3 exports `rooms`).
+//
+// A room name IS the Bonjour service type, so a validator that disagrees with the
+// SDK's by one character means two nodes disagree about whether a room exists.
+// This file and bin/install.js each used to keep their own copy of the regex; both
+// drifted from the SDK, and the install.js copy silently gated the persistence path
+// while this one accepted the same name. A copy cannot drift if there is no copy.
+// The SDK's own `rooms` export is the destination (sym cac00f2), but it is
+// committed and NOT yet published — 0.12.3's tarball carries lib/rooms.js
+// without the top-level re-export. Prefer the export the moment it ships;
+// until then deep-import the same module, which the published tarball does
+// contain and which package.json exposes (no `exports` map). Either path
+// yields the identical regex, so this cannot become a third grammar.
+function sdkRooms() {
+  const sdk = require('@sym-bot/sym');
+  return sdk.rooms || require('@sym-bot/sym/lib/rooms.js');
+}
+const { isValidRoom, roomServiceType, serviceTypeToRoom } = sdkRooms();
 
 // ── Invite URL parsing (shared by sym_invite_info and the internal
 //    validation path for sym_join_room when passed a URL). Exposed as
@@ -94,8 +111,10 @@ function parseInviteURL(url) {
   // For sym:// the path element IS the room name. For app-scoped URLs
   // (melotune://, melomove://, etc.) the path is the room id and the
   // room is prefixed with the app name to avoid collisions.
-  const serviceType = appScheme === 'sym' ? `_${rawId}._tcp` : `_${appScheme}-${rawId}._tcp`;
   const room = appScheme === 'sym' ? rawId : `${appScheme}-${rawId}`;
+  // Derive the service type FROM the room rather than building both in
+  // parallel: two expressions that must agree are two chances to disagree.
+  const serviceType = roomServiceType(room);
   return {
     appScheme,
     room,
@@ -271,8 +290,7 @@ function resolveServiceType() {
   const explicit = process.env.SYM_SERVICE_TYPE;
   if (explicit) return explicit;
   const room = process.env.SYM_ROOM || PROJECT_CFG.room;
-  if (room && room !== 'default') return `_${room}._tcp`;
-  return '_sym._tcp';
+  return roomServiceType(room);
 }
 // Resolve the room AND say where it came from, from one function, so the
 // answer and the explanation can never drift apart.
@@ -287,11 +305,9 @@ function resolveServiceType() {
 function resolveRoom(serviceType) {
   if (process.env.SYM_ROOM) return { room: process.env.SYM_ROOM, source: 'SYM_ROOM env' };
   if (PROJECT_CFG.room) return { room: PROJECT_CFG.room, source: PROJECT_CFG.file };
-  if (serviceType !== '_sym._tcp') {
-    return {
-      room: serviceType.replace(/^_/, '').replace(/\._tcp$/, ''),
-      source: 'SYM_SERVICE_TYPE env',
-    };
+  const fromServiceType = serviceTypeToRoom(serviceType);
+  if (fromServiceType !== 'default') {
+    return { room: fromServiceType, source: 'SYM_SERVICE_TYPE env' };
   }
   return { room: 'default', source: 'nothing configured — this is the fallback, not a choice' };
 }
@@ -1136,7 +1152,7 @@ async function dispatchTool(request) {
       if (!room || typeof room !== 'string') {
         return { content: [{ type: 'text', text: 'Missing required argument: room' }], isError: true };
       }
-      if (!KEBAB_CASE_RE.test(room)) {
+      if (!isValidRoom(room) || room === 'default') {
         return {
           content: [{
             type: 'text',
@@ -1218,14 +1234,14 @@ async function dispatchTool(request) {
       if (!room || typeof room !== 'string') {
         return { content: [{ type: 'text', text: 'Missing required argument: room' }], isError: true };
       }
-      if (!KEBAB_CASE_RE.test(room) && room !== 'default') {
+      if (!isValidRoom(room)) {
         return {
           content: [{ type: 'text', text: `Invalid room name: "${room}". Must be kebab-case or "default".` }],
           isError: true,
         };
       }
 
-      const newServiceType = room === 'default' ? '_sym._tcp' : `_${room}._tcp`;
+      const newServiceType = roomServiceType(room);
       const prevRoom = ROOM;
       const prevServiceType = SERVICE_TYPE;
 
