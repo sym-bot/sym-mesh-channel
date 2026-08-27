@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.9.0 (2026-08-27)
+
+### Changed — one room grammar, and a dependency range that can actually reach it
+
+`@sym-bot/sym` moves to `^0.13.0`. The previous range was `^0.11.3`, and for a **0.x**
+package caret means `<0.12.0` — so this package could never resolve past 0.11.x however
+often the SDK shipped. That range, not lag, is why a local copy of the room grammar existed
+here at all.
+
+`server.js` now declares no room grammar and no room-to-service-type mapping of its own;
+`isValidRoom`, `roomServiceType` and `serviceTypeToRoom` all come from the SDK, which is
+their single source of truth. Collapsing them removed three separate inline
+`` `_${room}._tcp` `` constructions — in `sym_join_room`, in `resolveRoom`'s hand-rolled
+inverse, and in the invite parser, which built the room and the service type as two parallel
+expressions that had to agree and had no reason to. Deriving one from the other fixed a
+user-visible bug in passing: a `sym://default` invite produced `_default._tcp` rather than
+the global mesh.
+
+`bin/install.js` keeps one guarded mirror of the grammar, because install has to validate a
+room name in situations where the SDK cannot be resolved. A test asserts the mirror is
+character-identical to the SDK's regex, so it fails the day they diverge rather than the day
+someone joins a room.
+
+### Added — room names must be canonical
+
+Founder ruling, 2026-08-27: one name per room, one room per name. Both join gates now
+require the round trip through the service type to be identity, so **`sym` is refused** — it
+satisfies the grammar but maps to `_sym._tcp`, whose inverse is `default`, so joining it put
+this node in the global mesh while it reported being somewhere specific.
+
+The check is written as the **property**, computed from the SDK's mapping in both directions,
+rather than as a second copy of the grammar — which is what let it work before the SDK
+enforced canonicity itself, and what makes it merely redundant now rather than wrong.
+
+A refusal now names the reason that applies to the name refused. `sym` **is** kebab-case, so
+the old "must be kebab-case" sent its author to fix something that was never wrong; a
+non-canonical name is now told which room it actually resolves to.
+
+### Fixed
+
+- The plugin manifest and the `.mcp.json` launch pin move with the package version. Bumping
+  `package.json` alone left the plugin advertising the previous version and the launch line
+  pinning it, so an install would have fetched the old server while the repo claimed the new
+  one. Two guard tests catch this; they earned their place on this release.
+
 ## 0.8.1 (2026-08-26)
 
 ### Changed
