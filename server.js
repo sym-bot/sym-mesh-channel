@@ -75,6 +75,27 @@ function sdkRooms() {
 }
 const { isValidRoom, roomServiceType, serviceTypeToRoom } = sdkRooms();
 
+/**
+ * Whether a room name is canonical: one name per room, one room per name.
+ *
+ * Founder ruling 2026-08-27. sym enforces this inside isValidRoom as of
+ * lib/rooms.js 2a06ccb, but that is not released — the published 0.12.3 this
+ * node resolves still answers true for `sym`, which maps to `_sym._tcp` whose
+ * inverse is `default`. Without this, a peer could join a room named `sym`
+ * here and sit in the global mesh believing it was somewhere specific.
+ *
+ * Expressed as the PROPERTY, using the SDK's own mapping in both directions,
+ * rather than as a second copy of the grammar. That is what separates it from
+ * the drift this branch exists to remove: there is still exactly one grammar
+ * and one mapping, and this only asks a question about them. It keeps working
+ * unchanged once the SDK enforces it, at which point it is redundant rather
+ * than wrong — the same reason sym keeps the round trip inside isOwnableRoom
+ * now that isValidRoom covers it.
+ */
+function isCanonicalRoom(room) {
+  return isValidRoom(room) && serviceTypeToRoom(roomServiceType(room)) === room;
+}
+
 // ── Invite URL parsing (shared by sym_invite_info and the internal
 //    validation path for sym_join_room when passed a URL). Exposed as
 //    a module-level function so it's trivially unit-testable and the
@@ -1152,7 +1173,7 @@ async function dispatchTool(request) {
       if (!room || typeof room !== 'string') {
         return { content: [{ type: 'text', text: 'Missing required argument: room' }], isError: true };
       }
-      if (!isValidRoom(room) || room === 'default') {
+      if (!isCanonicalRoom(room) || room === 'default') {
         return {
           content: [{
             type: 'text',
@@ -1234,7 +1255,7 @@ async function dispatchTool(request) {
       if (!room || typeof room !== 'string') {
         return { content: [{ type: 'text', text: 'Missing required argument: room' }], isError: true };
       }
-      if (!isValidRoom(room)) {
+      if (!isCanonicalRoom(room)) {
         return {
           content: [{ type: 'text', text: `Invalid room name: "${room}". Must be kebab-case or "default".` }],
           isError: true,

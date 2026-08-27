@@ -1122,6 +1122,38 @@ test('room grammar has one source, and install.js mirror matches the SDK exactly
   assert.ok(!isValidRoom('-lead'), 'leading hyphen must stay invalid');
 });
 
+test('room names are canonical: `sym` is refused even on an SDK that predates the rule', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+
+  // Founder ruling 2026-08-27. The check must be the PROPERTY, computed from
+  // the SDK's own mapping in both directions -- not a second grammar. If this
+  // ever becomes a regex, the drift this file guards has come back.
+  assert.ok(
+    /serviceTypeToRoom\(roomServiceType\(room\)\) === room/.test(server),
+    'canonicity must be derived from the SDK mapping, not re-implemented'
+  );
+  assert.ok(
+    !/function isCanonicalRoom[\s\S]{0,400}\/\^\[a-z0-9\]/.test(server),
+    'isCanonicalRoom must not carry its own grammar'
+  );
+
+  // Both gates go through it, so neither can be canonical while the other is not.
+  const gates = server.match(/if \(!isCanonicalRoom\(room\)/g) || [];
+  assert.strictEqual(gates.length, 2, `both join gates must enforce canonicity, found ${gates.length}`);
+  assert.ok(!/if \(!isValidRoom\(room\)/.test(server), 'no gate may use the bare grammar check');
+
+  // And the property itself, against whatever SDK is actually resolved here.
+  const rooms = require('@sym-bot/sym').rooms || require('@sym-bot/sym/lib/rooms.js');
+  const canonical = (r) => rooms.isValidRoom(r)
+    && rooms.serviceTypeToRoom(rooms.roomServiceType(r)) === r;
+  assert.ok(!canonical('sym'), '`sym` aliases the global mesh and must not be canonical');
+  assert.ok(canonical('default'), 'the global mesh under its canonical name');
+  assert.ok(canonical('backend-team'));
+  assert.ok(canonical('x-review--team-02779b950c3d8d7378fd11d6'));
+});
+
 test('room -> service-type mapping has one source: no inline `_${room}._tcp` in server.js', () => {
   const fs = require('fs');
   const path = require('path');
