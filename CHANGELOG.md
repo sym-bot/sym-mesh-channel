@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.9.1 (2026-08-27)
+
+### Changed — tracks `@sym-bot/sym` ^0.13.2
+
+Released alongside sym so the pairing users install is the pairing that was
+tested. 0.9.0 declared `^0.13.0` and was tested against 0.13.0, but sym then
+shipped 0.13.1 and 0.13.2 — so a fresh install of 0.9.0 today resolved a
+combination nobody had run. The declared range, the version installed here, and
+the version a new user got were three different answers.
+
+### Fixed — a refusal named the wrong cause once the SDK enforced canonicity
+
+`roomRefusalReason` branched on `isValidRoom`, and that predicate **changed
+meaning** at sym 0.13.0: from "grammatical" to "grammatical AND canonical". After
+that, every canonicity failure was reported down the grammar path, so a caller
+who asked for the room `sym` — impeccable kebab-case — was told it was not
+kebab-case. That is exactly the wrong-reason defect this function was added in
+0.9.0 to remove, reintroduced without a line of it changing, by a dependency
+changing underneath it.
+
+Grammar and canonicity are now read from the two things that actually
+distinguish them: the grammar from `KEBAB_CASE_RE`, the alias from the round
+trip. `sym` is told it resolves to `_sym._tcp`, which is the room `default`;
+`Bad_Room` is told about the grammar. A regression test forbids branching on
+`isValidRoom` in that function, since the source did not have to change for this
+to break and would not have to change to break again.
+
 ## 0.9.0 (2026-08-27)
 
 ### Changed — one room grammar, and a dependency range that can actually reach it

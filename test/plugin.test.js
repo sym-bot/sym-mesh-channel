@@ -1162,6 +1162,25 @@ test('room names are canonical: `sym` is refused even on an SDK that predates th
   assert.ok(canonical('x-review--team-02779b950c3d8d7378fd11d6'));
 });
 
+test('a refusal names the cause that applies, on an SDK that enforces canonicity', () => {
+  // Regression guard. roomRefusalReason branched on isValidRoom, whose meaning
+  // CHANGED at sym 0.13.0 from "grammatical" to "grammatical AND canonical".
+  // After that, every canonicity failure was reported as a grammar failure --
+  // so the author of `sym`, which is impeccable kebab-case, was told it was not
+  // kebab-case. Only bumping the SDK exposed it; the source never changed.
+  const fs = require('fs');
+  const path = require('path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.ok(
+    !/function roomRefusalReason[\s\S]{0,300}if \(!isValidRoom\(room\)\)/.test(server),
+    'roomRefusalReason must not branch on isValidRoom -- it conflates the two causes'
+  );
+  assert.ok(
+    /KEBAB_CASE_RE\.test\(room\)/.test(server),
+    'the grammar cause must be read from the grammar itself'
+  );
+});
+
 test('room -> service-type mapping has one source: no inline `_${room}._tcp` in server.js', () => {
   const fs = require('fs');
   const path = require('path');

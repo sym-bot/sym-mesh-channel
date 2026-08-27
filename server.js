@@ -73,7 +73,7 @@ function sdkRooms() {
   const sdk = require('@sym-bot/sym');
   return sdk.rooms || require('@sym-bot/sym/lib/rooms.js');
 }
-const { isValidRoom, roomServiceType, serviceTypeToRoom } = sdkRooms();
+const { isValidRoom, roomServiceType, serviceTypeToRoom, KEBAB_CASE_RE } = sdkRooms();
 
 /**
  * Whether a room name is canonical: one name per room, one room per name.
@@ -106,15 +106,27 @@ function isCanonicalRoom(room) {
  */
 function roomRefusalReason(room) {
   if (typeof room !== 'string' || room === '') return 'a room name cannot be empty';
-  if (!isValidRoom(room)) {
+
+  // Test the GRAMMAR directly rather than via isValidRoom. From sym 0.13.0
+  // isValidRoom means "grammatical AND canonical", so branching on it sent every
+  // canonicity failure down the grammar path — and told the author of `sym`,
+  // which is impeccable kebab-case, that it was not. That is precisely the
+  // wrong-reason defect this function was written to remove, reintroduced by a
+  // predicate changing meaning underneath it. The two causes are now read from
+  // the two things that actually distinguish them.
+  const grammatical = room === 'default' || KEBAB_CASE_RE.test(room);
+  if (!grammatical) {
     return 'must be lowercase alphanumerics in segments joined by single or double hyphens '
       + '(e.g. "backend-team", or "x-review--team-<id>" for a tenant-scoped room), or "default"';
   }
-  // Grammar is fine, so the only way to be non-canonical is to alias another room.
+
   const collidesWith = serviceTypeToRoom(roomServiceType(room));
-  return `it resolves to ${roomServiceType(room)}, which is the room "${collidesWith}" — `
-    + `"${room}" is a second name for it, so joining it would put this node in "${collidesWith}" `
-    + 'while reporting otherwise. Room names must be canonical: one name per room';
+  if (collidesWith !== room) {
+    return `it resolves to ${roomServiceType(room)}, which is the room "${collidesWith}" — `
+      + `"${room}" is a second name for it, so joining it would put this node in "${collidesWith}" `
+      + 'while reporting otherwise. Room names must be canonical: one name per room';
+  }
+  return 'it is not a room name this build accepts';
 }
 
 // ── Invite URL parsing (shared by sym_invite_info and the internal
