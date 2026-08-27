@@ -67,7 +67,20 @@ try {
   if (n) process.stderr.write(`[sym-mesh-channel] migrated ${n} node store(s): meshmem → cmbs\n`);
 } catch { /* SDK not resolvable or nothing to do — non-fatal */ }
 
-const KEBAB_CASE_RE = /^[a-z0-9]+(?:--?[a-z0-9]+)*$/; // lockstep with server.js and sym lib/rooms.js (grammar review F1: this fourth copy gated the PERSISTENCE path)
+// The room grammar belongs to the SDK (@sym-bot/sym >= 0.12.3 exports `rooms`).
+// Prefer it. The literal below is a LAST-RESORT MIRROR for the one case the SDK
+// cannot serve: install runs before/without a resolvable SDK, and a validator
+// that silently disappears would let a malformed room reach the config file —
+// which is exactly the persistence path this gate exists to protect (grammar
+// review F1). The mirror is not allowed to drift: test/plugin.test.js asserts it
+// is character-identical to the SDK's exported source, so divergence fails CI
+// rather than surfacing as two nodes disagreeing about whether a room exists.
+const FALLBACK_KEBAB_CASE_RE = /^[a-z0-9]+(?:--?[a-z0-9]+)*$/;
+let KEBAB_CASE_RE = FALLBACK_KEBAB_CASE_RE;
+try {
+  const sdk = require('@sym-bot/sym');
+  KEBAB_CASE_RE = (sdk.rooms || require('@sym-bot/sym/lib/rooms.js')).KEBAB_CASE_RE;
+} catch { /* SDK not resolvable — mirror stands */ }
 function validateRoomValue(value, source) {
   if (!value) return;
   if (value === 'default') return;

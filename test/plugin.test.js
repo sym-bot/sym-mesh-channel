@@ -1074,3 +1074,120 @@ function loadAllowlistModule(envValue) {
 
   return { isPeerAllowed };
 }
+
+// ── Room grammar: one source, and the one permitted mirror cannot drift ──────
+//
+// A room name IS the Bonjour service type (MMP §5.8), so a validator that
+// disagrees with the SDK's by one character means two nodes disagree about
+// whether a room exists. That has now happened twice in this repo, and the
+// second time the divergent copy silently gated the room-PERSISTENCE path while
+// the runtime path accepted the same name — green tests, broken install.
+//
+// server.js keeps NO copy (it imports the grammar). bin/install.js keeps one
+// last-resort mirror, because install must still validate when the SDK is not
+// resolvable. This test reads the mirror out of the SOURCE TEXT rather than
+// requiring the module — install.js runs its installer on require — and pins it
+// character-identical to the SDK's own exported regex.
+test('room grammar has one source, and install.js mirror matches the SDK exactly', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const root = path.join(__dirname, '..');
+
+  const server = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
+  assert.ok(
+    !/const\s+KEBAB_CASE_RE\s*=\s*\//.test(server),
+    'server.js must not declare its own room-name regex — it imports the SDK grammar'
+  );
+  assert.ok(
+    /require\('@sym-bot\/sym(?:\/lib\/rooms\.js)?'\)/.test(server) && /sdkRooms\(\)/.test(server),
+    'server.js must take the room grammar from the SDK'
+  );
+
+  const install = fs.readFileSync(path.join(root, 'bin', 'install.js'), 'utf8');
+  const mirror = install.match(/const\s+FALLBACK_KEBAB_CASE_RE\s*=\s*(\/.+\/);/);
+  assert.ok(mirror, 'install.js must keep its mirror in a named FALLBACK_ constant');
+
+  const sdkRooms = require('@sym-bot/sym').rooms || require('@sym-bot/sym/lib/rooms.js');
+  const sdk = sdkRooms.KEBAB_CASE_RE;
+  assert.strictEqual(
+    mirror[1], sdk.toString(),
+    'install.js fallback regex has drifted from @sym-bot/sym rooms.KEBAB_CASE_RE'
+  );
+
+  // The grammar this pins is the tenant-suffix one: a scoped room name must pass.
+  const { isValidRoom } = sdkRooms;
+  assert.ok(isValidRoom('x-review--team-02779b950c3d8d7378fd11d6'), 'tenant-suffixed room must be valid');
+  assert.ok(isValidRoom('backend-team'), 'plain kebab room must be valid');
+  assert.ok(!isValidRoom('x---y'), 'triple hyphen must stay invalid');
+  assert.ok(!isValidRoom('-lead'), 'leading hyphen must stay invalid');
+});
+
+test('room names are canonical: `sym` is refused even on an SDK that predates the rule', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+
+  // Founder ruling 2026-08-27. The check must be the PROPERTY, computed from
+  // the SDK's own mapping in both directions -- not a second grammar. If this
+  // ever becomes a regex, the drift this file guards has come back.
+  assert.ok(
+    /serviceTypeToRoom\(roomServiceType\(room\)\) === room/.test(server),
+    'canonicity must be derived from the SDK mapping, not re-implemented'
+  );
+  assert.ok(
+    !/function isCanonicalRoom[\s\S]{0,400}\/\^\[a-z0-9\]/.test(server),
+    'isCanonicalRoom must not carry its own grammar'
+  );
+
+  // Both gates go through it, so neither can be canonical while the other is not.
+  const gates = server.match(/if \(!isCanonicalRoom\(room\)/g) || [];
+  assert.strictEqual(gates.length, 2, `both join gates must enforce canonicity, found ${gates.length}`);
+  // Gates sit inside switch cases (six-space indent); the helpers that
+  // classify a refusal are module-level (two). isValidRoom is legitimate in a
+  // helper -- roomRefusalReason needs it to tell "bad grammar" apart from
+  // "aliases another room" -- so this forbids it at the GATES, which is what
+  // would actually let a non-canonical name through.
+  assert.ok(
+    !/^ {6}if \(!isValidRoom\(room\)/m.test(server),
+    'no join gate may use the bare grammar check in place of canonicity'
+  );
+
+  // And the property itself, against whatever SDK is actually resolved here.
+  const rooms = require('@sym-bot/sym').rooms || require('@sym-bot/sym/lib/rooms.js');
+  const canonical = (r) => rooms.isValidRoom(r)
+    && rooms.serviceTypeToRoom(rooms.roomServiceType(r)) === r;
+  assert.ok(!canonical('sym'), '`sym` aliases the global mesh and must not be canonical');
+  assert.ok(canonical('default'), 'the global mesh under its canonical name');
+  assert.ok(canonical('backend-team'));
+  assert.ok(canonical('x-review--team-02779b950c3d8d7378fd11d6'));
+});
+
+test('room -> service-type mapping has one source: no inline `_${room}._tcp` in server.js', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+
+  // The drift class this pins: server.js once built the service type in four
+  // places, so a grammar change had to be made four times or the copies
+  // disagreed. Every mapping now goes through the SDK. Two escapes are
+  // deliberate and named: the app-scoped invite prefix (which builds a ROOM,
+  // not a service type) and the dns-sd output scanner (which parses external
+  // text rather than mapping a room).
+  const offenders = server
+    .split('\n')
+    .map((line, i) => [i + 1, line])
+    .filter(([, line]) => /`_\$\{[A-Za-z]/.test(line) || /'_sym\._tcp'/.test(line))
+    .filter(([, line]) => !/^\s*(\/\/|\*)/.test(line))
+    .filter(([, line]) => !/appScheme|typeRe|m\[1\]/.test(line));
+
+  assert.deepStrictEqual(
+    offenders, [],
+    'server.js must map room -> service type only via roomServiceType(): ' +
+      offenders.map(([n, l]) => `${n}: ${l.trim()}`).join(' | ')
+  );
+
+  assert.ok(
+    /serviceTypeToRoom/.test(server),
+    'the inverse mapping must also come from the SDK, not a hand-rolled strip'
+  );
+});
