@@ -96,6 +96,27 @@ function isCanonicalRoom(room) {
   return isValidRoom(room) && serviceTypeToRoom(roomServiceType(room)) === room;
 }
 
+/**
+ * Why this room name was refused, in the reader's terms.
+ *
+ * A refusal that names the wrong reason costs more than no reason at all:
+ * `sym` IS kebab-case, so "must be kebab-case" sends whoever reads it to fix
+ * something that was never wrong. Same class as a log blaming a config file
+ * for a mistyped name.
+ */
+function roomRefusalReason(room) {
+  if (typeof room !== 'string' || room === '') return 'a room name cannot be empty';
+  if (!isValidRoom(room)) {
+    return 'must be lowercase alphanumerics in segments joined by single or double hyphens '
+      + '(e.g. "backend-team", or "x-review--team-<id>" for a tenant-scoped room), or "default"';
+  }
+  // Grammar is fine, so the only way to be non-canonical is to alias another room.
+  const collidesWith = serviceTypeToRoom(roomServiceType(room));
+  return `it resolves to ${roomServiceType(room)}, which is the room "${collidesWith}" — `
+    + `"${room}" is a second name for it, so joining it would put this node in "${collidesWith}" `
+    + 'while reporting otherwise. Room names must be canonical: one name per room';
+}
+
 // ── Invite URL parsing (shared by sym_invite_info and the internal
 //    validation path for sym_join_room when passed a URL). Exposed as
 //    a module-level function so it's trivially unit-testable and the
@@ -1177,7 +1198,7 @@ async function dispatchTool(request) {
         return {
           content: [{
             type: 'text',
-            text: `Invalid room name: "${room}". Must be kebab-case (lowercase alphanumerics + single or double hyphens), e.g. "backend-team" or "x-review--team-02779b…".`,
+            text: `Invalid room name: "${room}" — ${roomRefusalReason(room)}.`,
           }],
           isError: true,
         };
@@ -1257,7 +1278,7 @@ async function dispatchTool(request) {
       }
       if (!isCanonicalRoom(room)) {
         return {
-          content: [{ type: 'text', text: `Invalid room name: "${room}". Must be kebab-case or "default".` }],
+          content: [{ type: 'text', text: `Invalid room name: "${room}" — ${roomRefusalReason(room)}.` }],
           isError: true,
         };
       }

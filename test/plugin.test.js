@@ -1142,7 +1142,15 @@ test('room names are canonical: `sym` is refused even on an SDK that predates th
   // Both gates go through it, so neither can be canonical while the other is not.
   const gates = server.match(/if \(!isCanonicalRoom\(room\)/g) || [];
   assert.strictEqual(gates.length, 2, `both join gates must enforce canonicity, found ${gates.length}`);
-  assert.ok(!/if \(!isValidRoom\(room\)/.test(server), 'no gate may use the bare grammar check');
+  // Gates sit inside switch cases (six-space indent); the helpers that
+  // classify a refusal are module-level (two). isValidRoom is legitimate in a
+  // helper -- roomRefusalReason needs it to tell "bad grammar" apart from
+  // "aliases another room" -- so this forbids it at the GATES, which is what
+  // would actually let a non-canonical name through.
+  assert.ok(
+    !/^ {6}if \(!isValidRoom\(room\)/m.test(server),
+    'no join gate may use the bare grammar check in place of canonicity'
+  );
 
   // And the property itself, against whatever SDK is actually resolved here.
   const rooms = require('@sym-bot/sym').rooms || require('@sym-bot/sym/lib/rooms.js');
