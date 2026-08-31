@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.9.4 (2026-08-31)
+
+### Fixed — a replayed stale directive no longer surfaces as fresh (tracks `@sym-bot/sym` ^0.13.4)
+
+After the 0.9.3 upgrade a seat received three ~30-hour-old daemon-spool replays as
+live pushes with fresh ids and seconds-old ages — one an instruction to redo work
+its own successor recorded as committed (dev-team-3). The receive-path dedup's TTL
+was one hour, sized for reconnect storms, not for the spool's ~30-hour replay
+horizon. sym 0.13.4 raises the surfaced-key TTL to seven days under
+record-after-surface semantics; this release pins the pairing.
+
+
 ## 0.9.3 (2026-08-31)
 
 ### Fixed — every restored inbox entry is fetchable (tracks `@sym-bot/sym` ^0.13.3)
