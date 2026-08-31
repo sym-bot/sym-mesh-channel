@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.9.3 (2026-08-31)
+
+### Fixed — every restored inbox entry is fetchable (tracks `@sym-bot/sym` ^0.13.3)
+
+codex-mac reported directed 3–4KB replies surfacing truncated in sym_receive with no
+retrievable id. The cause was in the SDK's inbox restore: entries persisted before sym
+v0.10.0 introduced seq/id restored verbatim — seq-without-id entries rendered as
+"[undefined]" and could never be fetched; entries with neither field were silently
+filtered out of every drain. sym 0.13.3 normalizes on restore (seq minted above the
+cursor, id minted from seq; redelivery beats silent loss), and this release pins the
+pairing so the combination users install is the combination that was tested.
+
+
 ## 0.9.2 (2026-08-31)
 
 ### Changed — the description says what the mesh actually is
