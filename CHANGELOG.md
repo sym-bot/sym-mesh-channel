@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.9.2 (2026-08-31)
+
+### Changed — the description says what the mesh actually is
+
+Description-only release. The manifest called this "Real-time Claude-to-Claude
+mesh", which undersells the shipped surface: the wire is MMP, any MCP-capable
+coding agent joins through the open @sym-bot/mesh-channel SDK, and the live mesh
+this plugin connects to already carries non-Claude peers. The description now
+says what the plugin is for — real-time, full-duplex messaging among Claude Code
+sessions and other coding agents — and names the property that distinguishes it:
+push in, send out, no polling.
+
+The marketplace entry had drifted twice over — pinned at 0.8.0 against the
+installed 0.9.1, carrying a different, older description. It now carries the
+same words as the manifest, so there is one text instead of two that must agree.
+
 ## 0.9.1 (2026-08-27)
 
 ### Changed — tracks `@sym-bot/sym` ^0.13.2
