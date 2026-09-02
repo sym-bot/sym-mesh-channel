@@ -529,6 +529,18 @@ function registerNodeHandlers(n) {
     process.exit(2);
   });
 
+  // Auth refusal (@sym-bot/sym ≥ 0.13.5): the relay's channel table does not hold our token.
+  // The engine has already dropped to a slow retry; the node stays up for LAN peers. Put the
+  // line where the operator reads (the MCP server's stderr) — before this, the only trace of a
+  // misconfigured seat was in the relay operator's log, under a name nobody could place.
+  n.on('relay-auth-refused', (info) => {
+    process.stderr.write(
+      `sym-mesh-channel: relay ${info.relayUrl} refused ${info.name} (${info.code}: ${info.reason}). ` +
+      `The relay_token this session presents is not one that relay's operator configured — ` +
+      `get the token from whoever runs the relay, set it, and restart. LAN peers are unaffected.\n`
+    );
+  });
+
   n.on('cmb-accepted', (entry) => {
     if (entry.source === NODE_NAME || entry.cmb?.createdBy === NODE_NAME) return;
     const source = entry.source || entry.cmb?.createdBy || 'unknown';

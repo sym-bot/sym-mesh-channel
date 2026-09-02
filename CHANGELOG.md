@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Added — a relay's auth refusal is printed where the session's operator reads it
+
+When the relay refuses this session's token (close 4003), `@sym-bot/sym` ≥ 0.13.5 emits
+`relay-auth-refused` once per episode and drops to a slow retry. The plugin now writes that
+refusal to the MCP server's stderr with the fix ("get the token from whoever runs the relay");
+before, the only trace of a misconfigured seat was a rejection every ~23 s in the relay
+operator's log, under a session-default name nobody could place. LAN peers are unaffected and
+the session keeps running. (Pairs with sym 0.13.5 at the next release; harmless on older.)
+
 ### Changed — the docs and the `sym_join_room` tool description no longer advertise a relay host
 
 `docs/reference.md`, `README_zh.md` and the `relay_url` field description all named one
