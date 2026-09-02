@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Changed — the docs and the `sym_join_room` tool description no longer advertise a relay host
+
+`docs/reference.md`, `README_zh.md` and the `relay_url` field description all named one
+hosted relay as the example ("we host one at …") beside an invite example whose token was
+"any shared secret the team agrees on". A relay admits only the channel tokens its operator
+configured, so a stranger following that page reaches the socket and is refused forever —
+observed on the relay log as one `Auth rejected — token not in any channel` line every ~23 s
+from a session that had done exactly that. The docs now say to run your own relay and that
+the token is issued by whoever runs it; the tool description says the same; the example URL
+is `relay.example.com`. No behaviour changes.
+
+
 ## 0.9.4 (2026-08-31)
 
 ### Fixed — a replayed stale directive no longer surfaces as fresh (tracks `@sym-bot/sym` ^0.13.4)

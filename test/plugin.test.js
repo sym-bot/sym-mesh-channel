@@ -946,11 +946,11 @@ test('sym://room/{name} parses to matching room + service type', () => {
 });
 
 test('sym://team/{name}?relay=... parses relay URL + token', () => {
-  const url = 'sym://team/eng-team?relay=wss%3A%2F%2Fsym-relay.onrender.com&token=abc123';
+  const url = 'sym://team/eng-team?relay=wss%3A%2F%2Frelay.example.com&token=abc123';
   const p = parseInviteURL(url);
   assert.strictEqual(p.room, 'eng-team');
   assert.strictEqual(p.serviceType, '_eng-team._tcp');
-  assert.strictEqual(p.relayUrl, 'wss://sym-relay.onrender.com');
+  assert.strictEqual(p.relayUrl, 'wss://relay.example.com');
   assert.strictEqual(p.relayToken, 'abc123');
 });
 
@@ -994,11 +994,11 @@ test('buildInviteURL(room) returns sym://room/{name}', () => {
 test('buildInviteURL(room, relay, token) returns sym://team/ with query string', () => {
   const url = buildInviteURL({
     room: 'eng-team',
-    relayUrl: 'wss://sym-relay.onrender.com',
+    relayUrl: 'wss://relay.example.com',
     relayToken: 'shared-secret-xyz',
   });
   assert.ok(url.startsWith('sym://team/eng-team?'), 'should be sym://team/ with query');
-  assert.ok(url.includes('relay=wss%3A%2F%2Fsym-relay.onrender.com'), 'relay URL percent-encoded');
+  assert.ok(url.includes('relay=wss%3A%2F%2Frelay.example.com'), 'relay URL percent-encoded');
   assert.ok(url.includes('token=shared-secret-xyz'), 'token present');
 });
 
@@ -1027,12 +1027,12 @@ test('round-trip: create LAN → parse → same room back', () => {
 test('round-trip: create relay → parse → same room + relay creds back', () => {
   const url = buildInviteURL({
     room: 'cross-net',
-    relayUrl: 'wss://sym-relay.onrender.com',
+    relayUrl: 'wss://relay.example.com',
     relayToken: 'tok-123',
   });
   const p = parseInviteURL(url);
   assert.strictEqual(p.room, 'cross-net');
-  assert.strictEqual(p.relayUrl, 'wss://sym-relay.onrender.com');
+  assert.strictEqual(p.relayUrl, 'wss://relay.example.com');
   assert.strictEqual(p.relayToken, 'tok-123');
 });
 

@@ -194,17 +194,17 @@ Run `npx @sym-bot/mesh-channel doctor` any time to see which room each `claude-s
 
 ### Distributed team (via relay)
 
-Same pattern, but the team crosses network boundaries (home ↔ office, coffee shop ↔ client site). You need a relay so members can find each other over the internet. We host one at `wss://sym-relay.onrender.com`; you can run your own from the [sym-relay](https://github.com/sym-bot/sym-relay) repo.
+Same pattern, but the team crosses network boundaries (home ↔ office, coffee shop ↔ client site). You need a relay so members can find each other over the internet: run your own from the [sym-relay](https://github.com/sym-bot/sym-relay) repo (one Node process; it refuses to start without a channel token). A relay admits only the channel tokens its operator configured — a token you make up is rejected, not registered — so the team lead who runs the relay hands out both the URL and the token.
 
 ```
 > sym_invite_create {
     "room": "eng-team",
-    "relay_url": "wss://sym-relay.onrender.com",
-    "relay_token": "any-shared-secret-the-team-agrees-on"
+    "relay_url": "wss://relay.example.com",
+    "relay_token": "<a channel token configured on that relay>"
   }
 
 Invite URL (cross-network (relay)):
-    sym://team/eng-team?relay=wss%3A%2F%2Fsym-relay.onrender.com&token=any-shared-secret-...
+    sym://team/eng-team?relay=wss%3A%2F%2Frelay.example.com&token=...
 ```
 
 Teammate pastes the URL, `sym_invite_info` extracts the relay and token from the query string, `sym_join_room` hot-swaps with the same args. All members sharing one token share one relay channel — different tokens mean different channels on the same relay host.

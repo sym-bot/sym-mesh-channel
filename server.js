@@ -809,8 +809,8 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         type: 'object',
         properties: {
           room: { type: 'string', description: 'Kebab-case room name (single or double hyphens), e.g. "backend-team" or a tenant-suffixed "x-review--team-…".' },
-          relay_url: { type: 'string', description: 'Optional WebSocket relay URL, e.g. wss://sym-relay.onrender.com. Include for cross-network teams.' },
-          relay_token: { type: 'string', description: 'Optional relay authentication token (shared secret for this team channel).' },
+          relay_url: { type: 'string', description: 'Optional WebSocket relay URL (wss://…) of a relay your team runs, for cross-network teams. The relay admits only tokens its operator configured.' },
+          relay_token: { type: 'string', description: 'Optional relay channel token, issued by whoever runs the relay — not a secret the team invents.' },
         },
         required: ['room'],
       },

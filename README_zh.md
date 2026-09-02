@@ -207,17 +207,17 @@ npx @sym-bot/mesh-channel init --force --room default
 
 ### 分布式团队（通过中继）
 
-模式相同，但团队跨越网络边界（家庭 ↔ 办公室、咖啡馆 ↔ 客户现场）。需部署中继使成员可通过互联网相互发现。我们提供公共中继 `wss://sym-relay.onrender.com`；您也可从 [sym-relay 仓库](https://github.com/sym-bot/sym-relay) 自建。
+模式相同，但团队跨越网络边界（家庭 ↔ 办公室、咖啡馆 ↔ 客户现场）。需部署中继使成员可通过互联网相互发现：从 [sym-relay 仓库](https://github.com/sym-bot/sym-relay) 自建（单个 Node 进程；未配置通道令牌则拒绝启动）。中继只接受运营者配置的通道令牌 —— 自行编造的令牌会被拒绝，而不是被登记 —— 因此由运行中继的团队负责人同时分发 URL 与令牌。
 
 ```bash
 > sym_invite_create {
     "room": "eng-team",
-    "relay_url": "wss://sym-relay.onrender.com",
-    "relay_token": "any-shared-secret-the-team-agrees-on"
+    "relay_url": "wss://relay.example.com",
+    "relay_token": "<该中继上已配置的通道令牌>"
   }
 
 邀请链接（跨网络 / 中继）:
-    sym://team/eng-team?relay=wss%3A%2F%2Fsym-relay.onrender.com&token=any-shared-secret-...
+    sym://team/eng-team?relay=wss%3A%2F%2Frelay.example.com&token=...
 ```
 
 成员粘贴链接后，`sym_invite_info` 自动提取中继与令牌参数，`sym_join_room` 以相同参数热切换。共享同一令牌的成员即加入同一中继通道；不同令牌 = 同一中继主机上的不同通道。
