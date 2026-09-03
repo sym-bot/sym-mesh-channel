@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.5 (2026-09-03)
 
 ### Added — a relay's auth refusal is printed where the session's operator reads it
 
