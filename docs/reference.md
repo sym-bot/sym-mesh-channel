@@ -194,20 +194,29 @@ Run `npx @sym-bot/mesh-channel doctor` any time to see which room each `claude-s
 
 ### Distributed team (via relay)
 
-Same pattern, but the team crosses network boundaries (home ↔ office, coffee shop ↔ client site). You need a relay so members can find each other over the internet: run your own from the [sym-relay](https://github.com/sym-bot/sym-relay) repo (one Node process; it refuses to start without a channel token). A relay admits only the channel tokens its operator configured — a token you make up is rejected, not registered — so the team lead who runs the relay hands out both the URL and the token.
+Same pattern, but the sessions cross network boundaries — your laptop on the road and the Mac at home, home ↔ office, coffee shop ↔ client site. They need a relay to find each other over the internet. The plugin points cross-network invites at the hosted relay and mints the credential for you:
 
 ```
-> sym_invite_create {
-    "room": "eng-team",
-    "relay_url": "wss://relay.example.com",
-    "relay_token": "<a channel token configured on that relay>"
-  }
+> sym_invite_create { "room": "eng-team", "cross_network": true }
 
 Invite URL (cross-network (relay)):
-    sym://team/eng-team?relay=wss%3A%2F%2Frelay.example.com&token=...
+    sym://team/eng-team?relay=wss%3A%2F%2Fsym-relay.onrender.com&token=<minted>
 ```
 
-Teammate pastes the URL, `sym_invite_info` extracts the relay and token from the query string, `sym_join_room` hot-swaps with the same args. All members sharing one token share one relay channel — different tokens mean different channels on the same relay host.
+The token is 32 random bytes minted in your session. On the hosted relay it names an isolated channel: nobody who does not hold that exact token can see the channel exists, and two teams can never share one by picking the same phrase (tokens under 32 characters, and the example strings from older docs, are refused). Whoever holds the URL can join the channel, so share it as you would a password. To lock a device out, mint a new invite and re-join with it — there is no per-device revocation.
+
+Teammate pastes the URL, `sym_invite_info` extracts the relay and token from the query string, `sym_join_room` hot-swaps with the same args. The creator must join too (`sym_invite_create` prints the exact `sym_join_room` call). A team that runs its own relay passes `relay_url`, and `relay_token` if that relay only admits tokens its operator configured.
+
+The relay carries frames; it keeps none. Two sessions exchange CMBs when both are connected, so for the on-the-road ↔ home case keep the home side up — a `sym-daemon` on the always-on machine, or a Claude Code session left open.
+
+**When the relay says no.** A join over a relay returns the relay's answer, not "discovering peers":
+
+- `Relay: connected to wss://… for 3s, 1 relay peer(s)` — admitted; `sym_peers` shows who is there.
+- `Relay: REFUSED by wss://… (4003: <reason>) … Fix: mint a token with sym_invite_create or get the team's invite, then sym_join_room with it` — the token was not accepted. The call returns `isError`; the session also receives one `relay-auth-refused` channel notification with the same line. LAN peers are unaffected; the node keeps knocking every 10 min in case the relay's configuration changes.
+- `Relay: unreachable: wss://… (last close 1006) — retry in 4s, attempt 2. LAN peers are unaffected.` — the relay is down or unreachable from here (a Render deploy drops every connection for a few seconds); the node reconnects on its own.
+- `Relay: STOPPED: … another process holding this identity (4004)` — two processes share one node identity; stop the other one.
+
+`sym_status` prints the same line at any time. The token is never part of any of these lines.
 
 ### Discovering what's out there
 

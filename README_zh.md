@@ -207,20 +207,29 @@ npx @sym-bot/mesh-channel init --force --room default
 
 ### 分布式团队（通过中继）
 
-模式相同，但团队跨越网络边界（家庭 ↔ 办公室、咖啡馆 ↔ 客户现场）。需部署中继使成员可通过互联网相互发现：从 [sym-relay 仓库](https://github.com/sym-bot/sym-relay) 自建（单个 Node 进程；未配置通道令牌则拒绝启动）。中继只接受运营者配置的通道令牌 —— 自行编造的令牌会被拒绝，而不是被登记 —— 因此由运行中继的团队负责人同时分发 URL 与令牌。
+模式相同，但会话跨越网络边界 —— 路上的笔记本与家里的 Mac、家庭 ↔ 办公室、咖啡馆 ↔ 客户现场。它们需要中继才能在互联网上相互发现。插件会把跨网络邀请指向托管中继，并替您铸造凭据：
 
 ```bash
-> sym_invite_create {
-    "room": "eng-team",
-    "relay_url": "wss://relay.example.com",
-    "relay_token": "<该中继上已配置的通道令牌>"
-  }
+> sym_invite_create { "room": "eng-team", "cross_network": true }
 
 邀请链接（跨网络 / 中继）:
-    sym://team/eng-team?relay=wss%3A%2F%2Frelay.example.com&token=...
+    sym://team/eng-team?relay=wss%3A%2F%2Fsym-relay.onrender.com&token=<铸造的令牌>
 ```
 
-成员粘贴链接后，`sym_invite_info` 自动提取中继与令牌参数，`sym_join_room` 以相同参数热切换。共享同一令牌的成员即加入同一中继通道；不同令牌 = 同一中继主机上的不同通道。
+令牌是在您的会话中铸造的 32 个随机字节。在托管中继上它命名一个隔离通道：不持有该令牌的人无法得知通道存在，两个团队也不可能因为选了相同的口令而落入同一通道（短于 32 个字符的令牌与旧文档中的示例字符串会被拒绝）。持有链接的任何人都能加入该通道，请像对待密码一样分享它。要踢出某台设备，铸造新邀请并重新加入 —— 没有按设备撤销。
+
+成员粘贴链接后，`sym_invite_info` 自动提取中继与令牌参数，`sym_join_room` 以相同参数热切换。创建者也必须加入（`sym_invite_create` 会打印精确的 `sym_join_room` 调用）。自建中继的团队传 `relay_url`，若该中继只接受运营者配置的令牌则再传 `relay_token`。
+
+中继只转发帧，不保存任何帧。两个会话都在线时才能交换 CMB，因此「路上 ↔ 家里」的场景要让家里那一侧保持在线 —— 常开机器上运行 `sym-daemon`，或者让一个 Claude Code 会话开着。
+
+**中继拒绝时。** 经中继加入返回的是中继的回答，而不是「正在发现节点」：
+
+- `Relay: connected to wss://… for 3s, 1 relay peer(s)` —— 已接纳；`sym_peers` 显示在线者。
+- `Relay: REFUSED by wss://… (4003: <原因>) … Fix: mint a token with sym_invite_create or get the team's invite, then sym_join_room with it` —— 令牌未被接受。调用返回 `isError`；会话同时收到一条带同样内容的 `relay-auth-refused` 频道通知。局域网节点不受影响；节点每 10 分钟再试一次，以防中继配置改变。
+- `Relay: unreachable: wss://… (last close 1006) — retry in 4s, attempt 2. LAN peers are unaffected.` —— 中继宕机或从此处不可达（Render 部署会让所有连接断开几秒）；节点会自行重连。
+- `Relay: STOPPED: … another process holding this identity (4004)` —— 两个进程共用一个节点身份；停掉另一个。
+
+`sym_status` 随时打印同一行。令牌永远不会出现在这些行中。
 
 ### 发现当前可用网格
 

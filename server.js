@@ -373,6 +373,12 @@ let { room: ROOM, source: ROOM_SOURCE } = resolveRoom(SERVICE_TYPE);
 let RELAY_URL = process.env.SYM_RELAY_URL || null;
 let RELAY_TOKEN = process.env.SYM_RELAY_TOKEN || null;
 
+// The relay sym_invite_create points a cross-network invite at when the caller names none.
+// It admits any token of HOSTED_RELAY_MIN_TOKEN characters or more into that token's own
+// isolated channel, so a team's invite works without anyone configuring the relay for them.
+const HOSTED_RELAY_URL = process.env.SYM_HOSTED_RELAY_URL || 'wss://sym-relay.onrender.com';
+const HOSTED_RELAY_MIN_TOKEN = 32;
+
 let node = new SymNode({
   name: NODE_NAME,
   autoSuffix: NODE_AUTOSUFFIX,   // engine handles collision (start-time-verified); off for pinned names
@@ -534,11 +540,15 @@ function registerNodeHandlers(n) {
   // line where the operator reads (the MCP server's stderr) — before this, the only trace of a
   // misconfigured seat was in the relay operator's log, under a name nobody could place.
   n.on('relay-auth-refused', (info) => {
-    process.stderr.write(
-      `sym-mesh-channel: relay ${info.relayUrl} refused ${info.name} (${info.code}: ${info.reason}). ` +
-      `The relay_token this session presents is not one that relay's operator configured — ` +
-      `get the token from whoever runs the relay, set it, and restart. LAN peers are unaffected.\n`
-    );
+    const line =
+      `Relay ${info.relayUrl} refused ${info.name} (${info.code}: ${info.reason}). ` +
+      `The relay_token this session presents is not accepted by that relay — mint a fresh invite ` +
+      `with sym_invite_create, or get the team's invite, then sym_join_room with it ` +
+      `(or fix SYM_RELAY_TOKEN and restart). LAN peers are unaffected.`;
+    process.stderr.write(`sym-mesh-channel: ${line}\n`);
+    // Once per episode (the engine emits it once), so the session itself learns — stderr is
+    // read by a person, if anyone; the channel is read by the agent that can call the fix.
+    pushChannel('relay-auth-refused', { relayUrl: info.relayUrl, code: info.code, reason: info.reason, text: line });
   });
 
   n.on('cmb-accepted', (entry) => {
@@ -786,7 +796,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'sym_status',
-      description: 'Get mesh node status — relay connection, peer count, memory count.',
+      description: 'Get mesh node status — relay state as one line (connected / refused with reason and fix / unreachable with next retry / not configured), peer count, memory count. Call it when a relay teammate is missing or after a relay-auth-refused channel notification.',
       inputSchema: { type: 'object', properties: {} },
     },
     {
@@ -816,13 +826,14 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'sym_invite_create',
-      description: 'Generate a shareable invite URL for a named mesh room. Team leads use this to let teammates join their dev-team mesh. LAN-only invite: pass room only, returns sym://room/{name}. Cross-network invite: pass relay_url + relay_token too, returns sym://team/{name}?relay=...&token=... — teammates on different networks join through the relay.',
+      description: 'Generate a shareable invite URL for a named mesh room. LAN-only invite: pass room only, returns sym://room/{name}. Cross-network invite (sessions on different networks — a laptop on the road and a Mac at home, two teammates in two offices): pass cross_network=true; the URL carries the hosted relay and a token minted here that names an isolated channel on it, sym://team/{name}?relay=...&token=... Pass relay_url to use a relay your team runs instead; pass relay_token to reuse an existing channel token. Whoever holds the URL can join the channel.',
       inputSchema: {
         type: 'object',
         properties: {
           room: { type: 'string', description: 'Kebab-case room name (single or double hyphens), e.g. "backend-team" or a tenant-suffixed "x-review--team-…".' },
-          relay_url: { type: 'string', description: 'Optional WebSocket relay URL (wss://…) of a relay your team runs, for cross-network teams. The relay admits only tokens its operator configured.' },
-          relay_token: { type: 'string', description: 'Optional relay channel token, issued by whoever runs the relay — not a secret the team invents.' },
+          cross_network: { type: 'boolean', description: 'Make a relay invite: hosted relay + a token minted here (32 random bytes). Implied when relay_url or relay_token is given.' },
+          relay_url: { type: 'string', description: 'Optional WebSocket relay URL (wss://…) of a relay your team runs. Defaults to the hosted relay for a cross-network invite.' },
+          relay_token: { type: 'string', description: 'Optional existing channel token (32+ characters on the hosted relay; a relay you run may require a token its operator configured). Omit to mint one.' },
         },
         required: ['room'],
       },
@@ -838,7 +849,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'sym_join_room',
-      description: 'Hot-swap this node into a different mesh room at runtime — no Claude Code restart needed. Stops the current SymNode, reconstructs it with the new room (and optional relay credentials), and restarts it. Teammates on the same room/relay will discover this node via Bonjour (LAN) or the relay (cross-network). To leave a room, pass room="default" which reverts to the global _sym._tcp mesh.',
+      description: 'Hot-swap this node into a different mesh room at runtime — no Claude Code restart needed. Stops the current SymNode, reconstructs it with the new room (and optional relay credentials), and restarts it. Teammates on the same room/relay will discover this node via Bonjour (LAN) or the relay (cross-network). With a relay, the result is the relay\'s answer (admitted / refused with the reason and fix / unreachable), waited for up to 10 s; a refusal returns isError. To leave a room, pass room="default" which reverts to the global _sym._tcp mesh.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -1173,7 +1184,10 @@ async function dispatchTool(request) {
           type: 'text',
           text: `Node: ${NODE_NAME} (${node.nodeId?.slice(0, 8) || '?'})\n` +
             `Room: ${ROOM} (${SERVICE_TYPE})\n` +
-            `Relay: ${s.relayConnected ? 'connected' : 'disconnected'}\n` +
+            // The engine's one-line diagnosis (@sym-bot/sym ≥ 0.13.6): phase, fault and fix in the
+            // same sentence, so the session can act on a refused/unreachable relay without a
+            // human reading the relay operator's log. Older engines only know connected/not.
+            `Relay: ${s.relayStatus || (s.relayConnected ? 'connected' : 'disconnected')}\n` +
             `Peers: ${s.peerCount || 0}\n` +
             `Memories: ${s.memoryCount || 0}`,
         }],
@@ -1213,8 +1227,16 @@ async function dispatchTool(request) {
 
     case 'sym_invite_create': {
       const room = args?.room;
-      const relayUrl = args?.relay_url;
-      const relayToken = args?.relay_token;
+      // Cross-network when asked for, or when either relay field is given. The relay
+      // defaults to the hosted one; the token is minted here when the caller brings none —
+      // 32 random bytes, which is both the hosted relay's admission floor and the reason two
+      // teams can never land in the same channel by picking the same phrase.
+      const crossNetwork = !!(args?.cross_network || args?.relay_url || args?.relay_token);
+      const relayUrl = crossNetwork ? (args?.relay_url || HOSTED_RELAY_URL) : undefined;
+      const minted = crossNetwork && !args?.relay_token;
+      const relayToken = crossNetwork
+        ? (args?.relay_token || crypto.randomBytes(32).toString('base64url'))
+        : undefined;
       if (!room || typeof room !== 'string') {
         return { content: [{ type: 'text', text: 'Missing required argument: room' }], isError: true };
       }
@@ -1231,24 +1253,40 @@ async function dispatchTool(request) {
       // Cross-network flavor: sym://team/{name}?relay=...&token=...
       let url;
       let flavor;
-      if (relayUrl || relayToken) {
-        if (!relayUrl) return { content: [{ type: 'text', text: 'relay_token requires relay_url' }], isError: true };
-        const params = [`relay=${encodeURIComponent(relayUrl)}`];
-        if (relayToken) params.push(`token=${encodeURIComponent(relayToken)}`);
-        url = `sym://team/${room}?${params.join('&')}`;
+      let tokenNote = '';
+      if (crossNetwork) {
+        if (relayUrl === HOSTED_RELAY_URL && relayToken.length < HOSTED_RELAY_MIN_TOKEN) {
+          return {
+            content: [{
+              type: 'text',
+              text: `relay_token is ${relayToken.length} characters; the hosted relay admits ${HOSTED_RELAY_MIN_TOKEN} or more. ` +
+                `Omit relay_token and one is minted for you.`,
+            }],
+            isError: true,
+          };
+        }
+        url = `sym://team/${room}?relay=${encodeURIComponent(relayUrl)}&token=${encodeURIComponent(relayToken)}`;
         flavor = 'cross-network (relay)';
+        tokenNote = (minted
+          ? `The token in this URL was minted just now; it names an isolated channel on ${relayUrl}. `
+          : `The token in this URL names a channel on ${relayUrl}. `) +
+          `Anyone holding the URL can join that channel — share it as you would a password. ` +
+          `To lock a device out, mint a new invite and re-join with it; there is no per-device revocation.\n\n`;
       } else {
         url = `sym://room/${room}`;
         flavor = 'LAN-only (Bonjour)';
       }
-      const youRunning = ROOM === room
-        ? `You're already on this room — teammates who join will see you.`
-        : `You are currently on room "${ROOM}". To be reachable, call sym_join_room with room="${room}" (+ same relay creds if cross-network) before sharing.`;
+      const alreadyHere = ROOM === room && (!crossNetwork || (RELAY_URL === relayUrl && RELAY_TOKEN === relayToken));
+      const joinCall = { room, ...(crossNetwork ? { relay_url: relayUrl, relay_token: relayToken } : {}) };
+      const youRunning = alreadyHere
+        ? `You're already on this room${crossNetwork ? ' through this relay channel' : ''} — teammates who join will see you.`
+        : `You are not on this ${crossNetwork ? 'relay channel' : 'room'} yet. To be reachable, call sym_join_room first:\n\n    ${JSON.stringify(joinCall)}`;
       return {
         content: [{
           type: 'text',
           text: `Invite URL (${flavor}):\n\n    ${url}\n\n` +
             `Share this URL with teammates. Each pastes it into Claude Code and calls sym_join_room (or sym_invite_info for a dry run first).\n\n` +
+            tokenNote +
             youRunning,
         }],
       };
@@ -1367,13 +1405,38 @@ async function dispatchTool(request) {
 
       publishRoomBeacon();   // re-advertise the new room on _symrooms._tcp
 
+      const swapped = `Hot-swapped from room "${prevRoom}" (${prevServiceType}) to "${room}" (${newServiceType}).\n`;
+      if (!relayUrl) {
+        return {
+          content: [{
+            type: 'text',
+            text: swapped + `Discovering peers on the new service type. Call sym_peers in a moment to see who's online.`,
+          }],
+        };
+      }
+
+      // A join over a relay is answered by the relay — admitted, refused, or nobody home —
+      // and that answer is the result of this call, not "discovering peers". Wait for it
+      // (bounded) so the session sees a refused token or an unreachable relay here, in the
+      // tool result it is already reading, instead of in a log it never opens.
+      const outcome = typeof node.awaitRelayOutcome === 'function'
+        ? await node.awaitRelayOutcome(10000)
+        : null;
+      const relayLine = node.status().relayStatus || `relay: ${relayUrl}`;
+      const failed = outcome && (outcome.phase === 'refused' || outcome.phase === 'collision');
+      const settled = outcome && outcome.phase === 'connected';
       return {
         content: [{
           type: 'text',
-          text: `Hot-swapped from room "${prevRoom}" (${prevServiceType}) to "${room}" (${newServiceType}).\n` +
-            (relayUrl ? `Relay: ${relayUrl}\n` : '') +
-            `Discovering peers on the new service type. Call sym_peers in a moment to see who's online.`,
+          text: swapped +
+            `Relay: ${relayLine}\n` +
+            (settled
+              ? `Call sym_peers to see who's online; teammates who join with the same invite will appear as they arrive.`
+              : failed
+                ? `You are still in room "${room}" for LAN peers; nothing crosses the relay until this is fixed.`
+                : `The relay has not answered yet — it keeps retrying in the background. Call sym_status to see where it stands.`),
         }],
+        ...(failed ? { isError: true } : {}),
       };
     }
 

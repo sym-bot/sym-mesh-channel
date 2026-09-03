@@ -7,7 +7,7 @@
     "sym-mesh-channel": "server.js"
   },
   "scripts": {
-    "test": "node test/readme.test.js && node test/plugin.test.js && node test/classifier-risk.test.js && node test/identity.test.js && node test/fetch-surface.test.js && node test/invite-scheme-compat.test.js",
+    "test": "node test/readme.test.js && node test/plugin.test.js && node test/classifier-risk.test.js && node test/identity.test.js && node test/fetch-surface.test.js && node test/invite-scheme-compat.test.js && node test/relay-surface.test.js",
     "release": "node scripts/release.mjs",
     "verify:packed": "node scripts/verify-packed-artifact.mjs",
     "prepublishOnly": "npm run verify:packed"

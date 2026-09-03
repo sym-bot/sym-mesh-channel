@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased
+
+### Changed — the session can see the relay
+
+A session whose token a relay refused saw `Relay: disconnected` from `sym_status` and
+"Discovering peers on the new service type" from `sym_join_room`, while the relay's log
+filled with its rejections. The party who could see the fault (the relay operator) and the
+party who could fix it (the session) were not the same one.
+
+- `sym_join_room` with a relay now waits (up to 10 s) for the relay's answer and returns it:
+  admitted (`connected to … N relay peer(s)`), refused (`REFUSED by … (4003: <reason>)` plus
+  the fix — `isError`), or unreachable (last close, next retry, "LAN peers are unaffected").
+- `sym_status` prints the engine's one-line relay diagnosis instead of connected/disconnected.
+- A relay refusal also pushes one `relay-auth-refused` channel notification (in addition to the
+  stderr line from 0.9.5), so the session learns without being asked.
+- Requires `@sym-bot/sym` ≥ 0.13.6 for the state; on an older engine the old words are used.
+
+### Changed — `sym_invite_create` mints the credential
+
+`cross_network: true` returns a `sym://team/…` invite pointing at the hosted relay with a
+token minted in the session (32 random bytes, base64url). The result says what the token is
+(it names an isolated channel; whoever holds the URL can join), how to rotate it (a new invite;
+no per-device revocation), and prints the exact `sym_join_room` call the creator must make to
+be reachable. `relay_url` still selects a relay your team runs; `relay_token` still reuses an
+existing token; a token under 32 characters aimed at the hosted relay is refused before the
+relay refuses it. LAN invites are unchanged. Docs (EN/中文) re-advertise the hosted relay for
+cross-network use — the previous "we host one, any shared secret works" wording described a
+relay that did not admit such tokens.
+
 ## 0.9.5 (2026-09-03)
 
 ### Added — a relay's auth refusal is printed where the session's operator reads it
