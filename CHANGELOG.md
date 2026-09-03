@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.6 (2026-09-03)
 
 ### Changed — the session can see the relay
 
