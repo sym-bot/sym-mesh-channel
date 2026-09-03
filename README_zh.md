@@ -220,6 +220,8 @@ npx @sym-bot/mesh-channel init --force --room default
 
 成员粘贴链接后，`sym_invite_info` 自动提取中继与令牌参数，`sym_join_room` 以相同参数热切换。创建者也必须加入（`sym_invite_create` 会打印精确的 `sym_join_room` 调用）。自建中继的团队传 `relay_url`，若该中继只接受运营者配置的令牌则再传 `relay_token`。
 
+经中继的加入会被记住。带中继的 `sym_join_room` 会把凭据写入 `~/.sym/relays/<房间名>.json`（权限 0600，位于状态根目录下 —— 绝不写入项目，因此不会被误提交）。下次启动解析到同一房间的服务器 —— 在 `.sym/node.json` 中固定房间的项目，或插件环境中的 `SYM_ROOM` —— 会自动重新加入该通道；`sym_status` 显示 `Relay credential: remembered for room '…'`。不带凭据的 `sym_join_room { room }` 使用记住的凭据；`sym_join_room { room, lan_only: true }` 忘记它。环境中显式的 `SYM_RELAY_URL`/`SYM_RELAY_TOKEN` 仍优先于记住的凭据。
+
 中继只转发帧，不保存任何帧。两个会话都在线时才能交换 CMB，因此「路上 ↔ 家里」的场景要让家里那一侧保持在线 —— 常开机器上运行 `sym-daemon`，或者让一个 Claude Code 会话开着。
 
 **中继拒绝时。** 经中继加入返回的是中继的回答，而不是「正在发现节点」：

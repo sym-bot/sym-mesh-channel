@@ -207,6 +207,8 @@ The token is 32 random bytes minted in your session. On the hosted relay it name
 
 Teammate pastes the URL, `sym_invite_info` extracts the relay and token from the query string, `sym_join_room` hot-swaps with the same args. The creator must join too (`sym_invite_create` prints the exact `sym_join_room` call). A team that runs its own relay passes `relay_url`, and `relay_token` if that relay only admits tokens its operator configured.
 
+A relay join is remembered. `sym_join_room` with a relay writes the credential to `~/.sym/relays/<room>.json` (mode 0600, under the state root — never into the project, so it cannot be committed by accident). The next start of a server that resolves the same room — a project that pins its room in `.sym/node.json`, or `SYM_ROOM` in the plugin env — re-joins the channel without being asked; `sym_status` shows `Relay credential: remembered for room '…'`. `sym_join_room { room }` with no credential uses the remembered one; `sym_join_room { room, lan_only: true }` forgets it. Explicit `SYM_RELAY_URL`/`SYM_RELAY_TOKEN` in the env still win over a remembered credential.
+
 The relay carries frames; it keeps none. Two sessions exchange CMBs when both are connected, so for the on-the-road ↔ home case keep the home side up — a `sym-daemon` on the always-on machine, or a Claude Code session left open.
 
 **When the relay says no.** A join over a relay returns the relay's answer, not "discovering peers":

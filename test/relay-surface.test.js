@@ -16,6 +16,13 @@ const path = require('path');
 const { spawn } = require('child_process');
 const assert = require('assert');
 const { WebSocketServer } = require('ws');
+const fs = require('fs');
+const os = require('os');
+
+// Every server in this file is rooted in a throwaway state dir: a relay join is REMEMBERED
+// under the state root, and a test must never write a credential into the real ~/.sym.
+const STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-surface-'));
+process.on('exit', () => { try { fs.rmSync(STATE_DIR, { recursive: true, force: true }); } catch {} });
 
 let passed = 0, failed = 0;
 function check(name, fn) {
@@ -31,10 +38,10 @@ function fakeRelay(answer) {
 }
 
 /** One MCP session over stdio. Collects responses AND notifications. */
-function mcpCall(requests, env = {}) {
+function mcpCall(requests, env = {}, settleMs = 0) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], {
-      env: { ...process.env, SYM_NODE_NAME: 'relay-surface-test', SYM_ROOM: 'relay-surface-test-room', SYM_RELAY_URL: '', SYM_RELAY_TOKEN: '', ...env },
+      env: { ...process.env, SYM_NODE_NAME: 'relay-surface-test', SYM_ROOM: 'relay-surface-test-room', SYM_RELAY_URL: '', SYM_RELAY_TOKEN: '', SYM_STATE_DIR: STATE_DIR, ...env },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     let out = '';
@@ -52,7 +59,8 @@ function mcpCall(requests, env = {}) {
       if (answered >= requests.length + 1) {
         clearTimeout(timer); child.kill(); resolve(parsed);
       } else if (answered === sent + 1) {
-        sendNext();
+        // settleMs: give a server that re-joins a relay at startup time to hear the answer.
+        if (sent === 0 && settleMs) setTimeout(sendNext, settleMs); else sendNext();
       }
     });
     child.on('error', (e) => { clearTimeout(timer); reject(e); });
@@ -162,6 +170,52 @@ const isError = (byId, id) => !!(byId.get(id) && byId.get(id).result && byId.get
     });
     check('sym_status agrees', () => {
       assert.ok(/^Relay: connected to ws:/m.test(textOf(byId, 2)), textOf(byId, 2));
+    });
+  }
+
+  // ── Restart: the credential is remembered per room, restored on the next start, forgettable ──
+  {
+    const admitting = fakeRelay((ws) => ws.send(JSON.stringify({ type: 'relay-peers', peers: [] })));
+    const first = await mcpCall([
+      call(1, 'sym_join_room', { room: 'relay-surface-team', relay_url: admitting.url, relay_token: 'r'.repeat(40) }),
+    ]);
+    const byId1 = new Map(first.filter((r) => r.id !== undefined).map((r) => [r.id, r]));
+    const file = path.join(STATE_DIR, 'relays', 'relay-surface-team.json');
+
+    check('a relay join is remembered for the room under the state root, mode 0600, and says so', () => {
+      assert.ok(/Relay credential remembered for room "relay-surface-team"/.test(textOf(byId1, 1)), textOf(byId1, 1));
+      assert.ok(fs.existsSync(file), `expected ${file}`);
+      assert.strictEqual(fs.statSync(file).mode & 0o777, 0o600);
+      const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
+      assert.strictEqual(saved.relay_url, admitting.url);
+      assert.strictEqual(saved.relay_token, 'r'.repeat(40));
+    });
+
+    // A new server (a Claude Code restart) that resolves the same room from env — as a
+    // project pinning its room in .sym/node.json would — re-joins without being asked.
+    const second = await mcpCall([call(1, 'sym_status', {})], { SYM_ROOM: 'relay-surface-team' }, 2000);
+    const byId2 = new Map(second.filter((r) => r.id !== undefined).map((r) => [r.id, r]));
+    check('the next start of the room re-joins the relay from the remembered credential', () => {
+      const t = textOf(byId2, 1);
+      assert.ok(/^Relay: connected to ws:/m.test(t), t);
+      assert.ok(/^Relay credential: remembered for room 'relay-surface-team'/m.test(t), t);
+    });
+
+    // A join of the same room with no credential uses the remembered one; lan_only forgets it.
+    const third = await mcpCall([
+      call(1, 'sym_join_room', { room: 'relay-surface-team' }),
+      call(2, 'sym_join_room', { room: 'relay-surface-team', lan_only: true }),
+      call(3, 'sym_status', {}),
+    ]);
+    await admitting.close();
+    const byId3 = new Map(third.filter((r) => r.id !== undefined).map((r) => [r.id, r]));
+    check('sym_join_room without a credential restores the remembered one; lan_only forgets it', () => {
+      assert.ok(/Relay credential restored from the one remembered/.test(textOf(byId3, 1)), textOf(byId3, 1));
+      assert.ok(/^Relay: connected to ws:/m.test(textOf(byId3, 1)));
+      assert.ok(/has been forgotten; this node is LAN-only/.test(textOf(byId3, 2)), textOf(byId3, 2));
+      assert.ok(!fs.existsSync(file), 'the file is gone');
+      assert.ok(/^Relay: not configured \(LAN only\)/m.test(textOf(byId3, 3)), textOf(byId3, 3));
+      assert.ok(!/Relay credential:/.test(textOf(byId3, 3)));
     });
   }
 

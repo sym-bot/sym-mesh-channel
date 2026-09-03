@@ -53,6 +53,7 @@ const { SymNode } = require('@sym-bot/sym');
 const { scanClassifierRisk, quarantineHeader } = require('./classifier-risk.js');
 const { hiddenFieldsTag } = require('./surface-truth.js');
 const { resolveIdentity } = require('./identity.js');
+const { loadRelay, saveRelay, forgetRelay } = require('./relay-store.js');
 const outbox = require('./outbox.js');
 
 // Room-name grammar and the room->service-type mapping come from the SDK, which
@@ -370,8 +371,18 @@ function resolveRoom(serviceType) {
 // smallest change that makes hot-swap possible.
 let SERVICE_TYPE = resolveServiceType();
 let { room: ROOM, source: ROOM_SOURCE } = resolveRoom(SERVICE_TYPE);
-let RELAY_URL = process.env.SYM_RELAY_URL || null;
-let RELAY_TOKEN = process.env.SYM_RELAY_TOKEN || null;
+// Relay credentials: explicit env first, else the credential remembered for this room by an
+// earlier sym_join_room (relay-store.js) — so a relay join survives a Claude Code restart.
+// The source is kept so status can say which one is in force.
+function resolveRelay(room) {
+  if (process.env.SYM_RELAY_URL) {
+    return { url: process.env.SYM_RELAY_URL, token: process.env.SYM_RELAY_TOKEN || null, source: 'SYM_RELAY_URL env' };
+  }
+  const saved = loadRelay(room);
+  if (saved) return { url: saved.relay_url, token: saved.relay_token, source: `remembered for room '${room}' (${saved.file})` };
+  return { url: null, token: null, source: null };
+}
+let { url: RELAY_URL, token: RELAY_TOKEN, source: RELAY_SOURCE } = resolveRelay(ROOM);
 
 // The relay sym_invite_create points a cross-network invite at when the caller names none.
 // It admits any token of HOSTED_RELAY_MIN_TOKEN characters or more into that token's own
@@ -854,8 +865,9 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         type: 'object',
         properties: {
           room: { type: 'string', description: 'Kebab-case room name (single or double hyphens), e.g. "backend-team" or a tenant-suffixed "x-review--team-…". Pass "default" to return to the global mesh.' },
-          relay_url: { type: 'string', description: 'Optional WebSocket relay URL for cross-network teams. Leave empty for LAN-only.' },
-          relay_token: { type: 'string', description: 'Optional relay authentication token.' },
+          relay_url: { type: 'string', description: 'Optional WebSocket relay URL for cross-network teams. When given, the credential is remembered for this room under ~/.sym/relays/ and re-used on the next start. When omitted, a credential remembered for this room is used if one exists.' },
+          relay_token: { type: 'string', description: 'Optional relay channel token (from the invite).' },
+          lan_only: { type: 'boolean', description: 'Join LAN-only and forget any relay credential remembered for this room.' },
         },
         required: ['room'],
       },
@@ -1188,6 +1200,7 @@ async function dispatchTool(request) {
             // same sentence, so the session can act on a refused/unreachable relay without a
             // human reading the relay operator's log. Older engines only know connected/not.
             `Relay: ${s.relayStatus || (s.relayConnected ? 'connected' : 'disconnected')}\n` +
+            (RELAY_SOURCE ? `Relay credential: ${RELAY_SOURCE}\n` : '') +
             `Peers: ${s.peerCount || 0}\n` +
             `Memories: ${s.memoryCount || 0}`,
         }],
@@ -1333,8 +1346,6 @@ async function dispatchTool(request) {
 
     case 'sym_join_room': {
       const room = args?.room;
-      const relayUrl = args?.relay_url || null;
-      const relayToken = args?.relay_token || null;
       if (!room || typeof room !== 'string') {
         return { content: [{ type: 'text', text: 'Missing required argument: room' }], isError: true };
       }
@@ -1343,6 +1354,18 @@ async function dispatchTool(request) {
           content: [{ type: 'text', text: `Invalid room name: "${room}" — ${roomRefusalReason(room)}.` }],
           isError: true,
         };
+      }
+      // Credential precedence: the call's own > the one remembered for this room > none.
+      // `lan_only` both skips and forgets the remembered one — the explicit way back to LAN.
+      let relayUrl = args?.relay_url || null;
+      let relayToken = args?.relay_token || null;
+      let relaySource = relayUrl ? 'this call' : null;
+      if (args?.lan_only) {
+        relayUrl = null; relayToken = null;
+        if (forgetRelay(room)) relaySource = 'forgotten';
+      } else if (!relayUrl) {
+        const saved = loadRelay(room);
+        if (saved) { relayUrl = saved.relay_url; relayToken = saved.relay_token; relaySource = `remembered (${saved.file})`; }
       }
 
       const newServiceType = roomServiceType(room);
@@ -1402,6 +1425,17 @@ async function dispatchTool(request) {
       SERVICE_TYPE = newServiceType;
       RELAY_URL = relayUrl;
       RELAY_TOKEN = relayToken;
+      // Remember the credential for this room so the next start of this server re-joins the
+      // same channel without being asked. Written under the state root, never the project.
+      let remembered = null;
+      if (relayUrl && relaySource === 'this call') {
+        remembered = saveRelay(room, { relay_url: relayUrl, relay_token: relayToken });
+        RELAY_SOURCE = remembered ? `remembered for room '${room}' (${remembered})` : 'sym_join_room (not persisted — the relays directory is not writable)';
+      } else if (relayUrl) {
+        RELAY_SOURCE = relaySource;
+      } else {
+        RELAY_SOURCE = null;
+      }
 
       publishRoomBeacon();   // re-advertise the new room on _symrooms._tcp
 
@@ -1410,10 +1444,19 @@ async function dispatchTool(request) {
         return {
           content: [{
             type: 'text',
-            text: swapped + `Discovering peers on the new service type. Call sym_peers in a moment to see who's online.`,
+            text: swapped +
+              (relaySource === 'forgotten' ? `The relay credential remembered for "${room}" has been forgotten; this node is LAN-only.\n` : '') +
+              `Discovering peers on the new service type. Call sym_peers in a moment to see who's online.`,
           }],
         };
       }
+      const credentialLine = remembered
+        ? `Relay credential remembered for room "${room}" (${remembered}, mode 0600) — the next start of this server re-joins it; sym_join_room {room, lan_only: true} forgets it.\n`
+        : relaySource && relaySource.startsWith('remembered')
+          ? `Relay credential restored from the one remembered for this room.\n`
+          : relaySource === 'this call'
+            ? `Relay credential NOT remembered (could not write under the relays directory) — this join lasts until the server restarts.\n`
+            : '';
 
       // A join over a relay is answered by the relay — admitted, refused, or nobody home —
       // and that answer is the result of this call, not "discovering peers". Wait for it
@@ -1430,6 +1473,7 @@ async function dispatchTool(request) {
           type: 'text',
           text: swapped +
             `Relay: ${relayLine}\n` +
+            credentialLine +
             (settled
               ? `Call sym_peers to see who's online; teammates who join with the same invite will appear as they arrive.`
               : failed
@@ -1720,6 +1764,7 @@ function announceRoom() {
     `sym-mesh-channel: node '${NODE_NAME}' in room '${ROOM}' (${SERVICE_TYPE}) ` +
     `— room source: ${ROOM_SOURCE}\n`,
   );
+  if (RELAY_URL) process.stderr.write(`sym-mesh-channel: relay ${RELAY_URL} — credential source: ${RELAY_SOURCE}\n`);
   if (ROOM === 'default' && !process.env.SYM_ROOM) {
     process.stderr.write(
       `sym-mesh-channel: room 'default' was not configured anywhere — it is the fallback. ` +

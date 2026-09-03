@@ -17,6 +17,16 @@ party who could fix it (the session) were not the same one.
   stderr line from 0.9.5), so the session learns without being asked.
 - Requires `@sym-bot/sym` ≥ 0.13.6 for the state; on an older engine the old words are used.
 
+### Added — a relay join survives a restart
+
+`sym_join_room` with a relay remembers the credential for that room in
+`~/.sym/relays/<room>.json` (0600, under `SYM_STATE_DIR` when set — never in the project).
+A server that starts into the same room re-joins the channel unasked and `sym_status` names
+the source (`Relay credential: remembered for room '…'` / `SYM_RELAY_URL env`).
+`sym_join_room { room }` with no credential uses the remembered one; `{ room, lan_only: true }`
+forgets it. Before, the join lived in the MCP server's memory only: quit Claude Code on the
+home Mac and the road session saw `0 relay peer(s)` and no error.
+
 ### Changed — `sym_invite_create` mints the credential
 
 `cross_network: true` returns a `sym://team/…` invite pointing at the hosted relay with a
