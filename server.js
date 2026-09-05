@@ -1368,6 +1368,21 @@ async function dispatchTool(request) {
         if (saved) { relayUrl = saved.relay_url; relayToken = saved.relay_token; relaySource = `remembered (${saved.file})`; }
       }
 
+      // The hosted relay's floor, applied HERE, before the current node is stopped: a token
+      // under 32 characters is refused by the relay with a reason an engine older than 0.13.5
+      // never prints, and the node then knocks every ~23 s for the life of the process — two
+      // sessions did exactly that on 2026-09-05. Refusing at the call leaves the node where it
+      // was and names the fix.
+      if (relayUrl && relayToken && relayUrl === HOSTED_RELAY_URL && relayToken.length < HOSTED_RELAY_MIN_TOKEN) {
+        return {
+          content: [{ type: 'text', text:
+            `relay_token is ${relayToken.length} characters; ${HOSTED_RELAY_URL} admits ${HOSTED_RELAY_MIN_TOKEN} or more, so this join would be refused on every attempt. ` +
+            `Nothing was changed — this node is still in room '${ROOM}'. Mint a token with sym_invite_create (cross_network: true) and share that invite; ` +
+            `the invitee joins with its token.` }],
+          isError: true,
+        };
+      }
+
       const newServiceType = roomServiceType(room);
       const prevRoom = ROOM;
       const prevServiceType = SERVICE_TYPE;
