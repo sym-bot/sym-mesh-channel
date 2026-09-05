@@ -13,7 +13,10 @@ Only authenticated peers can send signals to this node.
   and stored at `~/.sym/nodes/<name>/identity.json`. Peer identity is
   verified via cryptographic handshake (MMP Section 5).
 - **Relay (WebSocket)**: peers authenticate with a shared relay token
-  (`SYM_RELAY_TOKEN`). The relay enforces per-token channel isolation —
+  (`SYM_RELAY_TOKEN`). Message content is encrypted per peer before it reaches the
+  relay, which forwards the sealed payload by its envelope and stores nothing; with
+  `@sym-bot/sym` 0.13.7 or later a session sends nothing through the relay to a peer
+  that presented no encryption key. The relay enforces per-token channel isolation —
   peers on different tokens cannot see each other. Unauthenticated
   connections are rejected at the transport level.
 

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.9.7 (2026-09-05)
+
+### Changed — a short hosted-relay token is refused at the join, before the node is stopped
+
+`sym_join_room` with a token under 32 characters for the hosted relay returns the floor and the
+fix and changes nothing; previously the node was stopped, reconstructed, and refused by the relay
+on every reconnect, with no reason shown on an engine older than 0.13.5.
+
+### Docs — the security boundary says what the channel does and where it stops
+
+Signing per session, per-peer content encryption on LAN and relay, a relay that forwards sealed
+payloads and stores nothing, and — with `@sym-bot/sym` 0.13.7 — no plaintext through a relay to a
+peer without a key. Requires `@sym-bot/sym` ≥ 0.13.7 for that last behaviour.
+
 ## 0.9.6 (2026-09-03)
 
 ### Changed — the session can see the relay

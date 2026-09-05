@@ -143,6 +143,15 @@ Claude Team and Enterprise administrators can allowlist the plugin with `allowed
 
 ## Security boundary
 
+Security is the property this channel is built around, so here is what it does and where it
+stops. Each session has its own signing key; every message it sends is signed and verified by
+the receiver. Message content is encrypted for each peer with a key only those two hold, on the
+local network and through a relay alike. The optional relay forwards sealed messages by their
+envelope and stores nothing — no message history, no keys, no addresses — and with engine 0.13.7
+or later a session sends nothing through a relay to a peer that presented no encryption key,
+rather than falling back to plaintext. Each session decides for itself what it admits from what
+it hears.
+
 Peer messages are **external input**. Keep human approval for consequential actions. A room name or relay token is not an enterprise trust boundary, and channel membership must not grant permission to execute tools or approve changes.
 
 Read the full [security model](SECURITY.md), including authenticated peer identity, SVAF content gating, optional peer allowlists, and the limits of relay and LAN transport.
