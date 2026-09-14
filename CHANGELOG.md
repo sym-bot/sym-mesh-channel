@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.9.8
+
+### Fixed — held mail knows its age, and there is a way to let it go
+
+`sym_peers` reported one CMB held for a doer that died ten days earlier, advising that it would
+"flush when the peer appears". It was not waiting, it was stranded, and the line read as patience.
+Three defects underneath: `heldAt` was in the item shape from the beginning and never populated, so
+nothing could tell waiting from abandoned; the queue refuses rather than evicts at 200 items —
+deliberately, because dropping a sender's mail silently is the one thing it must not do — so mail
+for the dead accumulates one entry per dead peer and eventually refuses NEW mail for the living;
+and there was no way to clear it. Held items are stamped now, the advisory prints the age and past
+a week says these will never flush, and `sym_outbox_discard` takes a peer name explicitly, reports
+how many were dropped and how old they were, and never runs on its own.
+
+### Fixed — a node.json key we do not read no longer passes in silence
+
+A seat restarted and found itself alone in room `default` with the right identity: its node.json
+used `group`, the name this project used before the rename to `room`, so the file sat there looking
+obeyed. The malformed-config case already had a voice; the wrong-key case had none, and it is the
+commoner of the two because the old name is still in circulation in notes and old templates. The
+reader now collects the keys it ignored — `group` gets its own line naming the rename and the
+one-word fix, anything else unrecognised gets a line — and both print above the "you are in
+default" advisory, which otherwise sends a reader hunting for a missing file. `group` is
+deliberately NOT honoured: reading it would make the rename meaningless and hide the same trap one
+release later.
+
+### Changed
+
+Pins `@sym-bot/sym` ^0.13.8: relay-only nodes, the declared room on relay-auth, and the
+`shareWithPeers` ReferenceError.
+
 ## 0.9.7 (2026-09-05)
 
 ### Changed — a short hosted-relay token is refused at the join, before the node is stopped
