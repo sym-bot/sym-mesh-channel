@@ -806,6 +806,17 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       inputSchema: { type: 'object', properties: {} },
     },
     {
+      name: 'sym_outbox_discard',
+      description: 'Discard CMBs this node is holding for a peer that is never coming back. Names the peer explicitly and reports what was dropped and how long it had been held — held mail is never evicted on its own, because only the sender knows it exists.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          peer: { type: 'string', description: 'The peer name whose held CMBs to discard, exactly as sym_peers reports it.' },
+        },
+        required: ['peer'],
+      },
+    },
+    {
       name: 'sym_status',
       description: 'Get mesh node status — relay state as one line (connected / refused with reason and fix / unreachable with next retry / not configured), peer count, memory count. Call it when a relay teammate is missing or after a relay-auth-refused channel notification.',
       inputSchema: { type: 'object', properties: {} },
@@ -1070,6 +1081,25 @@ async function dispatchTool(request) {
       return { content: [{ type: 'text', text: lines.join('\n\n') + more }] };
     }
 
+    case 'sym_outbox_discard': {
+      // THE ACTION THE ADVISORY NOW NAMES. A held CMB is invisible to everyone but this sender and
+      // is never evicted automatically — dropping mail silently is the one thing this queue must
+      // not do. But a peer ten days dead is not a wait, and its mail counts against the limit that
+      // refuses NEW mail, so the operator needs a way to accept the loss out loud.
+      const peer = String((args && args.peer) || '').trim();
+      if (!peer) return { content: [{ type: 'text', text: 'sym_outbox_discard needs a peer name — the one sym_peers reports in the OUTBOX line.' }] };
+      const pending = outbox.pendingFor(NODE_NAME, peer);
+      if (pending.length === 0) return { content: [{ type: 'text', text: `Nothing held for "${peer}". sym_peers lists the peers that do have mail waiting.` }] };
+      const now = Date.now();
+      const ages = pending.map((i) => outbox.ageDays(i, now)).filter((a) => a !== null);
+      const oldest = ages.length ? Math.max(...ages) : null;
+      const left = outbox.drop(NODE_NAME, pending.map((i) => i.seq));
+      return { content: [{ type: 'text', text:
+        `Discarded ${pending.length} CMB(s) held for "${peer}"` +
+        (oldest !== null ? `, the oldest held ${oldest} day(s)` : '') +
+        `. They were never delivered and are gone. ${left} CMB(s) remain held for other peers.` }] };
+    }
+
     case 'sym_peers': {
       const peers = node.peers();
       // "No peers" is the exact moment someone asks why the mesh is quiet, and a
@@ -1082,9 +1112,18 @@ async function dispatchTool(request) {
       const ob = outbox.summary(NODE_NAME);
       if (ob.total > 0) {
         const per = Object.entries(ob.byPeer).map(([n, c]) => `${c} for "${n}"`).join(', ');
+        // The age is the part that makes this actionable. "They flush when the peer appears" reads
+        // as a wait; at ten days it is a peer that is not coming back, and the queue refuses new
+        // mail at MAX_ITEMS rather than evicting — so old mail for the dead eventually blocks new
+        // mail for the living (dev-team-4, 2026-09-14).
+        const age = ob.oldestDays;
+        const stale = age !== null && age >= 7;
         advisory.push(
-          `OUTBOX: ${ob.total} CMB(s) HELD AT THIS SENDER, not delivered — ${per}. ` +
-          `They flush when the peer appears. If this node does not come back, they are lost.`,
+          `OUTBOX: ${ob.total} CMB(s) HELD AT THIS SENDER, not delivered — ${per}` +
+          (age !== null ? `; oldest held ${age} day(s)` : "") + `. ` +
+          (stale
+            ? `A peer gone this long is unlikely to return: these will never flush, and they count against the ${outbox.MAX_ITEMS}-item limit that refuses NEW mail. Clear them with sym_outbox_discard once you accept they are lost.`
+            : `They flush when the peer appears. If this node does not come back, they are lost.`),
         );
       }
       const advisoryText = advisory.length ? `\n\n${advisory.join('\n')}` : '';

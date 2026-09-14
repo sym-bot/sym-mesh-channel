@@ -10,10 +10,13 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
+// Isolate the store BEFORE the module loads: these tests used to write into the operator's real
+// ~/.sym/nodes, so leftovers from earlier runs made two of them fail on history rather than code.
+process.env.SYM_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'sym-outbox-test-'));
 const outbox = require('../outbox.js');
 
 const N = 'outbox-test-node';
-const dir = path.join(os.homedir(), '.sym', 'nodes', N);
+const dir = path.join(process.env.SYM_HOME, 'nodes', N);   // the store the module actually uses
 const clean = () => fs.rmSync(dir, { recursive: true, force: true });
 
 test('an UNKNOWN peer name is not holdable — a typo must not create a queue', () => {
@@ -50,7 +53,7 @@ test('held items survive a reload — the queue is durable, not in-memory', () =
   outbox.hold(N, 'p', { focus: 'second' }, {});
   const again = outbox.pendingFor(N, 'p');   // re-reads from disk
   assert.equal(again.length, 2);
-  assert.equal(again[0].fields.focus, 'first', 'FIFO order preserved across reload');
+  assert.equal(again[0].categories.focus, 'first', 'FIFO order preserved across reload');
   clean();
 });
 
@@ -61,7 +64,7 @@ test('drop removes ONLY the acknowledged seqs', () => {
   outbox.hold(N, 'p', { focus: 'b' }, {});
   const left = outbox.drop(N, [a.seq]);
   assert.equal(left, 1);
-  assert.equal(outbox.pendingFor(N, 'p')[0].fields.focus, 'b');
+  assert.equal(outbox.pendingFor(N, 'p')[0].categories.focus, 'b');
   clean();
 });
 
