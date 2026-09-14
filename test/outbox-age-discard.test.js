@@ -48,3 +48,23 @@ test('discarding a peer\'s mail removes exactly that peer\'s items', () => {
   assert.equal(outbox.pendingFor(NODE, 'live-peer').length, 1, 'the live peer\'s mail is untouched');
   assert.equal(left, 1);
 });
+
+// --- node.json keys the plugin does not read -------------------------------------------------
+// dev-team-5, 2026-09-14: its node.json said "group", the name used before the rename to "room".
+// The key is not read, so the file sat there looking obeyed while the node joined `default` alone
+// — correct identity, fallback room, one advisory and then silence. An ignored key must speak.
+
+test('a node.json using the pre-rename "group" key is named, not silently ignored', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.ok(/legacyGroup/.test(src), 'the reader must detect the old key');
+  assert.ok(/used BEFORE the rename to "room"/.test(src), 'and the advisory must say what happened');
+  assert.ok(/Rename the key to "room"/.test(src), 'and give the one-line fix');
+  assert.ok(!/room: clean\(cfg\.room\) \|\| clean\(cfg\.group\)/.test(src),
+    'it must NOT be honoured — reading it would hide the same trap one release later');
+});
+
+test('any unrecognised node.json key is reported', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.ok(/unknownKeys/.test(src), 'unknown keys must be collected');
+  assert.ok(/does not read/.test(src), 'and reported in the advisory');
+});

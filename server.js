@@ -312,7 +312,24 @@ function projectNodeConfig() {
   try {
     const cfg = JSON.parse(fs.readFileSync(file, 'utf8'));
     const clean = (s) => (typeof s === 'string' && s.trim()) ? s.trim() : undefined;
-    return { node_name: clean(cfg.node_name), room: clean(cfg.room), file };
+    // A KEY WE DO NOT READ IS THE SAME FAILURE AS A FILE WE CANNOT READ, and it was silent.
+    // dev-team-5, 2026-09-14, first turn after a session restart: correct identity, fallback room,
+    // one startup advisory and then nothing. Its node.json said `group`, the name this project used
+    // before the rename to `room`, so the file sat there looking obeyed while the node joined
+    // `default` alone. The malformed case above was already given a voice; the WRONG-KEY case had
+    // none, and it is the commoner one because the old name is still in circulation.
+    const known = new Set(['node_name', 'room']);
+    const unknown = Object.keys(cfg).filter((k) => !known.has(k));
+    const legacyRoom = clean(cfg.group);
+    return {
+      node_name: clean(cfg.node_name),
+      room: clean(cfg.room),
+      file,
+      unknownKeys: unknown,
+      // `group` is not honoured — reading it would make the rename meaningless and hide the same
+      // trap one release later. It is NAMED, with the one-line fix, wherever config is reported.
+      legacyGroup: clean(cfg.room) ? undefined : legacyRoom,
+    };
   } catch (e) {
     // Distinguish "no config" from "config I could not read". Collapsing both
     // to {} is what let a MALFORMED node.json look identical to an absent one:
@@ -676,6 +693,21 @@ try {
 // why the mesh is quiet.
 function roomAdvisory() {
   const lines = [];
+  // The wrong-key case first: it EXPLAINS the fallback below, and a reader who sees only
+  // "you are in default" goes looking for a missing file rather than at the one they wrote.
+  if (PROJECT_CFG.legacyGroup) {
+    lines.push(
+      `MESH ROOM ADVISORY: ${PROJECT_CFG.file} sets "group": "${PROJECT_CFG.legacyGroup}", which is ` +
+      `the name this project used BEFORE the rename to "room". It is not read, so the file looks ` +
+      `obeyed and this node fell back to '${ROOM}'. Rename the key to "room" — the value is right.`,
+    );
+  } else if (PROJECT_CFG.unknownKeys && PROJECT_CFG.unknownKeys.length) {
+    lines.push(
+      `MESH ROOM ADVISORY: ${PROJECT_CFG.file} contains ${PROJECT_CFG.unknownKeys.map((k) => `"${k}"`).join(', ')}, ` +
+      `which this plugin does not read. Only "node_name" and "room" are honoured; anything else is ` +
+      `ignored silently, so check the spelling before trusting what the file appears to say.`,
+    );
+  }
   if (ROOM === 'default' && !process.env.SYM_ROOM) {
     lines.push(
       `MESH ROOM ADVISORY: this node is in room 'default', which nothing configured — ` +
