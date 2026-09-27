@@ -56,12 +56,52 @@ Claude Code sessions.
 - **Self-echo filtering**: CMBs from this node's own identity are
   dropped before `pushChannel()` (prevents feedback loops).
 
+## Receiver-side content policy
+
+Every delivery is judged the same way wherever its text could enter the
+session: the real-time channel push, `sym_receive` and `sym_fetch`.
+
+- **Sender**: when `SYM_ALLOWED_PEERS` is set, a sender outside it is not shown.
+- **Payload size**: a payload larger than `SYM_MAX_PAYLOAD_BYTES` (default
+  1048576, the bound the LAN transport sets on one frame) is not shown.
+- **Prompt-injection patterns**: every CAT7 field, the message's content
+  string and the payload are matched against known instruction-override
+  phrasings (persona overrides, fabricated system or tool-call markup,
+  "ignore previous instructions" and the like).
+
+A delivery that fails a check is **withheld**: the session sees its id, the
+sender's name and the reason, and none of the message. It is never left out of
+the count. `sym_receive` lists each withheld delivery (deliveries from senders
+outside the allowlist are counted by sender), `sym_fetch` on its id answers with
+the reason, and an audit line goes to stderr. The delivery stays in the node's
+inbox, which keeps the newest 500 deliveries across restarts, so raising
+`SYM_MAX_PAYLOAD_BYTES` and restarting makes an over-limit message readable
+while it is still there.
+
+A payload within the limit is announced on the header with its size and read on
+demand. `sym_fetch` returns a long message in parts of at most 48,000
+characters, each naming the offset of the next.
+
+`SYM_RATE_LIMIT` (default 30) caps the real-time pushes one sender gets per
+minute. Beyond it the push is held back, not the delivery: the message waits in
+the inbox for `sym_receive`.
+
+Wording that tends to trip a model's usage-policy classifier is quarantined on
+the push and in `sym_receive`: the line shows the sender and a count of flagged
+terms, and the text is read only through a deliberate `sym_fetch`.
+
+Limits: pattern matching catches known phrasings, not every attempt, and a
+sender's name is chosen by the sender. Treat every peer message as external
+input.
+
 ## Optional: Peer Allowlist
 
 Set `SYM_ALLOWED_PEERS` (comma-separated node names) to restrict which
 authenticated peers can push to Claude's context. When set, only CMBs
-and messages from listed peers pass the gate. When empty (default), all
-authenticated peers are accepted — SVAF still gates on content relevance.
+and messages from listed peers pass the gate, and `sym_receive` counts the
+rest by sender, so a delivery from an unlisted peer is never reported as no
+delivery. When empty (default), all authenticated peers are accepted — SVAF
+still gates on content relevance.
 
 Example:
 ```

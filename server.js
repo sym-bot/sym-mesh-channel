@@ -52,6 +52,7 @@ const {
 const { SymNode } = require('@sym-bot/sym');
 const { scanClassifierRisk, quarantineHeader } = require('./classifier-risk.js');
 const { hiddenFieldsTag } = require('./surface-truth.js');
+const deliveryPolicy = require('./delivery-policy.js');
 const { resolveIdentity } = require('./identity.js');
 const { loadRelay, saveRelay, forgetRelay } = require('./relay-store.js');
 const outbox = require('./outbox.js');
@@ -582,30 +583,36 @@ function registerNodeHandlers(n) {
   n.on('cmb-accepted', (entry) => {
     if (entry.source === NODE_NAME || entry.cmb?.createdBy === NODE_NAME) return;
     const source = entry.source || entry.cmb?.createdBy || 'unknown';
-    if (!isPeerAllowed(source)) return;
     const categories = entry.cmb?.categories || {};
     const payload = entry.cmb?.payload;
-    const sec = checkSecurity(source, categories, payload);
-    if (!sec.safe) { securityAudit(sec.reason, source, sec.excerpt); return; }
+    // The same judgement sym_receive and sym_fetch make (delivery-policy.js). This delivery is also
+    // in the SDK inbox, so nothing decided here loses it: sym_receive lists it, shown or withheld.
+    const verdict = policy.judge({ from: source, content: entry.content, categories, payload });
+    // An operator's allowlist keeps these senders out of the context by design: nothing is pushed.
+    if (verdict.reason === 'sender-not-allowed') { securityAudit('push', verdict.reason, source, verdict.excerpt); return; }
+    // Rate measures arrival, so it is counted here, once per delivery. Over it, only the push is held
+    // back: the delivery waits in the inbox, and the unread line on every tool answer counts it.
+    if (!pushRate.admit(source)) {
+      securityAudit('push', 'rate-limit', source, `over ${pushRate.limit}/min from this sender; push held, delivery waits in the inbox`);
+      return;
+    }
+    if (!verdict.show) {
+      securityAudit('push', verdict.reason, source, verdict.excerpt);
+      // Announced in our words only (the sender's name and our reason), so the session learns a
+      // delivery arrived and was withheld while it happens, not only at its next sym_receive.
+      pushChannel('cmb-withheld', `[${deliveryPolicy.displayName(source)}] \u26a0 delivery withheld \u00b7 ${verdict.detail} \u00b7 sym_receive names it by id`);
+      return;
+    }
     const focus = categories?.focus?.text || entry.content || '';
     const mood = categories?.mood?.text || '';
     const moodSuffix = mood && mood !== 'neutral' ? ` (mood: ${mood})` : '';
     // Store the rendered CMB body so the agent can sym_fetch it by [mNNN] ID.
-    // When the CMB carries an opaque payload alongside CAT7 categories, append a
-    // PAYLOAD section to the stored body so sym_fetch returns it intact;
-    // header gains a [+payload Nb] indicator so the receiver knows there's
-    // structured data beyond CAT7 and should sym_fetch to consume it.
-    const hasPayload = payload !== undefined && payload !== null;
-    let body = entry.content || focus;
-    let payloadSuffix = '';
-    if (hasPayload) {
-      const serialized = (() => {
-        try { return JSON.stringify(payload, null, 2); }
-        catch { return String(payload); }
-      })();
-      body = `${body}\n\n---PAYLOAD---\n${serialized}`;
-      payloadSuffix = ` [+payload ${serialized.length}b]`;
-    }
+    // When the CMB carries an opaque payload alongside CAT7 categories, the stored
+    // body gains a PAYLOAD section so sym_fetch returns it intact (in parts, when it
+    // is long), and the header a [+payload Nb] indicator saying structured data
+    // rides beyond CAT7. The inbox renders the same body the same way.
+    const body = deliveryPolicy.renderBody(entry.content || focus, payload);
+    const payloadSuffix = deliveryPolicy.payloadTag(payload);
     // Directed (peer-bound) delivery indicator (MMP §9.2.2). A directed CMB was
     // addressed to THIS node — surface it as sent-to-you so the agent knows to
     // respond. `remixed:false` means SVAF delivered it but did not ingest it
@@ -621,7 +628,7 @@ function registerNodeHandlers(n) {
     const risk = scanClassifierRisk(`${focus}\n${body}`);
     let header;
     if (risk.risky) {
-      securityAudit(`classifier-risk:${risk.terms.join(',')}`, source, focus);
+      securityAudit('push', `classifier-risk:${risk.terms.join(',')}`, source, focus);
       // m122: a quarantined header that says only 'sym_fetch to view' gets ignored — the
       // observed failure is the fetch round-trip NOT happening, twice this week (m034, the
       // m053 original). Field NAMES and sizes are OUR vocabulary, not peer free-text, so the
@@ -636,14 +643,27 @@ function registerNodeHandlers(n) {
   });
 
   n.on('message', (from, content) => {
-    if (!isPeerAllowed(from)) return;
-    const sec = checkSecurity(from, { focus: { text: content } }, null);
-    if (!sec.safe) { securityAudit(sec.reason, from, sec.excerpt); return; }
+    const verdict = policy.judge({ from, content, categories: null, payload: null });
+    if (!verdict.show) {
+      securityAudit('push', verdict.reason, from, verdict.excerpt);
+      // A legacy direct message has no inbox id and no other surface, so the push is the only place
+      // the session can learn it arrived. A sender the allowlist keeps out stays silent by design.
+      if (verdict.reason !== 'sender-not-allowed') {
+        pushChannel('message-withheld', `[${deliveryPolicy.displayName(from)}] ⚠ legacy message withheld · ${verdict.detail}`);
+      }
+      return;
+    }
+    // A legacy direct message is not in the SDK inbox, so there is nowhere for it to wait: over the
+    // rate it is dropped, and the audit line is the only record of it.
+    if (!pushRate.admit(from)) {
+      securityAudit('push', 'rate-limit', from, `over ${pushRate.limit}/min from this sender; legacy message dropped`);
+      return;
+    }
     // Same classifier-risk quarantine as cmb-accepted, for legacy direct messages.
     const risk = scanClassifierRisk(content);
     let header;
     if (risk.risky) {
-      securityAudit(`classifier-risk:${risk.terms.join(',')}`, from, content.slice(0, 120));
+      securityAudit('push', `classifier-risk:${risk.terms.join(',')}`, from, content.slice(0, 120));
       header = quarantineHeader(from, '', risk.terms.length, '');
     } else {
       header = `[${from}] ${extractCompactHeader(from, content)}`;
@@ -663,7 +683,8 @@ const BASE_INSTRUCTIONS =
   'Publish a CMB to your whole room via sym_publish — a projection of your own state (MMP §9.2 receiver-autonomous SVAF evaluation). ' +
   'Both sym_send and sym_publish emit a CAT7 CMB (your projection); each receiver runs SVAF and, if it admits the CMB as an observation, remix-stores it with lineage back to yours. ' +
   'Search mesh memory via sym_recall. ' +
-  'sym_receive and <channel> notifications give compact headers with [mNNN] IDs — use sym_fetch to read the full content when relevant to your current task.';
+  'sym_receive and <channel> notifications give compact headers with [mNNN] IDs — use sym_fetch to read the full content when relevant to your current task. ' +
+  'A delivery this node withholds is listed by id with the reason, never left out of the count; a long message comes back from sym_fetch in parts, each naming the offset of the next.';
 
 // Final startup step (MMP §4.2 O2 — rejoin-without-replay). The SymNode
 // constructor builds the memory-store index from disk, so the primer is
@@ -855,16 +876,19 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'sym_fetch',
-      description: 'Fetch full content of a mesh message by ID. Use when a compact channel notification needs deeper reading.',
+      description: `Fetch full content of a mesh message by ID. Use when a compact channel notification needs deeper reading. A message longer than ${deliveryPolicy.FETCH_PAGE_CHARS.toLocaleString('en-US')} characters comes back in parts; each part names the offset that reads the next. A delivery this node withholds is answered with its reason, never its content.`,
       inputSchema: {
         type: 'object',
-        properties: { msg_id: { type: 'string', description: 'Message ID (e.g., m007)' } },
+        properties: {
+          msg_id: { type: 'string', description: 'Message ID (e.g., m007)' },
+          offset: { type: 'number', description: 'Character position to read from, for the next part of a long message (default 0). Each part names the offset of the one after it.' },
+        },
         required: ['msg_id'],
       },
     },
     {
       name: 'sym_receive',
-      description: 'Surface the CMBs the mesh has delivered to you in real-time — directed sym_send addressed to you, plus admitted broadcasts published to your room. The mesh is publish-subscribe: peers deliver the instant they publish, pushed as <channel> notifications. Because that push can be gated by Claude Code policy, sym_receive surfaces any deliveries it missed so none is lost — a live delivery feed, NOT a store query (use sym_recall to search stored memory). Call it at the start of a turn and periodically while coordinating so no delivery is missed. Returns compact headers with [mNNN] IDs (newest last); use sym_fetch for full content, reply via sym_send.',
+      description: 'Surface the CMBs the mesh has delivered to you in real-time — directed sym_send addressed to you, plus admitted broadcasts published to your room. The mesh is publish-subscribe: peers deliver the instant they publish, pushed as <channel> notifications. Because that push can be gated by Claude Code policy, sym_receive surfaces any deliveries it missed so none is lost — a live delivery feed, NOT a store query (use sym_recall to search stored memory). Call it at the start of a turn and periodically while coordinating so no delivery is missed. Returns compact headers with [mNNN] IDs (newest last); use sym_fetch for full content, reply via sym_send. A delivery withheld by this node\'s content policy is listed with its id, sender and reason, never counted as nothing.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -1192,72 +1216,81 @@ async function dispatchTool(request) {
           `msg_id is required and takes an ID from a channel notification or sym_receive, e.g. "m007" or "in0003". ` +
           (got.length ? `Received instead: ${got.join(', ')}.` : `No parameters were received.`) }] };
       }
+      const at = deliveryPolicy.readOffset(args.offset);
+      if (at.error) return { content: [{ type: 'text', text: at.error }] };
       // inNNNN → SDK delivery inbox (pull path); mNNN → channel-push store.
+      let head, body;
       if (rawId.startsWith('in')) {
         const m = node.inboxGet(rawId);
         if (!m) return { content: [{ type: 'text', text: `Message ${rawId} not found (expired or invalid ID).` }] };
-        // Append the opaque payload (now preserved on the inbox message) so the
-        // pull path returns structured data intact, exactly like the channel-push
-        // store does — otherwise sym_fetch on a directed CMB silently loses it.
-        let body = m.content || '';
-        if (m.payload !== undefined && m.payload !== null) {
-          let serialized;
-          try { serialized = JSON.stringify(m.payload, null, 2); } catch { serialized = String(m.payload); }
-          body = `${body}\n\n---PAYLOAD---\n${serialized}`;
+        // The inbox holds every delivery, withheld ones included, so the fetch makes the same
+        // judgement push and receive make. Before, it made none, and a withheld message's whole
+        // text was one fetch away.
+        if (m.from !== NODE_NAME) {
+          const verdict = policy.judge({ from: m.from, content: m.content, categories: m.categories, payload: m.payload });
+          if (!verdict.show) {
+            securityAudit('fetch', verdict.reason, m.from, verdict.excerpt, rawId);
+            return { content: [{ type: 'text', text: `Withheld, so not shown: ${deliveryPolicy.withheldLine(rawId, m.from, verdict)}.` }] };
+          }
         }
-        return { content: [{ type: 'text', text: `[${m.from}] ${new Date(m.receivedAt).toISOString()}\n\n${body}` }] };
+        // The opaque payload rides along (preserved on the inbox message), rendered as the
+        // channel-push store renders it, so a directed CMB's structured data survives the pull path.
+        head = `[${m.from}] ${new Date(m.receivedAt).toISOString()}`;
+        body = deliveryPolicy.renderBody(m.content || '', m.payload);
+      } else {
+        // The push store holds only what the push path judged fit to show, under this same policy.
+        const entry = MESSAGE_STORE.get(rawId);
+        if (!entry) {
+          return { content: [{ type: 'text', text: `Message ${rawId} not found (expired or invalid ID).` }] };
+        }
+        head = `[${entry.from}] ${new Date(entry.timestamp).toISOString()}`;
+        body = String(entry.content ?? '');
       }
-      const entry = MESSAGE_STORE.get(rawId);
-      if (!entry) {
-        return { content: [{ type: 'text', text: `Message ${rawId} not found (expired or invalid ID).` }] };
-      }
-      return {
-        content: [{
-          type: 'text',
-          text: `[${entry.from}] ${new Date(entry.timestamp).toISOString()}\n\n${entry.content}`,
-        }],
-      };
+      const part = deliveryPolicy.fetchPart({ id: rawId, head, body, offset: at.offset });
+      return { content: [{ type: 'text', text: part.error || part.text }] };
     }
 
     case 'sym_receive': {
       // Thin adapter over the SDK primitive: the node owns the delivery buffer
       // + drain cursor (node.inbox()). This wrapper only formats for display.
       const { messages, remaining } = node.inbox({ peek: !!args.peek, limit: args.limit });
-      if (!messages.length) {
-        return { content: [{ type: 'text', text: 'Caught up — nothing new delivered since your last sym_receive.' }] };
-      }
+      // Every delivery drained here is accounted for in the answer: shown, withheld with its
+      // reason, or counted against the allowlist. The drain has already moved the cursor, so a
+      // delivery this answer leaves out is one the session never learns of (2026-09-27: a
+      // requested review, withheld for its size, reported as "Caught up").
       const now = Date.now();
-      const lines = messages.map((m) => {
-        if (m.from === NODE_NAME) return null; // never surface our own deliveries
-        // The security layer still gates the pull path: peer allowlist +
-        // prompt-injection filter run on every message before it enters context.
-        if (!isPeerAllowed(m.from)) return null;
+      const shown = [], withheld = [], notAllowed = new Map();
+      for (const m of messages) {
+        if (m.from === NODE_NAME) continue; // our own deliveries are not news
         // payload lives at m.payload (sibling of categories), not m.categories.payload.
-        const sec = checkSecurity(m.from, m.categories || {}, m.payload);
-        if (!sec.safe) { securityAudit(sec.reason, m.from, sec.excerpt); return null; }
+        const verdict = policy.judge({ from: m.from, content: m.content, categories: m.categories, payload: m.payload });
+        if (verdict.reason === 'sender-not-allowed') { notAllowed.set(m.from, (notAllowed.get(m.from) || 0) + 1); continue; }
+        if (!verdict.show) {
+          securityAudit('receive', verdict.reason, m.from, verdict.excerpt, m.id);
+          withheld.push(deliveryPolicy.withheldLine(m.id, m.from, verdict));
+          continue;
+        }
         const age = Math.round((now - m.receivedAt) / 1000);
         const focus = m.categories?.focus?.text || m.content || '';
         const dirTag = m.directed ? ' →you' : '';
         const memTag = m.directed && m.remixed === false ? ' ·not-stored' : '';
-        // Flag structured data so the agent knows to sym_fetch the full body.
-        const payTag = (m.payload !== undefined && m.payload !== null) ? ' [+payload]' : '';
+        // Flag structured data, with its size, so the agent knows to sym_fetch the full body.
+        const payTag = deliveryPolicy.payloadTag(m.payload);
+        // The classifier-risk quarantine the push applies: this line enters the context the same way.
+        const risk = scanClassifierRisk(`${focus}\n${m.content || ''}`);
+        if (risk.risky) {
+          securityAudit('receive', `classifier-risk:${risk.terms.join(',')}`, m.from, focus, m.id);
+          shown.push(`${quarantineHeader(m.from, dirTag, risk.terms.length, `${memTag}${payTag}${hiddenFieldsTag(m.categories)}`)} [${m.id}] (${age}s ago)`);
+          continue;
+        }
         const flat = String(focus).replace(/\s+/g, ' ');
         const cutTag = flat.length > 90 ? '\u2026' : '';
         // m053: this line shows the focus' first 90 chars and NOTHING of the other fields —
         // a bare-focus CMB and one hauling 1.4KB of commitment were indistinguishable here,
         // and a receiver replied to the header. The elision is now explicit.
-        return `[${m.from}${dirTag}] ${flat.slice(0, 90)}${cutTag}${memTag}${payTag}${hiddenFieldsTag(m.categories)} [${m.id}] (${age}s ago)`;
-      }).filter(Boolean);
-      if (!lines.length) {
-        return { content: [{ type: 'text', text: 'Caught up — nothing new delivered since your last sym_receive.' }] };
+        shown.push(`[${m.from}${dirTag}] ${flat.slice(0, 90)}${cutTag}${memTag}${payTag}${hiddenFieldsTag(m.categories)} [${m.id}] (${age}s ago)`);
       }
-      const moreNote = remaining > 0 ? ` (+${remaining} more — call sym_receive again)` : '';
-      return {
-        content: [{
-          type: 'text',
-          text: `${lines.length} new mesh message(s)${args.peek ? ' (peek — not drained)' : ''}${moreNote}:\n${lines.join('\n')}\n\nUse sym_fetch <id> for full content; reply via sym_send to=<peer>.`,
-        }],
-      };
+      return { content: [{ type: 'text', text: deliveryPolicy.receiveReport({ shown, withheld, notAllowed, remaining, peek: !!args.peek }) }] };
     }
 
     case 'sym_status': {
@@ -1630,121 +1663,42 @@ function extractCompactHeader(from, content) {
   return parts.join(' | ') + ` (~${approxTokens}tok)`;
 }
 
-// ── Peer Allowlist (optional, defense-in-depth) ─────────────
-// SYM_ALLOWED_PEERS is a comma-separated list of peer node names.
-// When set, only CMBs and messages from listed peers are pushed to
-// Claude's context. When empty/unset, all authenticated peers are
-// accepted (SVAF still gates on content relevance).
+// ── Delivery policy (delivery-policy.js) ─────────────────────
+// SVAF gates on semantic relevance; this layer gates on safety, and it is the same judgement on
+// every surface where a peer's words can enter the context: the push, sym_receive and sym_fetch.
+//
+// SYM_ALLOWED_PEERS (optional, defense in depth): comma-separated peer node names. When set, only
+// deliveries from listed peers are shown; sym_receive counts the rest by sender. When empty or
+// unset, all authenticated peers are eligible (SVAF still gates on content relevance).
+//
+// SYM_MAX_PAYLOAD_BYTES: the largest payload shown, default 1 MiB. A larger one is withheld and
+// named; anything up to it is read in parts through sym_fetch.
+//
+// SYM_RATE_LIMIT: pushes per sender per minute, default 30. Over it the push is held back and the
+// delivery waits in the inbox for sym_receive.
+//
+// Never silently drop: every withholding writes an audit line to stderr for the operator, and the
+// session is told the delivery exists, with our reason and none of the peer's text.
 const ALLOWED_PEERS = (process.env.SYM_ALLOWED_PEERS || '')
   .split(',')
   .map(s => s.trim())
   .filter(Boolean);
 
-function isPeerAllowed(peerName) {
-  if (ALLOWED_PEERS.length === 0) return true; // no allowlist = accept all
-  return ALLOWED_PEERS.includes(peerName);
+const MAX_PAYLOAD = deliveryPolicy.readMaxPayloadBytes(process.env.SYM_MAX_PAYLOAD_BYTES);
+if (MAX_PAYLOAD.invalid !== undefined) {
+  process.stderr.write(
+    `sym-mesh-channel: SYM_MAX_PAYLOAD_BYTES=${JSON.stringify(MAX_PAYLOAD.invalid)} is not a whole number of bytes; ` +
+    `using the default of ${deliveryPolicy.DEFAULT_MAX_PAYLOAD_BYTES}.\n`
+  );
 }
+const policy = deliveryPolicy.createDeliveryPolicy({ allowedPeers: ALLOWED_PEERS, maxPayloadBytes: MAX_PAYLOAD.bytes });
 
-// ── Security: Prompt-Injection Filter (v0.3.11) ──────────────
-// SVAF gates on semantic relevance; this layer gates on safety.
-// It runs on every CAT7 field and payload before pushChannel —
-// the last line of defence before content enters Claude's context.
-//
-// Attack model: a peer with a valid Ed25519 identity sends a CMB
-// whose categories look topically relevant (passes SVAF) but whose
-// content contains instruction-override patterns designed to hijack
-// the receiving Claude session ("ignore previous instructions",
-// role-play overrides, tool-call fabrication, etc.).
-//
-// Strategy: pattern-match on the serialized content of all CAT7
-// categories and the opaque payload. On match: block + audit-log to
-// stderr. Never silently drop — the operator must be able to see
-// what was rejected and why.
+const RATE = Number.parseInt(process.env.SYM_RATE_LIMIT || '30', 10);
+const pushRate = deliveryPolicy.createRateLimiter({ limit: Number.isInteger(RATE) && RATE > 0 ? RATE : 30 });
 
-const INJECTION_PATTERNS = [
-  // Classic instruction overrides
-  /ignore\s+(all\s+)?(previous|prior|above|earlier)\s+(instructions?|prompts?|context|rules?|guidelines?)/i,
-  /disregard\s+(all\s+)?(previous|prior|above|earlier)\s+(instructions?|prompts?|context|rules?)/i,
-  /forget\s+(everything|all)\s+(you('ve)?\s+)?(know|been\s+told|learned)/i,
-
-  // Role / persona hijacking
-  /you\s+are\s+now\s+(a\s+|an\s+)?(new\s+)?(ai|assistant|model|system|gpt|claude|llm)/i,
-  /act\s+as\s+(a\s+|an\s+)?(different|new|unrestricted|jailbroken|evil|rogue)/i,
-  /pretend\s+(you\s+)?(are|have\s+no)\s+(restrictions?|rules?|guidelines?|ethics?)/i,
-  /new\s+(persona|personality|mode|role)\s*:/i,
-
-  // System prompt injection
-  /<\s*system\s*>/i,
-  /\[SYSTEM\]/,
-  /##\s*system\s+prompt/i,
-  /---\s*system\s*---/i,
-
-  // Tool / function call fabrication
-  /<\s*tool_call\s*>/i,
-  /<\s*function_calls?\s*>/i,
-  /\{"type"\s*:\s*"tool_use"/,
-
-  // Privilege / capability escalation
-  /you\s+(now\s+)?(have|possess)\s+(full|unrestricted|admin|root|elevated)\s+(access|permissions?|capabilities?)/i,
-  /override\s+(safety|content|ethical?|policy)\s+(filter|check|guard|restriction)/i,
-  /jailbreak/i,
-  /DAN\s+mode/i,
-];
-
-const PAYLOAD_SIZE_LIMIT = parseInt(process.env.SYM_MAX_PAYLOAD_BYTES || '8192', 10);
-
-// Per-peer rate limiter: sliding window, default 30 CMBs/min.
-const RATE_LIMIT = parseInt(process.env.SYM_RATE_LIMIT || '30', 10);
-const RATE_WINDOW_MS = 60_000;
-const peerWindows = new Map(); // peerName → timestamp[]
-
-function isRateLimited(peer) {
-  const now = Date.now();
-  const window = (peerWindows.get(peer) || []).filter(t => now - t < RATE_WINDOW_MS);
-  window.push(now);
-  peerWindows.set(peer, window);
-  return window.length > RATE_LIMIT;
-}
-
-function securityAudit(reason, peer, excerpt) {
-  const safe = String(excerpt).replace(/[\r\n]+/g, ' ').slice(0, 120);
-  process.stderr.write(`[sym-security] BLOCKED reason=${reason} peer=${peer} excerpt="${safe}"\n`);
-}
-
-// Returns { safe: true } or { safe: false, reason, excerpt }.
-function checkSecurity(peer, categories, payload) {
-  // 1. Rate limit
-  if (isRateLimited(peer)) {
-    return { safe: false, reason: 'rate-limit', excerpt: `>${RATE_LIMIT} CMBs/min` };
-  }
-
-  // 2. Payload size cap
-  if (payload !== undefined && payload !== null) {
-    const size = JSON.stringify(payload).length;
-    if (size > PAYLOAD_SIZE_LIMIT) {
-      return { safe: false, reason: 'payload-too-large', excerpt: `${size}b > ${PAYLOAD_SIZE_LIMIT}b limit` };
-    }
-  }
-
-  // 3. Prompt injection scan across all text surfaces
-  const surfaces = [
-    ...Object.values(categories || {}).map(v =>
-      typeof v === 'string' ? v : (typeof v === 'object' && v?.text ? v.text : '')
-    ),
-    payload !== undefined && payload !== null
-      ? (typeof payload === 'string' ? payload : JSON.stringify(payload))
-      : '',
-  ].filter(Boolean);
-
-  for (const surface of surfaces) {
-    for (const pattern of INJECTION_PATTERNS) {
-      if (pattern.test(surface)) {
-        return { safe: false, reason: 'injection-pattern', excerpt: surface.slice(0, 200) };
-      }
-    }
-  }
-
-  return { safe: true };
+function securityAudit(surface, reason, peer, excerpt, id) {
+  const safe = String(excerpt ?? '').replace(/[\r\n]+/g, ' ').slice(0, 120);
+  process.stderr.write(`[sym-security] WITHHELD surface=${surface} reason=${reason} peer=${peer}${id ? ` id=${id}` : ''} excerpt="${safe}"\n`);
 }
 
 // ── Mesh Events → Channel Notifications ──────────────────────

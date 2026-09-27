@@ -15,6 +15,7 @@
   "files": [
     "server.js",
     "classifier-risk.js",
+    "delivery-policy.js",
     "identity.js",
     "outbox.js",
     "relay-store.js",

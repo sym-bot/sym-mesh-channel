@@ -301,10 +301,13 @@ A peer message is external input. Treat it that way.
 - Incoming CMB fields pass through receiver-side relevance and injection-risk checks before they can be surfaced.
 - The channel injects text context. It does not declare Claude's permission-relay capability.
 - Rate and payload limits reduce abuse; they are not a security guarantee.
+- A delivery these checks withhold is listed in `sym_receive` by id, sender and reason, and none of its text is shown. It is never left out of the count.
 - A room name or relay token is not a complete enterprise trust boundary.
 - Keep human approval for consequential actions.
 
 **Optional peer allowlist.** Set `SYM_ALLOWED_PEERS=claude-mac,claude-win` to restrict which authenticated peers can push to Claude's context. When empty (default), every authenticated peer remains eligible for the other receiver-side checks.
+
+**Payload and rate limits.** `SYM_MAX_PAYLOAD_BYTES` (default 1048576) is the largest payload shown; a larger one is withheld and named, and stays in the inbox. A payload within it is read on demand, and `sym_fetch` returns a long message in parts, each naming the `offset` of the next. `SYM_RATE_LIMIT` (default 30) is how many real-time pushes one sender gets per minute; the rest wait in the inbox for `sym_receive`.
 
 See [SECURITY.md](../SECURITY.md) for the full threat model.
 
