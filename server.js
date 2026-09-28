@@ -582,25 +582,23 @@ function registerNodeHandlers(n) {
 
   n.on('cmb-accepted', (entry) => {
     if (entry.source === NODE_NAME || entry.cmb?.createdBy === NODE_NAME) return;
-    const source = entry.source || entry.cmb?.createdBy || 'unknown';
+    const sender = entry.source || entry.cmb?.createdBy || 'unknown';
+    const source = deliveryPolicy.displayName(sender);   // the sender chooses its name; lines print this
     const categories = entry.cmb?.categories || {};
     const payload = entry.cmb?.payload;
-    // The same judgement sym_receive and sym_fetch make (delivery-policy.js). This delivery is also
-    // in the SDK inbox, so nothing decided here loses it: sym_receive lists it, shown or withheld.
-    const verdict = policy.judge({ from: source, content: entry.content, categories, payload });
-    // An operator's allowlist keeps these senders out of the context by design: nothing is pushed.
-    if (verdict.reason === 'sender-not-allowed') { securityAudit('push', verdict.reason, source, verdict.excerpt); return; }
-    // Rate measures arrival, so it is counted here, once per delivery. Over it, only the push is held
-    // back: the delivery waits in the inbox, and the unread line on every tool answer counts it.
-    if (!pushRate.admit(source)) {
-      securityAudit('push', 'rate-limit', source, `over ${pushRate.limit}/min from this sender; push held, delivery waits in the inbox`);
-      return;
-    }
-    if (!verdict.show) {
-      securityAudit('push', verdict.reason, source, verdict.excerpt);
-      // Announced in our words only (the sender's name and our reason), so the session learns a
-      // delivery arrived and was withheld while it happens, not only at its next sym_receive.
-      pushChannel('cmb-withheld', `[${deliveryPolicy.displayName(source)}] \u26a0 delivery withheld \u00b7 ${verdict.detail} \u00b7 sym_receive names it by id`);
+    // The same judgement sym_receive, sym_fetch and sym_recall make (delivery-policy.js). This delivery
+    // is also in the SDK inbox, so nothing decided here loses it: sym_receive lists it, shown or withheld.
+    const delivery = deliveryPolicy.prepare({ from: sender, content: entry.content, categories, payload });
+    const verdict = policy.judge(delivery);
+    // Rate measures arrival, so it is counted once per delivery, before anything is pushed. Over it,
+    // only the push is held back: the delivery waits in the inbox and the unread line counts it.
+    const action = deliveryPolicy.pushAction(verdict, pushRate, sender);
+    if (action !== 'push') {
+      if (action === 'rate-held') securityAudit('push', 'rate-limit', sender, `over ${pushRate.limit}/min from this sender; push held, delivery waits in the inbox`);
+      else securityAudit('push', verdict.reason, sender, verdict.excerpt);
+      // A withheld delivery is announced in our words only (the sender's name and our reason), so the
+      // session learns it arrived while it happens. An allowlisted-out sender stays silent by design.
+      if (action === 'notice') pushChannel('cmb-withheld', `[${source}] \u26a0 delivery withheld \u00b7 ${verdict.detail} \u00b7 sym_receive names it by id`);
       return;
     }
     const focus = categories?.focus?.text || entry.content || '';
@@ -611,8 +609,8 @@ function registerNodeHandlers(n) {
     // body gains a PAYLOAD section so sym_fetch returns it intact (in parts, when it
     // is long), and the header a [+payload Nb] indicator saying structured data
     // rides beyond CAT7. The inbox renders the same body the same way.
-    const body = deliveryPolicy.renderBody(entry.content || focus, payload);
-    const payloadSuffix = deliveryPolicy.payloadTag(payload);
+    const body = deliveryPolicy.renderBody(entry.content || focus, delivery);
+    const payloadSuffix = deliveryPolicy.payloadTag(delivery);
     // Directed (peer-bound) delivery indicator (MMP §9.2.2). A directed CMB was
     // addressed to THIS node — surface it as sent-to-you so the agent knows to
     // respond. `remixed:false` means SVAF delivered it but did not ingest it
@@ -643,20 +641,16 @@ function registerNodeHandlers(n) {
   });
 
   n.on('message', (from, content) => {
+    const name = deliveryPolicy.displayName(from);
     const verdict = policy.judge({ from, content, categories: null, payload: null });
-    if (!verdict.show) {
-      securityAudit('push', verdict.reason, from, verdict.excerpt);
-      // A legacy direct message has no inbox id and no other surface, so the push is the only place
-      // the session can learn it arrived. A sender the allowlist keeps out stays silent by design.
-      if (verdict.reason !== 'sender-not-allowed') {
-        pushChannel('message-withheld', `[${deliveryPolicy.displayName(from)}] ⚠ legacy message withheld · ${verdict.detail}`);
-      }
-      return;
-    }
-    // A legacy direct message is not in the SDK inbox, so there is nowhere for it to wait: over the
-    // rate it is dropped, and the audit line is the only record of it.
-    if (!pushRate.admit(from)) {
-      securityAudit('push', 'rate-limit', from, `over ${pushRate.limit}/min from this sender; legacy message dropped`);
+    // The same decision as a CMB, so the rate is counted before a withheld notice as before a push.
+    const action = deliveryPolicy.pushAction(verdict, pushRate, from);
+    if (action !== 'push') {
+      // A legacy direct message is not in the SDK inbox: over the rate it is dropped, and the audit
+      // line is the only record of it. Withheld, the push is the only place the session learns of it.
+      if (action === 'rate-held') securityAudit('push', 'rate-limit', from, `over ${pushRate.limit}/min from this sender; legacy message dropped`);
+      else securityAudit('push', verdict.reason, from, verdict.excerpt);
+      if (action === 'notice') pushChannel('message-withheld', `[${name}] \u26a0 legacy message withheld \u00b7 ${verdict.detail}`);
       return;
     }
     // Same classifier-risk quarantine as cmb-accepted, for legacy direct messages.
@@ -664,11 +658,11 @@ function registerNodeHandlers(n) {
     let header;
     if (risk.risky) {
       securityAudit('push', `classifier-risk:${risk.terms.join(',')}`, from, content.slice(0, 120));
-      header = quarantineHeader(from, '', risk.terms.length, '');
+      header = quarantineHeader(name, '', risk.terms.length, '');
     } else {
-      header = `[${from}] ${extractCompactHeader(from, content)}`;
+      header = `[${name}] ${extractCompactHeader(from, content)}`;
     }
-    const msgId = storeMessage(from, content, header);
+    const msgId = storeMessage(name, content, header);
     pushChannel('message', `${header} [${msgId}]`);
   });
 }
@@ -1124,12 +1118,11 @@ async function dispatchTool(request) {
       if (results.length === 0) {
         return { content: [{ type: 'text', text: 'No memories found.' }] };
       }
-      const lines = results.slice(0, 10).map(r => {
-        const focus = r.cmb?.categories?.focus?.text || r.content || '';
-        const source = r.source || r.cmb?.createdBy || 'unknown';
-        const time = r.timestamp ? new Date(r.timestamp).toLocaleString() : '';
-        const cut = focus.length > 150 ? '\u2026 [truncated \u2014 sym_fetch for full]' : '';
-        return `[${source}] ${time}\n  ${focus.slice(0, 150)}${cut}`;
+      // A memory is text the session reads like any delivery: a peer's memory passes the same policy.
+      const lines = results.slice(0, 10).map((r) => {
+        const out = deliveryPolicy.recallLine(r, { policy, selfName: NODE_NAME });
+        if (out.audit) securityAudit('recall', out.audit[0], r.source || r.cmb?.createdBy || 'unknown', out.audit[1]);
+        return out.line;
       });
       const more = results.length > 10
         ? `\n\n(+${results.length - 10} more matched — narrow the query to see them)`
@@ -1226,24 +1219,24 @@ async function dispatchTool(request) {
         // The inbox holds every delivery, withheld ones included, so the fetch makes the same
         // judgement push and receive make. Before, it made none, and a withheld message's whole
         // text was one fetch away.
-        if (m.from !== NODE_NAME) {
-          const verdict = policy.judge({ from: m.from, content: m.content, categories: m.categories, payload: m.payload });
-          if (!verdict.show) {
-            securityAudit('fetch', verdict.reason, m.from, verdict.excerpt, rawId);
-            return { content: [{ type: 'text', text: `Withheld, so not shown: ${deliveryPolicy.withheldLine(rawId, m.from, verdict)}.` }] };
-          }
+        // A name is not proof, so under this node's own name only the allowlist is skipped.
+        const delivery = deliveryPolicy.prepare({ from: m.from, content: m.content, categories: m.categories, payload: m.payload });
+        const verdict = policy.judge(delivery, { self: m.from === NODE_NAME });
+        if (!verdict.show) {
+          securityAudit('fetch', verdict.reason, m.from, verdict.excerpt, rawId);
+          return { content: [{ type: 'text', text: `Withheld, so not shown: ${deliveryPolicy.withheldLine(rawId, m.from, verdict)}.` }] };
         }
         // The opaque payload rides along (preserved on the inbox message), rendered as the
         // channel-push store renders it, so a directed CMB's structured data survives the pull path.
-        head = `[${m.from}] ${new Date(m.receivedAt).toISOString()}`;
-        body = deliveryPolicy.renderBody(m.content || '', m.payload);
+        head = `[${deliveryPolicy.displayName(m.from)}] ${new Date(m.receivedAt).toISOString()}`;
+        body = deliveryPolicy.renderBody(m.content || '', delivery);
       } else {
         // The push store holds only what the push path judged fit to show, under this same policy.
         const entry = MESSAGE_STORE.get(rawId);
         if (!entry) {
           return { content: [{ type: 'text', text: `Message ${rawId} not found (expired or invalid ID).` }] };
         }
-        head = `[${entry.from}] ${new Date(entry.timestamp).toISOString()}`;
+        head = `[${deliveryPolicy.displayName(entry.from)}] ${new Date(entry.timestamp).toISOString()}`;
         body = String(entry.content ?? '');
       }
       const part = deliveryPolicy.fetchPart({ id: rawId, head, body, offset: at.offset });
@@ -1254,43 +1247,23 @@ async function dispatchTool(request) {
       // Thin adapter over the SDK primitive: the node owns the delivery buffer
       // + drain cursor (node.inbox()). This wrapper only formats for display.
       const { messages, remaining } = node.inbox({ peek: !!args.peek, limit: args.limit });
-      // Every delivery drained here is accounted for in the answer: shown, withheld with its
-      // reason, or counted against the allowlist. The drain has already moved the cursor, so a
-      // delivery this answer leaves out is one the session never learns of (2026-09-27: a
-      // requested review, withheld for its size, reported as "Caught up").
+      // Every delivery drained here is accounted for in the answer: shown, withheld with its reason,
+      // counted against the allowlist, or counted as sent under this node's own name. The drain has
+      // already moved the cursor, so a delivery this answer leaves out is one the session never learns
+      // of (2026-09-27: a requested review, withheld for its size, reported as "Caught up").
+      // receiveLine never throws, so one delivery that cannot be rendered costs one line, not the batch.
       const now = Date.now();
       const shown = [], withheld = [], notAllowed = new Map();
+      let ownName = 0;
       for (const m of messages) {
-        if (m.from === NODE_NAME) continue; // our own deliveries are not news
-        // payload lives at m.payload (sibling of categories), not m.categories.payload.
-        const verdict = policy.judge({ from: m.from, content: m.content, categories: m.categories, payload: m.payload });
-        if (verdict.reason === 'sender-not-allowed') { notAllowed.set(m.from, (notAllowed.get(m.from) || 0) + 1); continue; }
-        if (!verdict.show) {
-          securityAudit('receive', verdict.reason, m.from, verdict.excerpt, m.id);
-          withheld.push(deliveryPolicy.withheldLine(m.id, m.from, verdict));
-          continue;
-        }
-        const age = Math.round((now - m.receivedAt) / 1000);
-        const focus = m.categories?.focus?.text || m.content || '';
-        const dirTag = m.directed ? ' →you' : '';
-        const memTag = m.directed && m.remixed === false ? ' ·not-stored' : '';
-        // Flag structured data, with its size, so the agent knows to sym_fetch the full body.
-        const payTag = deliveryPolicy.payloadTag(m.payload);
-        // The classifier-risk quarantine the push applies: this line enters the context the same way.
-        const risk = scanClassifierRisk(`${focus}\n${m.content || ''}`);
-        if (risk.risky) {
-          securityAudit('receive', `classifier-risk:${risk.terms.join(',')}`, m.from, focus, m.id);
-          shown.push(`${quarantineHeader(m.from, dirTag, risk.terms.length, `${memTag}${payTag}${hiddenFieldsTag(m.categories)}`)} [${m.id}] (${age}s ago)`);
-          continue;
-        }
-        const flat = String(focus).replace(/\s+/g, ' ');
-        const cutTag = flat.length > 90 ? '\u2026' : '';
-        // m053: this line shows the focus' first 90 chars and NOTHING of the other fields —
-        // a bare-focus CMB and one hauling 1.4KB of commitment were indistinguishable here,
-        // and a receiver replied to the header. The elision is now explicit.
-        shown.push(`[${m.from}${dirTag}] ${flat.slice(0, 90)}${cutTag}${memTag}${payTag}${hiddenFieldsTag(m.categories)} [${m.id}] (${age}s ago)`);
+        const r = deliveryPolicy.receiveLine(m, { policy, selfName: NODE_NAME, now });
+        if (r.audit) securityAudit('receive', r.audit[0], m.from, r.audit[1], m.id);
+        if (r.bucket === 'shown') shown.push(r.line);
+        else if (r.bucket === 'withheld') withheld.push(r.line);
+        else if (r.bucket === 'not-allowed') notAllowed.set(m.from, (notAllowed.get(m.from) || 0) + 1);
+        else ownName++;
       }
-      return { content: [{ type: 'text', text: deliveryPolicy.receiveReport({ shown, withheld, notAllowed, remaining, peek: !!args.peek }) }] };
+      return { content: [{ type: 'text', text: deliveryPolicy.receiveReport({ shown, withheld, notAllowed, ownName, remaining, peek: !!args.peek }) }] };
     }
 
     case 'sym_status': {
@@ -1665,7 +1638,7 @@ function extractCompactHeader(from, content) {
 
 // ── Delivery policy (delivery-policy.js) ─────────────────────
 // SVAF gates on semantic relevance; this layer gates on safety, and it is the same judgement on
-// every surface where a peer's words can enter the context: the push, sym_receive and sym_fetch.
+// every surface where a peer's words can enter the context: the push, sym_receive, sym_fetch and sym_recall.
 //
 // SYM_ALLOWED_PEERS (optional, defense in depth): comma-separated peer node names. When set, only
 // deliveries from listed peers are shown; sym_receive counts the rest by sender. When empty or
@@ -1697,8 +1670,7 @@ const RATE = Number.parseInt(process.env.SYM_RATE_LIMIT || '30', 10);
 const pushRate = deliveryPolicy.createRateLimiter({ limit: Number.isInteger(RATE) && RATE > 0 ? RATE : 30 });
 
 function securityAudit(surface, reason, peer, excerpt, id) {
-  const safe = String(excerpt ?? '').replace(/[\r\n]+/g, ' ').slice(0, 120);
-  process.stderr.write(`[sym-security] WITHHELD surface=${surface} reason=${reason} peer=${peer}${id ? ` id=${id}` : ''} excerpt="${safe}"\n`);
+  process.stderr.write(deliveryPolicy.auditLine(surface, reason, peer, excerpt, id));
 }
 
 // ── Mesh Events → Channel Notifications ──────────────────────
