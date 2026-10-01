@@ -56,12 +56,65 @@ Claude Code sessions.
 - **Self-echo filtering**: CMBs from this node's own identity are
   dropped before `pushChannel()` (prevents feedback loops).
 
+## Receiver-side content policy
+
+Every delivery is judged the same way wherever its text could enter the
+session: the real-time channel push, `sym_receive`, `sym_fetch` and
+`sym_recall` (a peer's stored memory).
+
+- **Sender**: when `SYM_ALLOWED_PEERS` is set, a sender outside it is not shown.
+- **Payload size**: a payload larger than `SYM_MAX_PAYLOAD_BYTES` (default
+  1048576) is not shown. On the local network a frame already bounds a
+  payload at that size; for a delivery that arrives through a relay, this
+  setting is the only bound.
+- **Prompt-injection patterns**: the text of every CAT7 field, the message's
+  content string and the payload are matched against known instruction-override
+  phrasings (persona overrides, fabricated system or tool-call markup,
+  "ignore previous instructions" and the like).
+
+A delivery that fails a check is **withheld**: the session sees its id, the
+sender's name and the reason, and none of the message. It is never left out of
+the count. `sym_receive` lists each withheld delivery (deliveries from senders
+outside the allowlist are counted by sender), `sym_fetch` on its id answers with
+the reason, and an audit line goes to stderr. The delivery stays in the node's
+inbox, which keeps the newest 500 deliveries across restarts, so raising
+`SYM_MAX_PAYLOAD_BYTES` and restarting makes an over-limit message readable
+while it is still there. A legacy direct message (the older message type) has no
+inbox entry: withheld, it is announced on the push with the reason, and it
+cannot be recovered afterwards.
+
+A sender chooses its own name, so every line prints it with line breaks,
+brackets and control characters replaced, and the audit line drops control
+characters and quotes from its excerpt. A delivery under this node's own name
+is counted in `sym_receive`, not shown: it is an echo of this node's words, or
+another node using its name.
+
+A payload within the limit is announced on the header with its size and read on
+demand. `sym_fetch` returns a long message in parts of at most 48,000
+characters, each naming the offset of the next.
+
+`SYM_RATE_LIMIT` (default 30) is how many deliveries from one sender per minute
+are pushed in real time, withheld-delivery notices included. Beyond it the push
+is held back, not the delivery: the message waits in the inbox for
+`sym_receive`. A legacy direct message, which has no inbox entry, is dropped
+and recorded in the audit.
+
+Wording that tends to trip a model's usage-policy classifier is quarantined on
+the push and in `sym_receive`: the line shows the sender and a count of flagged
+terms, and the text is read only through a deliberate `sym_fetch`.
+
+Limits: pattern matching catches known phrasings, not every attempt, and a
+sender's name is chosen by the sender. Treat every peer message as external
+input.
+
 ## Optional: Peer Allowlist
 
 Set `SYM_ALLOWED_PEERS` (comma-separated node names) to restrict which
 authenticated peers can push to Claude's context. When set, only CMBs
-and messages from listed peers pass the gate. When empty (default), all
-authenticated peers are accepted — SVAF still gates on content relevance.
+and messages from listed peers pass the gate, and `sym_receive` counts the
+rest by sender, so a delivery from an unlisted peer is never reported as no
+delivery. When empty (default), all authenticated peers are accepted — SVAF
+still gates on content relevance.
 
 Example:
 ```

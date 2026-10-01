@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.9.9
+
+### Fixed — a withheld delivery is named, never reported as nothing
+
+A message sent with a 36,459-character payload arrived, and the receiving session was told "Caught
+up — nothing new delivered". `sym_receive` had drained it, an 8 KB payload cap had withheld it, and
+with nothing left to show, the answer said there was nothing. The real-time push applied the same
+cap and wrote only a stderr line. `sym_fetch` on the inbox id checked nothing at all.
+
+- `sym_receive` accounts for every delivery it drains: shown; withheld, listed with its id, sender
+  and reason and none of its text; or counted by sender against `SYM_ALLOWED_PEERS`. "Caught up"
+  now means nothing was delivered.
+- A delivery withheld for its size or for an injection pattern is also announced on the push as it
+  happens, in the same terms.
+- The default payload limit is 1 MiB (`SYM_MAX_PAYLOAD_BYTES`, the bound the LAN transport sets on
+  one frame) instead of 8 KB. A payload within it is announced with its size and read on demand; a
+  larger one is withheld and named, and stays in the inbox. An invalid `SYM_MAX_PAYLOAD_BYTES` used
+  to switch the check off silently; it is now reported, and the default applies.
+- `sym_fetch` takes an optional `offset` and returns a long message in parts of at most 48,000
+  characters, each saying which characters it holds (counted from 1) and the offset of the next. A
+  message that fits one part comes back exactly as before.
+
+### Fixed — one content policy on every surface
+
+- `sym_fetch` on an inbox id makes the same judgement as the push and `sym_receive`. It made none,
+  so a withheld message's whole text was one call away. `sym_recall` applies it to a peer's stored
+  memory too, which it showed unchecked.
+- A message's content string is checked for injection patterns along with its CAT7 fields and its
+  payload. `sym_fetch` showed it unchecked, and so did `sym_receive` when the focus was empty.
+- `sym_receive` applies the classifier-risk quarantine that the push already applied, over the same
+  text, the payload included.
+- A sender chooses its own name, so every line prints it with line breaks, brackets and control
+  characters replaced; the audit line drops control characters and quotes from its excerpt. A
+  delivery under this node's own name is counted in `sym_receive`, not dropped without a word.
+- One delivery that cannot be rendered costs its own line, withheld with that reason, instead of
+  failing the whole batch the drain had already taken. A payload is serialised at most twice per
+  delivery, however many checks read it.
+- The rate limit counts each arrival once, on the push, before anything is pushed, a withheld
+  notice included, and holds back only the push: the delivery waits in the inbox. It used to be
+  counted again at read time, so a backlog of more than 30 messages from one sender read in one
+  `sym_receive` hid the rest (drained, never shown), and a delivery read within a minute of
+  arriving counted twice.
+
+### Changed
+
+- The stderr audit line reads `[sym-security] WITHHELD surface=<push|receive|fetch> reason=<reason>
+  peer=<name> id=<inbox id> excerpt="…"`; it was `[sym-security] BLOCKED reason=… peer=…`.
+- `npm test` runs every `*.test.js` under `test/`, and fails if it finds fewer than the files it was
+  set to. Six test files had never run in it.
+
 ## 0.9.8
 
 ### Fixed — held mail knows its age, and there is a way to let it go

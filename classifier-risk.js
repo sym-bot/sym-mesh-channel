@@ -3,7 +3,7 @@
 // classifier-risk.js — a receiver-side guard that stops inbound peer CMB text from wedging the
 // receiving agent's LLM session.
 //
-// checkSecurity() in server.js already drops prompt-injection and oversized payloads. This is the
+// delivery-policy.js already withholds prompt-injection text and over-limit payloads. This is the
 // ORTHOGONAL failure mode observed 2026-07-24: a benign, non-injecting CMB whose wording
 // (security/offensive-adjacent terms, stripped of the AUTHOR's context) trips the RECEIVER's
 // server-side usage-policy classifier — hard-erroring the turn the instant the delivered text is
