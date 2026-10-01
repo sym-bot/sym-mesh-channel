@@ -16,7 +16,7 @@ const { spawnSync } = require('child_process');
 
 // The test files here when this floor was last set. Raise it with a new file; lower it only in the
 // commit that removes one, so the removal is on the record.
-const MIN_FILES = 15;
+const MIN_FILES = 16;
 
 function find(dir) {
   const out = [];

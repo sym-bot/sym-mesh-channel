@@ -226,7 +226,8 @@ test('sym_send handler routes through explicitSend/node.remember, not node.send'
   assert.ok(nextCaseIdx !== -1, "sym_publish case not found — cannot bound the sym_send handler");
   const handler = code.slice(caseIdx, nextCaseIdx);
   assert.ok(handler.includes('explicitSend('), 'handler must route the send through explicitSend() (which emits via node.remember, MMP §4.2)');
-  assert.ok(code.includes('n.remember('), 'explicitSend must emit via node.remember() — CAT7 CMB, not a raw node.send()');
+  const deliveryCode = fs.readFileSync(path.join(__dirname, '..', 'channel-delivery.js'), 'utf8');
+  assert.ok(deliveryCode.includes('n.remember('), 'explicitSend (channel-delivery.js) must emit via node.remember() — CAT7 CMB, not a raw node.send()');
   assert.ok(!/node\.send\(\s*msg\s*\)/.test(handler), 'handler must NOT fall back to node.send(msg) raw-text broadcast');
   // Peer resolution guards:
   assert.ok(handler.includes('not connected'), 'handler must return a clear error when "to" peer is disconnected');
@@ -253,43 +254,26 @@ test('MCP server instructions reference SVAF + targeted CMB semantics', () => {
 
 console.log('\nSend-path delivery integrity (E8 variant c):');
 
-// The fix lives inline in server.js (a separate module would not ship — package
-// `files` omits lib/). These source-scan assertions catch its removal.
+// The fix lives in channel-delivery.js, which package.json `files` ships next to server.js.
+// These source-scan assertions catch its removal.
 test('server.js carries the delivery-integrity fix', () => {
   const code = fs.readFileSync(resolveServerJs(), 'utf8');
-  assert.ok(code.includes('function explicitSend('), 'explicitSend helper missing');
+  const deliveryCode = fs.readFileSync(path.join(__dirname, '..', 'channel-delivery.js'), 'utf8');
+  assert.ok(deliveryCode.includes('function explicitSend('), 'explicitSend helper missing');
+  assert.ok(code.includes("require('./channel-delivery.js')"), 'server.js must use the shipped explicitSend');
+  assert.ok(require('../package.json').files.includes('channel-delivery.js'), 'channel-delivery.js must be in package.json files');
   assert.ok(code.includes('deliveredCmbKeys'), 'delivered-key tracking missing');
-  assert.ok(code.includes('[re-sent '), 're-issue salt for an undelivered re-send is missing');
+  assert.ok(deliveryCode.includes('[re-sent '), 're-issue salt for an undelivered re-send is missing');
   assert.ok(/deliveredCmbKeys = new Set\(\)/.test(code.slice(code.indexOf('node = newNode'))),
     'deliveredCmbKeys must reset on hot-swap (sym_join_room)');
   assert.ok(!code.includes('CMB already in memory, not re-broadcast'),
     'the old unconditional "Duplicate — not re-broadcast" message must be gone');
 });
 
-// Replicate explicitSend's semantics (the loadAllowlistModule pattern — server.js
-// runs main() on require, so it cannot be imported without side effects). Kept a
-// faithful mirror of the server helper it validates.
+// The shipped explicitSend (channel-delivery.js). This used to be a hand-kept mirror of a helper
+// inline in server.js, which could drift from what it claimed to test.
 function loadSendIntegrity() {
-  const crypto = require('crypto');
-  const key = (f) => crypto.createHash('sha256').update(JSON.stringify(f)).digest('hex').slice(0, 32);
-  const deliveryTag = (f, t) => (t ? `${key(f)}|${t}` : key(f));
-  const peerCount = (n) => {
-    try { const s = n.status && n.status(); return (s && s.peerCount) || (n.peers && n.peers().length) || 0; }
-    catch { return 0; }
-  };
-  function explicitSend(n, delivered, fields, sendOpts, okSummary, now) {
-    const stamp = now || (() => new Date().toISOString());
-    const t = sendOpts.to || null;
-    const connected = t ? true : peerCount(n) > 0;
-    const entry = n.remember(fields, sendOpts);
-    if (entry) { if (connected) delivered.add(deliveryTag(fields, t)); return { text: okSummary(entry, connected) }; }
-    if (delivered.has(deliveryTag(fields, t))) return { text: `Duplicate — identical CMB already delivered${t ? '' : ' to the room'}, not re-broadcast.` };
-    const salted = Object.assign({}, fields, { focus: `${fields.focus} [re-sent ${stamp()}]` });
-    const retry = n.remember(salted, sendOpts);
-    if (!retry) return { text: 'Send failed: nothing broadcast.', isError: true };
-    if (connected) delivered.add(deliveryTag(salted, t));
-    return { text: `Re-sent CMB ${retry.key}${t ? '' : ' to the room'} — undelivered prior copy re-issued.` };
-  }
+  const { explicitSend, deliveryTag } = require('../channel-delivery.js');
   return { explicitSend, deliveryTag };
 }
 
@@ -315,7 +299,7 @@ test('true duplicate to a connected peer is suppressed (no flood regression)', (
   const a = explicitSend(n, delivered, F, {}, okS, () => 'T');
   assert.ok(/^Sent CMB/.test(a.text), 'first broadcast should send');
   const b = explicitSend(n, delivered, F, {}, okS, () => 'T');
-  assert.ok(/already delivered/.test(b.text), 'identical resend after real delivery is a suppressed duplicate');
+  assert.ok(/already dispatched/.test(b.text), 'identical resend after a real dispatch is a suppressed duplicate');
 });
 
 test('undelivered re-send (variant c) is re-issued, not swallowed', () => {
@@ -776,6 +760,227 @@ async function runProjectInstallTests() {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
+
+  // `start --room` must reach the plugin node too. The plugin's .mcp.json has
+  // no SYM_ROOM, so with only the server: entry carrying the room, a session
+  // ran one node in the named room and its plugin sibling in `default`.
+  // The folder IS the agent: `sym-agent-x` runs as `claude-sym-agent-x` (user ruling, 2026-10-01).
+  const expectedFolderName = (dir) => `claude-${path.basename(dir).toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-+|-+$/g, '')}`;
+
+  // Returns the installer's result plus the fake home's ~/.claude.json and its backups afterwards.
+  async function runStart(startArgs, tmpDir, { claudeJson = {}, allowFail = false, home = null } = {}) {
+    const fakeHome = home || fs.mkdtempSync(path.join(os.tmpdir(), 'smc-home-'));
+    const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-bin-'));
+    try {
+      if (!home || !fs.existsSync(path.join(fakeHome, '.claude.json'))) fs.writeFileSync(path.join(fakeHome, '.claude.json'), JSON.stringify(claudeJson));
+      fs.writeFileSync(path.join(binDir, 'claude'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+      const r = await spawnInstallerCapture(['start', ...startArgs], {
+        cwd: tmpDir,
+        env: { ...process.env, HOME: fakeHome, USERPROFILE: fakeHome, PATH: `${binDir}${path.delimiter}${process.env.PATH}` },
+        allowFail,
+      });
+      r.claudeJson = JSON.parse(fs.readFileSync(path.join(fakeHome, '.claude.json'), 'utf8'));
+      r.backups = fs.readdirSync(fakeHome).filter((f) => f.startsWith('.claude.json.bak-'));
+      return r;
+    } finally {
+      if (!home) fs.rmSync(fakeHome, { recursive: true, force: true });
+      fs.rmSync(binDir, { recursive: true, force: true });
+    }
+  }
+
+  if (process.platform !== 'win32') {
+    await testAsync('start writes a user-scope entry that pins no name or room (every folder reads it)', async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-start-'));
+      try {
+        const { code, claudeJson } = await runStart(['--room', 'team-x'], tmpDir);
+        assert.strictEqual(code, 0);
+        const env = claudeJson.mcpServers['claude-sym-mesh'].env;
+        assert.ok(!('SYM_NODE_NAME' in env), `no global name: ${JSON.stringify(env)}`);
+        assert.ok(!('SYM_ROOM' in env), `no global room: ${JSON.stringify(env)}`);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    await testAsync('start removes a global name pin left by an older install, with a backup', async () => {
+      // The 2026-10-01 failure: SYM_NODE_NAME=claude-<hostname> in ~/.claude.json gave every
+      // folder one identity, so the second concurrent session's server died on the identity lock.
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-start-'));
+      try {
+        const live = path.join(__dirname, '..', 'server.js');
+        const { code, claudeJson, backups, stdout } = await runStart([], tmpDir, {
+          claudeJson: { mcpServers: { 'claude-sym-mesh': { command: 'node', args: [live], env: {
+            SYM_NODE_NAME: 'claude-old-host', SYM_ROOM: 'old-room',
+            SYM_RELAY_URL: 'wss://relay.example', SYM_RELAY_TOKEN: 'tok-123',
+          } } } },
+        });
+        assert.strictEqual(code, 0);
+        const env = claudeJson.mcpServers['claude-sym-mesh'].env;
+        assert.ok(!('SYM_NODE_NAME' in env) && !('SYM_ROOM' in env), `pins removed: ${JSON.stringify(env)}`);
+        assert.ok(backups.length >= 1, 'the old ~/.claude.json is backed up first');
+        assert.ok(stdout.includes('for EVERY folder'), 'the rewrite says why');
+        // The folder gets its OWN name, not the machine-wide pin (it is the agent), keeps the room, and
+        // is told how to keep the old identity if it wants it.
+        const cfg = JSON.parse(fs.readFileSync(path.join(tmpDir, '.sym', 'node.json'), 'utf8'));
+        assert.deepStrictEqual(cfg, { node_name: expectedFolderName(tmpDir), room: 'old-room' });
+        assert.ok(stdout.includes('sym-mesh-channel start --name claude-old-host'), stdout);
+        // …and removing a name pin does not take the seat off its relay.
+        assert.strictEqual(env.SYM_RELAY_URL, 'wss://relay.example');
+        assert.strictEqual(env.SYM_RELAY_TOKEN, 'tok-123');
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    await testAsync('every folder that shared a removed machine-wide name is told, not only the first (final review F3)', async () => {
+      const home = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-home-'));
+      const x = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-start-'));
+      const y = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-start-'));
+      try {
+        const live = path.join(__dirname, '..', 'server.js');
+        fs.writeFileSync(path.join(home, '.claude.json'), JSON.stringify({ mcpServers: { 'claude-sym-mesh': { command: 'node', args: [live], env: { SYM_NODE_NAME: 'claude-xmesh-hp' } } } }));
+        const first = await runStart([], x, { home });
+        assert.ok(first.stdout.includes('start --name claude-xmesh-hp'), first.stdout);
+        const second = await runStart([], y, { home });   // the global pin is already gone by now
+        assert.ok(second.stdout.includes('start --name claude-xmesh-hp'), `the second folder is told too: ${second.stdout}`);
+        const third = await runStart([], y, { home });    // same folder again: it already has its name
+        assert.ok(!third.stdout.includes('start --name claude-xmesh-hp'), 'told once per folder, when it gets its name');
+      } finally {
+        for (const d of [home, x, y]) fs.rmSync(d, { recursive: true, force: true });
+      }
+    });
+
+    await testAsync('a plugin enabled only at project scope is turned off under its own key (final review F11)', async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-start-'));
+      try {
+        fs.mkdirSync(path.join(tmpDir, '.claude'));
+        fs.writeFileSync(path.join(tmpDir, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { 'sym-mesh-channel@other-market': true } }));
+        await runStart([], tmpDir);
+        const st = JSON.parse(fs.readFileSync(path.join(tmpDir, '.claude', 'settings.local.json'), 'utf8'));
+        assert.strictEqual(st.enabledPlugins['sym-mesh-channel@other-market'], false, JSON.stringify(st));
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    await testAsync('start turns the plugin off for its folder, keeping the settings already there (one agent, one node)', async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-start-'));
+      try {
+        fs.mkdirSync(path.join(tmpDir, '.claude'));
+        const file = path.join(tmpDir, '.claude', 'settings.local.json');
+        fs.writeFileSync(file, JSON.stringify({ permissions: { allow: ['Bash(ls)'] }, enabledPlugins: { 'other@x': true } }));
+        const { code, stdout } = await runStart(['--room', 'team-x'], tmpDir);
+        assert.strictEqual(code, 0);
+        const st = JSON.parse(fs.readFileSync(file, 'utf8'));
+        assert.strictEqual(st.enabledPlugins['sym-mesh-channel@sym-bot'], false);
+        assert.strictEqual(st.enabledPlugins['other@x'], true, 'other plugins untouched');
+        assert.deepStrictEqual(st.permissions, { allow: ['Bash(ls)'] }, 'other keys kept');
+        assert.ok(fs.readdirSync(path.join(tmpDir, '.claude')).some((f) => f.startsWith('settings.local.json.bak-')), 'backed up first');
+        assert.ok(stdout.includes('plugin is off for this folder'), stdout);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    await testAsync('start warns when a project-scope entry in ~/.claude.json still pins this folder (re-review F10)', async () => {
+      const tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'smc-start-')));
+      try {
+        const live = path.join(__dirname, '..', 'server.js');
+        const { code, stderr } = await runStart([], tmpDir, {
+          claudeJson: { projects: { [tmpDir]: { mcpServers: { 'claude-sym-mesh': { command: 'node', args: [live], env: { SYM_NODE_NAME: 'claude-old-host' } } } } } },
+        });
+        assert.strictEqual(code, 0);
+        assert.ok(stderr.includes('project-scope') && stderr.includes('SYM_NODE_NAME=claude-old-host') && stderr.includes('claude mcp remove claude-sym-mesh -s local'), stderr);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    await testAsync('start replaces a node_name in .sym/node.json that breaks the naming rule (review F10)', async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-start-'));
+      try {
+        fs.mkdirSync(path.join(tmpDir, '.sym'));
+        const file = path.join(tmpDir, '.sym', 'node.json');
+        fs.writeFileSync(file, JSON.stringify({ node_name: '../../tmp/evil', room: 'team-x' }));
+        const { stderr } = await runStart([], tmpDir);
+        const cfg = JSON.parse(fs.readFileSync(file, 'utf8'));
+        assert.ok(!cfg.node_name.includes('/'), JSON.stringify(cfg));
+        assert.strictEqual(cfg.room, 'team-x', 'the rest of the file is kept');
+        assert.ok(stderr.includes(`replaced with '${expectedFolderName(tmpDir)}'`), stderr);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    await testAsync('start --name refuses a name that would escape ~/.sym/nodes/ (MMP §3.1.2)', async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-start-'));
+      try {
+        const { code, stderr } = await runStart(['--name', '../evil'], tmpDir, { allowFail: true });
+        assert.strictEqual(code, 1);
+        assert.ok(stderr.includes('path separators'), stderr);
+        assert.ok(!fs.existsSync(path.join(tmpDir, '.sym', 'node.json')), 'nothing written');
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    await testAsync('start --room writes the room to <cwd>/.sym/node.json for the plugin node', async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-start-'));
+      try {
+        const { code } = await runStart(['--room', 'xmesh-world-room'], tmpDir);
+        assert.strictEqual(code, 0);
+        const cfg = JSON.parse(fs.readFileSync(path.join(tmpDir, '.sym', 'node.json'), 'utf8'));
+        // The folder's own stable name comes with it (one folder, one agent, one name).
+        assert.strictEqual(cfg.room, 'xmesh-world-room');
+        assert.strictEqual(cfg.node_name, expectedFolderName(tmpDir));
+        assert.ok(cfg.node_name.length <= 64 && !/--/.test(cfg.node_name) && !cfg.node_name.endsWith('-'), cfg.node_name);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    await testAsync('start --room keeps node_name in an existing node.json, --room default removes the room', async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-start-'));
+      try {
+        fs.mkdirSync(path.join(tmpDir, '.sym'));
+        const file = path.join(tmpDir, '.sym', 'node.json');
+        fs.writeFileSync(file, JSON.stringify({ node_name: 'cto', room: 'old-team' }));
+        await runStart(['--room', 'new-team'], tmpDir);
+        assert.deepStrictEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { node_name: 'cto', room: 'new-team' });
+        await runStart(['--room', 'default'], tmpDir);
+        assert.deepStrictEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { node_name: 'cto' });
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    await testAsync('start --room leaves a malformed node.json untouched and says so', async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-start-'));
+      try {
+        fs.mkdirSync(path.join(tmpDir, '.sym'));
+        const file = path.join(tmpDir, '.sym', 'node.json');
+        fs.writeFileSync(file, '{ not json');
+        const { code, stderr } = await runStart(['--room', 'new-team'], tmpDir);
+        assert.strictEqual(code, 0);
+        assert.strictEqual(fs.readFileSync(file, 'utf8'), '{ not json');
+        assert.ok(stderr.includes('left unchanged'), 'must name the file it did not rewrite');
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    await testAsync('start without --room gives the folder a name and pins no room', async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-start-'));
+      try {
+        await runStart([], tmpDir);
+        const cfg = JSON.parse(fs.readFileSync(path.join(tmpDir, '.sym', 'node.json'), 'utf8'));
+        assert.strictEqual(cfg.node_name, expectedFolderName(tmpDir), JSON.stringify(cfg));
+        assert.ok(!('room' in cfg), 'no room is pinned when none was asked for');
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+  }
 
   await testAsync('global: doctor reports room per entry and warns on mismatch', async () => {
     // doctor surfaces SYM_ROOM for every entry so users can spot the

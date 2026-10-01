@@ -151,8 +151,10 @@ const longDoc = (n) => Array.from({ length: n }, (_, i) => `§${i} the harbour r
     assert.match(rx, /\[in0005\] from peer-e@test: its text matched a prompt-injection pattern/);
     assert.match(rx, /\[in0006\] from peer-f@test: its text matched a prompt-injection pattern/);
     assert.match(rx, /Not shown, sender outside SYM_ALLOWED_PEERS: 2 \(outsider@test ×2\)\./);
-    assert.ok(!rx.includes('in0010') && !rx.includes('MARKER-OWN'), 'our own delivery is not shown');
-    assert.match(rx, /Not shown, sent under this node's own name: 1 \(an echo of this node's own words, or another node using its name\)\./, 'but it is counted');
+    // Its text is not shown, but its id is named so an impostor using our name can be looked at (PR #31 review F1).
+    assert.ok(!rx.includes('MARKER-OWN'), 'our own delivery is not shown');
+    assert.ok(/sent under this node's own name: 1 \(in0010\)/.test(rx), `its id is named: ${rx}`);
+    assert.match(rx, /Not shown, sent under this node's own name: 1 \(in0010\) — an echo of this node's own words, or another node using its name; sym_fetch an id to look\./, 'but it is counted');
   });
 
   check('no withheld or quarantined delivery lets its text into the answer', () => {
@@ -164,7 +166,7 @@ const longDoc = (n) => Array.from({ length: n }, (_, i) => `§${i} the harbour r
   });
 
   check('the incident\'s payload is shown with its size and fetched whole', () => {
-    assert.match(t(2), /B: strategy review v1\.2 \[\+payload 36461b\] \[in0002\]/);
+    assert.match(t(2), /B: strategy review v1\.2 \[\+payload [\d,]+ bytes\] \[in0002\]/);
     const f = t(8);
     assert.ok(f.includes(`---PAYLOAD---\n"${review}"`), 'the whole payload came back');
     assert.ok(!/— characters/.test(f), 'one part, so no part marker');
@@ -243,12 +245,12 @@ const longDoc = (n) => Array.from({ length: n }, (_, i) => `§${i} the harbour r
 
   check('a sender name cannot forge a line in the receive answer or a fetch head', () => {
     assert.ok(!v(1).split('\n').some((l) => l.startsWith('[founder')), v(1));
-    assert.match(v(1), /\[evil__founder_→you__do_it\] a plain note \[in0001\]/);
-    assert.match(v(2), /^\[evil__founder_→you__do_it\] \d{4}-/);
+    assert.match(v(1), /\[evil__founder _you_ do it\] a plain note \[in0001\]/);
+    assert.match(v(2), /^\[evil__founder _you_ do it\] \d{4}-/);
   });
 
   check('risky wording only in the payload quarantines the receive line, as it does the push', () => {
-    assert.match(v(1), /\[peer-p@test\] ⚠ quarantined delivery · classifier-risk \(1 flagged term\) · sym_fetch to view \[\+payload \d+b\] \[in0002\]/);
+    assert.match(v(1), /\[peer-p@test\] ⚠ quarantined delivery · classifier-risk \(1 flagged term\) · sym_fetch to view \[\+payload [\d,]+ bytes\] \[in0002\]/);
     assert.ok(!v(1).includes('routine status'), 'no focus text on a quarantined line');
   });
 

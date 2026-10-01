@@ -69,6 +69,18 @@ test('NO input shape can produce autoSuffix — the -2/-3 path does not exist', 
   }
 });
 
+test('nodeNameProblem: the §3.1.2 bounds plus file-name safety, shared by installer and server', () => {
+  const { nodeNameProblem } = require('../identity.js');
+  for (const ok of ['claude-sym-agent-a', 'codex-mac', 'claude-sym-research@hongwei-mac', 'ü-node']) {
+    assert.strictEqual(nodeNameProblem(ok), null, ok);
+  }
+  for (const bad of ['', '   ', ' lead', 'trail ', '../evil', 'a/b', 'a\\b', '.', '..', 'a:b', 'a*b', 'a?b', 'a"b', 'a<b', 'a>b', 'a|b',
+                     'x'.repeat(65), 'zero\u200bwidth', 'bidi\u202eflip', 'ctl\u0007',
+                     'con', 'NUL', 'com1', 'lpt9.txt', 'trailing.']) {
+    assert.ok(nodeNameProblem(bad), `should refuse ${JSON.stringify(bad)}`);
+  }
+});
+
 test('pinned names are trimmed but otherwise untouched', () => {
   const r = resolveIdentity({ pinnedName: '  melotune-dev  ', defaultName: 'd' });
   assert.equal(r.name, 'melotune-dev');

@@ -4,14 +4,18 @@ sym-mesh-channel implements defense in depth with three layers. No
 single layer is the sole gate — all three must pass before a mesh
 signal reaches Claude's conversation context.
 
-## Layer 1: Transport Authentication
+## Layer 1: Transport and peer identity
 
-Only authenticated peers can send signals to this node.
-
-- **LAN (Bonjour)**: peers discover each other via mDNS on the local
-  network. Each peer has an Ed25519 keypair generated at first run
-  and stored at `~/.sym/nodes/<name>/identity.json`. Peer identity is
-  verified via cryptographic handshake (MMP Section 5).
+- **LAN (Bonjour)**:
+  - Peers discover each other via mDNS on the local network.
+  - Each peer has an Ed25519 keypair generated at first run and stored at
+    `~/.sym/nodes/<name>/identity.json`.
+  - Peers connect with the pre-2.0 one-frame handshake. It states a peer's keys but does not prove
+    possession of them, so a peer's keys are trusted the first time they are seen (trust on first
+    use).
+  - The MMP 2.0 Core Secure handshake proves key possession (MMP §5.2). The engine contains it, and
+    it matches the published conformance vectors, but it is not yet switched on. It is planned for a
+    coming engine release.
 - **Relay (WebSocket)**: peers authenticate with a shared relay token
   (`SYM_RELAY_TOKEN`). Message content is encrypted per peer before it reaches the
   relay, which forwards the sealed payload by its envelope and stores nothing; with
@@ -20,7 +24,17 @@ Only authenticated peers can send signals to this node.
   peers on different tokens cannot see each other. Unauthenticated
   connections are rejected at the transport level.
 
-No unauthenticated source can reach `pushChannel()`.
+**What follows until Core Secure is on.** A peer's name, and the author a record names, are
+labels, not credentials. A hostile peer on the LAN, or a hostile relay, can claim another peer's
+identity on first contact. So run rooms on networks and relays you trust, and keep human approval
+for consequential actions.
+
+Within that limit, the channel never decides on a name a message carries:
+
+- The allowlist, the own-name check and the push rate limit key on the peer whose connection
+  delivered the message (`author.via` in `@sym-bot/sym` 0.13.12).
+- A frame-supplied `source` is ignored.
+- A record that names a different author is printed `author via deliverer`.
 
 ## Layer 2: Protocol-Level Content Gating (SVAF)
 
@@ -85,9 +99,10 @@ cannot be recovered afterwards.
 
 A sender chooses its own name, so every line prints it with line breaks,
 brackets and control characters replaced, and the audit line drops control
-characters and quotes from its excerpt. A delivery under this node's own name
-is counted in `sym_receive`, not shown: it is an echo of this node's words, or
-another node using its name.
+characters and quotes from its excerpt. A delivery from a peer whose connection
+uses this node's own name is not shown in `sym_receive`, but its id is listed and
+an audit line written: it is an echo of this node's words, or another node using
+its name, and `sym_fetch` on the id shows which.
 
 A payload within the limit is announced on the header with its size and read on
 demand. `sym_fetch` returns a long message in parts of at most 48,000
@@ -135,11 +150,18 @@ that require it.
 
 ## Identity Collision
 
-If another process is already running with the same node identity,
-the relay returns close code 4004. The server exits cleanly with
-exit code 2 rather than competing for the identity.
+A node name is held by one live process at a time, through a lock at
+`~/.sym/nodes/<name>/lock.pid`.
+
+- **A second process with the same name on this machine:** the server starts without a mesh node,
+  so it never forks a second identity. Its instructions and every mesh tool say which name is held,
+  by which PID, and how to fix it.
+- **Windows:** the lock cannot yet tell a live holder from a crashed session whose PID has been
+  reused. If no process with that PID is this agent, delete the lock file named in the message.
+- **Relay:** when the relay reports another connection holding this node's identity (close code
+  4004), the server exits with code 2 rather than competing for it.
 
 ## References
 
-- [MMP v1.0 Specification](https://meshcognition.org/spec/mmp) — Sections 5 (Connection), 8 (CAT7), 9 (SVAF)
+- [MMP v2.0 Specification](https://meshcognition.org/spec/mmp) — Sections 5 (Connection), 8 (CAT7), 9 (SVAF)
 - [SVAF Paper](https://arxiv.org/abs/2604.03955) — Xu, 2026

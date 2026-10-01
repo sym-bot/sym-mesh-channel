@@ -51,7 +51,13 @@ mkdir claude-agent-2 && cd claude-agent-2
 npx -y @sym-bot/mesh-channel@latest start --room your-room
 ```
 
-The launcher downloads the current channel, configures the MCP server, starts Claude Code with live channel delivery, and gives the session its own mesh identity. Sessions in the same room find each other over loopback on one machine, Bonjour on a LAN, or an optional relay across networks.
+The launcher downloads the current channel, configures the MCP server, and starts Claude Code with live channel delivery. Each folder is one agent with its own mesh identity:
+
+- The node is named after the folder: `claude-agent-1`, `claude-agent-2`.
+- The name and room are kept in the folder's `.sym/node.json`, so the agent keeps them across sessions.
+- The Claude plugin is turned off for that folder in `.claude/settings.local.json`, so the session runs exactly one mesh node, the one with real-time push.
+
+Sessions in the same room find each other over loopback on one machine, Bonjour on a LAN, or an optional relay across networks. To give a folder a different name, pass `--name <node-name>`. Two sessions open at once in folders with the same name share it; the second one says so in every mesh tool and tells you to pass `--name`.
 
 Then tell one agent:
 
@@ -67,7 +73,7 @@ The reply can arrive inside the active conversation—no polling and no copy-pas
 | **Automatic peer discovery** | Agents in the same room find one another across folders, repositories, machines, and supported transports. |
 | **Sovereign context** | Every agent keeps its own state and decides what to do with an incoming signal; there is no shared conversation to corrupt. |
 | **Receiver-controlled attention** | [SVAF](https://arxiv.org/abs/2604.03955) evaluates relevance at the receiver before a signal enters its cognitive state. |
-| **Identity and lineage** | Authenticated peer identity and structured CAT7 messages make coordination traceable instead of anonymous. |
+| **Identity and lineage** | Every agent has its own node identity and signing key, and structured CAT7 messages make coordination traceable instead of anonymous. |
 | **Open protocol** | The channel speaks the [Mesh Memory Protocol](https://meshcognition.org/spec/mmp), so the coordination layer is not tied to one model vendor. |
 
 ### A room, not a session
@@ -133,24 +139,36 @@ Use Agent Teams when one Claude session should create and supervise a temporary 
 
 Real-time push currently uses Claude Code's temporary development-channels flag. The `start` launcher adds it for you, and Claude asks for confirmation when the session begins. Without the flag, the MCP tools still send and receive on demand, but peer events cannot enter a Claude Code conversation mid-turn.
 
-After the first setup, the equivalent direct launch is:
+After the first setup, the equivalent direct launch, from the agent's folder, is:
 
 ```bash
-claude --dangerously-load-development-channels plugin:sym-mesh-channel@sym-bot
+claude --dangerously-load-development-channels server:claude-sym-mesh
 ```
+
+If you installed the Claude plugin instead of using `start`, the plugin's channel handle is `plugin:sym-mesh-channel@sym-bot`. Use one or the other in a session, never both: a session that runs the plugin and a `claude-sym-mesh` server is two mesh nodes, and both servers say so.
 
 Claude Team and Enterprise administrators can allowlist the plugin with `allowedChannelPlugins` for prompt-free organizational deployment.
 
 ## Security boundary
 
-Security is the property this channel is built around, so here is what it does and where it
-stops. Each session has its own signing key; every message it sends is signed and verified by
-the receiver. Message content is encrypted for each peer with a key only those two hold, on the
-local network and through a relay alike. The optional relay forwards sealed messages by their
-envelope and stores nothing — no message history, no keys, no addresses — and with engine 0.13.7
-or later a session sends nothing through a relay to a peer that presented no encryption key,
-rather than falling back to plaintext. Each session decides for itself what it admits from what
-it hears.
+Here is what the channel does today and where it stops.
+
+- **Signing:** each agent has its own Ed25519 signing key, and the messages it sends are signed.
+- **Encryption:** message content is encrypted per peer, on the local network and through a relay.
+- **The relay:** it forwards sealed messages by their envelope and stores nothing: no message
+  history, no keys, no addresses. With engine 0.13.7 or later, a session sends nothing through a
+  relay to a peer that presented no encryption key, rather than falling back to plaintext.
+- **Admission:** each session decides for itself what it admits from what it hears.
+
+**Peer identity is not yet proven at connection time.** Peers still connect with the pre-2.0
+handshake, so a peer's keys are trusted the first time they are seen. The MMP 2.0 Core Secure
+handshake proves key possession, and the engine contains it, but it is not yet switched on; it is
+planned for a coming engine release. Until then, treat a peer's name as a label, not a credential.
+Run rooms on networks and relays you trust.
+
+The channel already keys every policy decision on the connection a message arrived on, not on the
+name a message claims. That covers the allowlist, the own-name check and the rate limit. When a
+record names a different author, the line shows it as `author via deliverer`.
 
 Peer messages are **external input**. Keep human approval for consequential actions. A room name or relay token is not an enterprise trust boundary, and channel membership must not grant permission to execute tools or approve changes.
 
