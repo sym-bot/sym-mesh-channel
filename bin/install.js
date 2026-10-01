@@ -113,10 +113,19 @@ validateRoomValue(process.env.SYM_ROOM, 'SYM_ROOM');
 // config serves then loses its mesh server with no clear error. So from an npx run the config names
 // the package and version instead, which npx resolves (and re-fetches if needed) on every launch.
 const PKG_VERSION = (() => { try { return require(path.join(__dirname, '..', 'package.json')).version; } catch { return null; } })();
+// Semver order for the pins this tool writes: numeric core first; at an equal core a prerelease
+// (`0.11.0-rc.1`) is LOWER than its release, so an rc pin is upgraded to the release and a release
+// is never rewritten to an rc. `(x || 0)` would read `0-rc` as 0, a real 0 and NaN alike.
 const versionLess = (a, b) => {
-  const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number);
-  for (let i = 0; i < 3; i++) { if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) < (y[i] || 0); }
-  return false;
+  const parse = (v) => {
+    const [core, pre = ''] = String(v).split('+')[0].split(/-(.*)/s);
+    return { nums: core.split('.').map((n) => (/^\d+$/.test(n) ? Number(n) : -1)), pre };
+  };
+  const x = parse(a), y = parse(b);
+  for (let i = 0; i < 3; i++) { const p = x.nums[i] ?? 0, q = y.nums[i] ?? 0; if (p !== q) return p < q; }
+  if (x.pre && !y.pre) return true;
+  if (!x.pre && y.pre) return false;
+  return x.pre < y.pre;
 };
 function launchSpec(serverJs) {
   if (/[\\/]_npx[\\/]/.test(serverJs) && PKG_VERSION) {
@@ -125,6 +134,18 @@ function launchSpec(serverJs) {
     return process.platform === 'win32' ? { command: 'cmd', args: ['/c', 'npx', '-y', pkg] } : { command: 'npx', args: ['-y', pkg] };
   }
   return { command: 'node', args: [serverJs] };
+}
+
+// A pin NEWER than this installer is left alone (never downgrade), but said, because nothing here can
+// tell whether that version resolves on npm: if it doesn't, every session that reads it has no server.
+function warnNewerPin(entry, where) {
+  const pinned = entry && Array.isArray(entry.args) && entry.args.find((a) => typeof a === 'string' && a.startsWith('@sym-bot/mesh-channel@'));
+  if (!pinned || !PKG_VERSION) return;
+  const v = pinned.slice('@sym-bot/mesh-channel@'.length);
+  if (versionLess(PKG_VERSION, v)) {
+    process.stderr.write(`NOTE: ${where} pins @sym-bot/mesh-channel@${v}, newer than this installer (${PKG_VERSION}); left as is. ` +
+      `If that version is not on npm, sessions get no mesh server: re-run a ${v} start, or this one with --force.\n`);
+  }
 }
 
 function isStaleEntry(entry) {
@@ -317,6 +338,7 @@ if (cmd === 'start') {
 
   const existing = rawEntryInScope();
   const stale = existing ? isStaleEntry(existing) : false;
+  if (existing) warnNewerPin(existing, isProject ? '.mcp.json' : '~/.claude.json');
   if (nameArg) {
     const problem = nodeNameProblem(nameArg);
     if (problem) {
@@ -801,7 +823,13 @@ const topEntryIsStale = isStaleEntry(existingTopEntry);
 
 // Refuse to overwrite a LIVE entry without --force. A stale entry is
 // always rewritable — see isStaleEntry comment at top of file.
-if (existingTopEntry && !force && !topEntryIsStale) {
+// A live top entry must not stop the project-scoped heal below, which is exactly what the
+// "N stale entries — run init to heal" line sends a user here for (review F2).
+const staleProjectEntries = Object.values(claudeJson.projects && typeof claudeJson.projects === 'object' ? claudeJson.projects : {})
+  .filter((proj) => proj && proj.mcpServers && proj.mcpServers['claude-sym-mesh'] && isStaleEntry(proj.mcpServers['claude-sym-mesh'])).length;
+const keepTop = !!existingTopEntry && !force && !topEntryIsStale && staleProjectEntries > 0;
+if (existingTopEntry) warnNewerPin(existingTopEntry, '~/.claude.json');
+if (existingTopEntry && !force && !topEntryIsStale && !keepTop) {
   if (isPostinstall) {
     // During postinstall, silently skip if already configured and live
     console.log('sym-mesh-channel: already configured in ~/.claude.json (skipping)');
@@ -846,7 +874,7 @@ const entry = {
 // for the rationale. Omitted = node uses the global _sym._tcp default.
 if (topRoom && !noPin) entry.env.SYM_ROOM = topRoom;
 
-claudeJson.mcpServers['claude-sym-mesh'] = entry;
+if (!keepTop) claudeJson.mcpServers['claude-sym-mesh'] = entry;   // keepTop: heal projects only
 
 // ── Heal stale project-scoped entries ─────────────────────────────
 // ~/.claude.json can contain per-project mcpServers overrides under

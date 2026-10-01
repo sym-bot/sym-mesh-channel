@@ -94,7 +94,13 @@ run("git push origin main");
 run(`git push origin v${version}`);
 // Order: push main, tag, GitHub release, THEN npm publish. The public package appears only after
 // everything it points at exists, and a failure before it leaves nothing published.
-if (run(`git ls-remote origin refs/tags/v${version}`) === "") die(`v${version} is not on origin after the push; not publishing`);
+let tagOnOrigin = "";
+try { tagOnOrigin = run(`git ls-remote origin refs/tags/v${version}`); } catch (e) { die(`could not check v${version} on origin (${e.message}); not publishing`); }
+if (tagOnOrigin === "") die(`v${version} is not on origin after the push; not publishing`);
+// A public repo gets its GitHub release BEFORE npm publish, so a missing gh is a stop, not a skip.
+let ghOk = true;
+try { run("gh --version"); } catch { ghOk = false; }
+if (!ghOk) die("the gh CLI is not available, so the GitHub release cannot be created before publish; install gh and re-run from the GitHub-release step");
 
 if (isPrivateRepo()) {
   step("GitHub release: SKIPPED (private repo)");

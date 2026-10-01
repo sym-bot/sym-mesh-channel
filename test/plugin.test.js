@@ -883,10 +883,24 @@ async function runProjectInstallTests() {
         assert.strictEqual(r.status, 0, r.stderr);
         const entry = JSON.parse(fs.readFileSync(path.join(home, '.claude.json'), 'utf8')).mcpServers['claude-sym-mesh'];
         const version = require('../package.json').version;
-        assert.strictEqual(entry.command, 'npx', JSON.stringify(entry));
-        assert.deepStrictEqual(entry.args, ['-y', `@sym-bot/mesh-channel@${version}`]);
+        // Native Windows runs npx through cmd /c; elsewhere npx is called directly (review F4).
+        const want = process.platform === 'win32'
+          ? { command: 'cmd', args: ['/c', 'npx', '-y', `@sym-bot/mesh-channel@${version}`] }
+          : { command: 'npx', args: ['-y', `@sym-bot/mesh-channel@${version}`] };
+        assert.strictEqual(entry.command, want.command, JSON.stringify(entry));
+        assert.deepStrictEqual(entry.args, want.args);
       } finally {
         for (const d of [npxRoot, tmpDir, home, binDir]) fs.rmSync(d, { recursive: true, force: true });
+      }
+    });
+
+    await testAsync('start says so when the entry pins a version newer than itself (review F3)', async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-start-'));
+      try {
+        const r = await runStart([], tmpDir, { claudeJson: { mcpServers: { 'claude-sym-mesh': { command: 'npx', args: ['-y', '@sym-bot/mesh-channel@99.0.0'], env: {} } } } });
+        assert.ok(/pins @sym-bot\/mesh-channel@99\.0\.0, newer than this installer/.test(r.stderr), r.stderr);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
       }
     });
 

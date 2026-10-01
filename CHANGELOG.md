@@ -10,8 +10,9 @@ longer mistaken for a live one when Windows has reused its process id.
 - **The launch command survives an npm cache clean.** When `start` runs from npx, it writes
   `npx -y @sym-bot/mesh-channel@<version>` into `~/.claude.json` (through `cmd /c` on Windows) instead
   of a path inside npx's cache. npm can remove that cache at any time, and every session that read the
-  path then lost its mesh server. A later `start` from a newer release upgrades the pinned version; an
-  older installer never downgrades it.
+  path then lost its mesh server. A later `start` from a newer release upgrades the pinned version.
+  From 0.10.1 on, an older installer never downgrades it (a 0.10.0 or earlier `start` still rewrites
+  it), and a pin newer than the installer is named on stderr.
 - **`sym_status` says whether real-time push is on.** On macOS and Linux it reads how Claude Code was
   launched: `Push: on` when the development-channels flag names this server, `Push: off` with the fix
   when the flag is missing. Windows still reports that it cannot confirm.

@@ -825,12 +825,20 @@ function claudeLaunch() {
   try {
     const { execFileSync } = require('child_process');
     let pid = process.ppid;
-    for (let i = 0; i < 6 && pid > 1; i++) {
-      const out = execFileSync('ps', ['-ww', '-o', 'ppid=,command=', '-p', String(pid)], { encoding: 'utf8', timeout: 1500 }).trim();
+    const until = Date.now() + 2000;   // one budget for the whole walk, not 1.5 s per step (review F16)
+    for (let i = 0; i < 6 && pid > 1 && Date.now() < until; i++) {
+      const out = execFileSync('ps', ['-ww', '-o', 'ppid=,command=', '-p', String(pid)], { encoding: 'utf8', timeout: Math.max(200, until - Date.now()) }).trim();
       const m = out.match(/^(\d+)\s+([\s\S]*)$/);
       if (!m) break;
       const cmd = m[2];
-      if (/(^|[\/\s])claude(\s|$)/.test(cmd)) {
+      // Claude Code is `claude` as the program, `claude` as the script node or a shell runs (npm's bin
+      // shim), or node running its package's cli.js. Not just any command that ends in "claude" (F11).
+      const argv = cmd.split(/\s+/);
+      const base = (t) => String(t || '').split('/').pop();
+      const isClaude = base(argv[0]) === 'claude'
+        || (/^(node|sh|bash|zsh|dash)$/.test(base(argv[0])) && base(argv[1]) === 'claude')
+        || /@anthropic-ai\/claude-code\/\S*cli\.m?js(\s|$)/.test(cmd);
+      if (isClaude) {
         _launch = { flagged: /--dangerously-load-development-channels\b/.test(cmd), cmd };
         break;
       }
@@ -843,7 +851,8 @@ function claudeLaunch() {
 function pushStatusLine() {
   const launch = claudeLaunch();
   if (launch) {
-    const mine = IS_PLUGIN_HOST ? /plugin:sym-mesh-channel@/ : /server:claude-sym-mesh\b/;
+    // The whole handle, so `server:claude-sym-mesh-2` does not count as this server's (review F7).
+    const mine = IS_PLUGIN_HOST ? /plugin:sym-mesh-channel@\S+/ : /server:claude-sym-mesh(\s|,|$)/;
     if (launch.flagged && mine.test(launch.cmd)) {
       return `Push: on — Claude Code was launched with --dangerously-load-development-channels for this server, so deliveries arrive as <channel> notifications.`;
     }
