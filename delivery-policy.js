@@ -255,8 +255,10 @@ function receiveLine(m, { policy, selfName, now = Date.now(), pushed = false }) 
     const p = prepare({ from: m.from, content: m.content, categories: m.categories, payload: m.payload });
     const verdict = policy.judge(p);
     if (verdict.reason === 'sender-not-allowed') return { bucket: 'not-allowed' };
-    if (!verdict.show) return { bucket: 'withheld', line: withheldLine(m.id, m.from, verdict), audit: [verdict.reason, verdict.excerpt] };
-    const name = displayName(m.from);
+    // `label` is what to print (the claimed author, and the deliverer when different); `from` is the
+    // deliverer every decision above was made on.
+    if (!verdict.show) return { bucket: 'withheld', line: withheldLine(m.id, m.label || m.from, verdict), audit: [verdict.reason, verdict.excerpt] };
+    const name = displayName(m.label || m.from);
     const age = Math.round((now - m.receivedAt) / 1000);
     const focus = String(m.categories?.focus?.text || m.content || '');
     const dirTag = m.directed ? ' →you' : '';
@@ -324,7 +326,8 @@ function receiveReport({ shown, withheld, notAllowed, ownName = 0, alreadyRead =
     ? `Already read with sym_fetch, not repeated: ${alreadyRead.length} (${alreadyRead.join(', ')}).`
     : '';
   if (!shown.length && !withheld.length && !kept && !ownName) {
-    if (readLine) return `Caught up — nothing unread${peekTag}${more}. ${readLine}`;
+    // Never "caught up" while a next batch is waiting (the 2026-09-27 failure, review F3).
+    if (readLine) return remaining > 0 ? `No delivery in this batch${peekTag}${more}. ${readLine}` : `Caught up — nothing unread${peekTag}. ${readLine}`;
     return remaining > 0
       ? `No delivery in this batch${peekTag}${more}.`
       : 'Caught up — nothing new delivered since your last sym_receive.';
@@ -368,7 +371,8 @@ function fetchPart({ id, head, body, offset = 0, pageChars = FETCH_PAGE_CHARS })
   if (offset > 0 && offset >= total) {
     return { error: `offset ${offset} is past the end of ${id}, which is ${fmt(total)} characters long.` };
   }
-  if (offset === 0 && total <= pageChars) return { text: `${head}\n\n${body}` };
+  // `last`: this answer ends the message, so the caller may treat it as read in full.
+  if (offset === 0 && total <= pageChars) return { text: `${head}\n\n${body}`, last: true };
   // Never split a surrogate pair at either end: a character cut in half is lost from both parts.
   // An offset from this tool is always a boundary; a typed one may land inside a pair.
   let start = offset;
@@ -379,7 +383,7 @@ function fetchPart({ id, head, body, offset = 0, pageChars = FETCH_PAGE_CHARS })
   const tail = end >= total
     ? `— ${where}: the end of ${id}.`
     : `— ${where}. The rest: sym_fetch {"msg_id": "${id}", "offset": ${end}}`;
-  return { text: `${head}\n\n${body.slice(start, end)}\n\n${tail}` };
+  return { text: `${head}\n\n${body.slice(start, end)}\n\n${tail}`, last: end >= total };
 }
 
 module.exports = {

@@ -53,7 +53,7 @@ const { SymNode } = require('@sym-bot/sym');
 const { scanClassifierRisk, quarantineHeader } = require('./classifier-risk.js');
 const { hiddenFieldsTag } = require('./surface-truth.js');
 const deliveryPolicy = require('./delivery-policy.js');
-const { resolveIdentity } = require('./identity.js');
+const { resolveIdentity, nodeNameProblem } = require('./identity.js');
 const { loadRelay, saveRelay, forgetRelay } = require('./relay-store.js');
 const outbox = require('./outbox.js');
 
@@ -322,8 +322,17 @@ function projectNodeConfig() {
     const known = new Set(['node_name', 'room']);
     const unknown = Object.keys(cfg).filter((k) => !known.has(k));
     const legacyRoom = clean(cfg.group);
+    // A node name becomes a directory under ~/.sym/nodes/, so a planted "../x" in this file must not
+    // reach the engine. Refused names are named here and in the startup advisory, never used.
+    let nodeName = clean(cfg.node_name);
+    const badNodeName = nodeName && nodeNameProblem(nodeName) ? { value: nodeName, problem: nodeNameProblem(nodeName) } : undefined;
+    if (badNodeName) {
+      process.stderr.write(`sym-mesh-channel: ${file} node_name ${JSON.stringify(nodeName)} ${badNodeName.problem}; ignoring it.\n`);
+      nodeName = undefined;
+    }
     return {
-      node_name: clean(cfg.node_name),
+      node_name: nodeName,
+      badNodeName,
       room: clean(cfg.room),
       file,
       unknownKeys: unknown,
@@ -457,7 +466,7 @@ try {
 // tests exercise the shipped code rather than a copy of it. The engine's own delivery report
 // (remember().delivery) decides whether a send left this node.
 const crypto = require('crypto');
-const { explicitSend, senderOf, inboxIdFor, createReadTracker, staleNote } = require('./channel-delivery.js');
+const { explicitSend, delivererOf, senderLabel, inboxIdFor, createReadTracker, staleNote } = require('./channel-delivery.js');
 
 // ── input hygiene (0.3.39) — silent semantic drops must fail loudly ──────────────
 // Root-caused 2026-07-18: minds habitually call sym_publish/sym_send with a single
@@ -567,11 +576,12 @@ function registerNodeHandlers(n) {
   n.on('cmb-accepted', (entry) => {
     if (entry.source === NODE_NAME || entry.cmb?.createdBy === NODE_NAME) return;
     // An admitted entry's `source` is the SDK's store-local `<receiver>+<deliverer>` key, which
-    // printed as "<us>+<them>" on every push. senderOf() takes entry.author (0.13.12) or the
-    // deliverer's part of that key; it is a display label, not a verified identity.
-    const sender = senderOf(entry, NODE_NAME) || entry.cmb?.createdBy || 'unknown';
+    // printed as "<us>+<them>" on every push. The allowlist, the own-name check and the rate key on
+    // the DELIVERER, the peer our own connection knows; the line prints the record's claimed author
+    // as well when that is someone else ("author via deliverer"). Neither is a verified identity.
+    const sender = delivererOf(entry, NODE_NAME) || entry.cmb?.createdBy || 'unknown';
     if (sender === NODE_NAME) return;
-    const source = deliveryPolicy.displayName(sender);   // the sender chooses its name; lines print this
+    const source = deliveryPolicy.displayName(senderLabel(entry, NODE_NAME) || sender);   // what lines print
     const categories = entry.cmb?.categories || {};
     const payload = entry.cmb?.payload;
     // The same judgement sym_receive, sym_fetch and sym_recall make (delivery-policy.js). This delivery
@@ -628,14 +638,11 @@ function registerNodeHandlers(n) {
     // same thing the notification did. Before, the push minted its own mNNN for a delivery the inbox
     // already held as inNNNN, and the session met every message twice under two names.
     const inboxId = inboxIdFor(n, entry);
-    let msgId;
-    if (inboxId) {
-      msgId = inboxId;
-      pushedInboxIds.add(inboxId);
-    } else {
-      msgId = storeMessage(source, body, header);   // an engine without an inbox
-    }
-    pushChannel('cmb', `${header} [${msgId}]`);
+    const msgId = inboxId || storeMessage(source, body, header);   // mNNN: an engine without an inbox
+    // Credit the push only once it has gone out: one that failed (before mcp.connect, say) must not
+    // tag the sym_receive line as already seen.
+    const sent = pushChannel('cmb', `${header} [${msgId}]`);
+    if (inboxId) sent.then((ok) => { if (ok) pushedInboxIds.add(inboxId); });
   });
 
   n.on('message', (from, content) => {
@@ -675,7 +682,7 @@ const BASE_INSTRUCTIONS =
   'Publish a CMB to your whole room via sym_publish — a projection of your own state (MMP §9.2 receiver-autonomous SVAF evaluation). ' +
   'Both sym_send and sym_publish emit a CAT7 CMB (your projection); each receiver runs SVAF and, if it admits the CMB as an observation, remix-stores it with lineage back to yours. ' +
   'Search mesh memory via sym_recall. ' +
-  'sym_receive and <channel> notifications give compact headers with one [inNNNN] ID per delivery (the same ID on both) — use sym_fetch to read the full content when relevant to your current task; a delivery read with sym_fetch is not repeated by sym_receive. Sender names in headers are display labels the sender chose, not verified identities. ' +
+  'sym_receive and <channel> notifications give compact headers with one ID per delivery, the same on both: [inNNNN] (or [mNNN] on an engine without a delivery inbox). Use sym_fetch to read the full content when relevant to your current task; an [inNNNN] delivery read to its end with sym_fetch is not repeated by sym_receive. Sender names in headers are labels the sender chose, not verified identities; "X via Y" means the record names X as its author and peer Y delivered it. ' +
   'A delivery this node withholds is listed by id with the reason, never left out of the count; a long message comes back from sym_fetch in parts, each naming the offset of the next.';
 
 // Final startup step (MMP §4.2 O2 — rejoin-without-replay). The SymNode
@@ -708,6 +715,12 @@ function roomAdvisory() {
   const lines = [];
   // The wrong-key case first: it EXPLAINS the fallback below, and a reader who sees only
   // "you are in default" goes looking for a missing file rather than at the one they wrote.
+  if (PROJECT_CFG.badNodeName) {
+    lines.push(
+      `MESH NODE ADVISORY: ${PROJECT_CFG.file} sets node_name ${JSON.stringify(PROJECT_CFG.badNodeName.value)}, which ` +
+      `${PROJECT_CFG.badNodeName.problem}. It was ignored, so this node runs as '${NODE_NAME}'. Fix the name in that file.`,
+    );
+  }
   if (PROJECT_CFG.legacyGroup) {
     lines.push(
       `MESH ROOM ADVISORY: ${PROJECT_CFG.file} sets "group": "${PROJECT_CFG.legacyGroup}", which is ` +
@@ -759,7 +772,9 @@ function dualNodeAdvisory() {
       const where = [];
       if (cj.mcpServers && cj.mcpServers['claude-sym-mesh']) where.push('~/.claude.json (user scope)');
       if (cj.projects?.[projectDir]?.mcpServers?.['claude-sym-mesh']) where.push(`~/.claude.json (project ${projectDir})`);
-      if (readJson(path.join(projectDir, '.mcp.json'))?.mcpServers?.['claude-sym-mesh']) where.push(`${path.join(projectDir, '.mcp.json')}`);
+      const projEntry = readJson(path.join(projectDir, '.mcp.json'))?.mcpServers?.['claude-sym-mesh'];
+      // This repo's own .mcp.json IS the plugin's server definition; it is not a second server.
+      if (projEntry && projEntry.env?.SYM_CHANNEL_HOST !== 'plugin') where.push(`${path.join(projectDir, '.mcp.json')}`);
       if (!where.length) return [];
       return [
         `MESH NODE ADVISORY: this is the sym-mesh-channel plugin's node, and a 'claude-sym-mesh' MCP server is also ` +
@@ -1161,7 +1176,7 @@ async function dispatchTool(request) {
         const held = h.held
           ? ` HELD AT SENDER in this node's outbox (#${h.seq}) and re-sent when "${holdName}" appears. The queue is invisible to "${holdName}"; if this node does not come back, the message is lost.`
           : ` The outbox could not hold it either (${h.reason}), so nothing is queued.`;
-        return { content: [{ type: 'text', text: r.text + held }] };
+        return { content: [{ type: 'text', text: r.text + held }], ...(h.held ? {} : { isError: true }) };
       }
       return { content: [{ type: 'text', text: r.text }], ...(r.isError ? { isError: true } : {}) };
     }
@@ -1292,7 +1307,8 @@ async function dispatchTool(request) {
       if (rawId.startsWith('in')) {
         const stored = node.inboxGet(rawId);
         if (!stored) return { content: [{ type: 'text', text: `Message ${rawId} not found (expired or invalid ID).` }] };
-        const m = { ...stored, from: senderOf(stored, NODE_NAME) };
+        // Policy keys on the deliverer; the line shows the claimed author too (review F1).
+        const m = { ...stored, from: delivererOf(stored, NODE_NAME), label: senderLabel(stored, NODE_NAME) };
         // The inbox holds every delivery, withheld ones included, so the fetch makes the same
         // judgement push and receive make. Before, it made none, and a withheld message's whole
         // text was one fetch away.
@@ -1305,10 +1321,8 @@ async function dispatchTool(request) {
         }
         // The opaque payload rides along (preserved on the inbox message), rendered as the
         // channel-push store renders it, so a directed CMB's structured data survives the pull path.
-        head = `[${deliveryPolicy.displayName(m.from)}] ${new Date(m.receivedAt).toISOString()}`;
+        head = `[${deliveryPolicy.displayName(m.label || m.from)}] ${new Date(m.receivedAt).toISOString()}`;
         body = deliveryPolicy.renderBody(m.content || '', delivery);
-        // Shown in full, so read: sym_receive will not repeat it and the unread footer stops counting it.
-        readTracker.markRead(node, rawId);
       } else {
         // The push store holds only what the push path judged fit to show, under this same policy.
         const entry = MESSAGE_STORE.get(rawId);
@@ -1319,6 +1333,9 @@ async function dispatchTool(request) {
         body = String(entry.content ?? '');
       }
       const part = deliveryPolicy.fetchPart({ id: rawId, head, body, offset: at.offset });
+      // Read only once the session has been handed the end of it: a long delivery comes in parts,
+      // and marking it read on part 1 would hide the rest from sym_receive and the unread footer.
+      if (rawId.startsWith('in') && part.last) readTracker.markRead(node, rawId);
       return { content: [{ type: 'text', text: part.error || part.text }] };
     }
 
@@ -1337,8 +1354,10 @@ async function dispatchTool(request) {
       for (const stored of messages) {
         // Read in full with sym_fetch already: the drain moves past it and the answer names it, once.
         if (readTracker.isRead(stored)) { alreadyRead.push(stored.id); continue; }
-        const m = { ...stored, from: senderOf(stored, NODE_NAME) };
+        // Policy keys on the deliverer; the line shows the claimed author too (review F1).
+        const m = { ...stored, from: delivererOf(stored, NODE_NAME), label: senderLabel(stored, NODE_NAME) };
         const r = deliveryPolicy.receiveLine(m, { policy, selfName: NODE_NAME, now, pushed: pushedInboxIds.has(m.id) });
+        if (!args.peek) pushedInboxIds.delete(m.id);   // reported once; keeps the set bounded
         if (r.audit) securityAudit('receive', r.audit[0], m.from, r.audit[1], m.id);
         if (r.bucket === 'shown') shown.push(r.line);
         else if (r.bucket === 'withheld') withheld.push(r.line);
@@ -1568,7 +1587,14 @@ async function dispatchTool(request) {
       const restorePrevious = async (why) => {
         let restored = null;
         try {
-          restored = buildNode({ serviceType: prevServiceType, room: prevRoom, relay: RELAY_URL, relayToken: RELAY_TOKEN });
+          try {
+            restored = buildNode({ serviceType: prevServiceType, room: prevRoom, relay: RELAY_URL, relayToken: RELAY_TOKEN });
+          } catch (e) {
+            // Our own half-stopped node can still hold the lock for a moment; wait once, then retry.
+            if (e?.code !== 'EIDENTITYLOCK' || e.holderPid !== process.pid) throw e;
+            await new Promise((r) => setTimeout(r, 500));
+            restored = buildNode({ serviceType: prevServiceType, room: prevRoom, relay: RELAY_URL, relayToken: RELAY_TOKEN });
+          }
           registerNodeHandlers(restored);
           await restored.start();
           node = restored;
@@ -1594,8 +1620,9 @@ async function dispatchTool(request) {
       try {
         await newNode.start();
       } catch (e) {
-        try { await newNode.stop(); } catch {}   // releases the identity lock for the restore
-        return { content: [{ type: 'text', text: await restorePrevious(`failed to start a node on room "${room}": ${e?.message || e}`) }], isError: true };
+        let stopNote = '';
+        try { await newNode.stop(); } catch (se) { stopNote = `; stopping it also failed: ${se?.message || se}`; }   // releases the identity lock for the restore
+        return { content: [{ type: 'text', text: await restorePrevious(`failed to start a node on room "${room}": ${e?.message || e}${stopNote}`) }], isError: true };
       }
 
       // Swap module-level references only after successful start.
@@ -1772,6 +1799,7 @@ function securityAudit(surface, reason, peer, excerpt, id) {
 // mcp.notification() is async: "Not connected" (a CMB arriving while node.start() runs, before
 // mcp.connect) comes back as a rejected promise, which the try/catch around the call never saw and
 // which nothing else handled. A push that cannot go out is not lost — the delivery is in the inbox.
+// Resolves true once the notification was written, false if it could not be.
 function pushChannel(eventType, data) {
   try {
     const sent = mcp.notification({
@@ -1781,8 +1809,8 @@ function pushChannel(eventType, data) {
         meta: { event_type: eventType, source: 'sym-mesh' },
       },
     });
-    if (sent && typeof sent.catch === 'function') sent.catch(() => {});
-  } catch {}
+    return Promise.resolve(sent).then(() => true, () => false);
+  } catch { return Promise.resolve(false); }
 }
 
 // All node.on(...) handlers live in registerNodeHandlers(n) above so the
@@ -1823,10 +1851,17 @@ async function shutdown(signal) {
 // 'null' threw a TypeError inside the engine's ws listener and killed this process (audit B-T3). The
 // engine fixes its own causes; this is the backstop. Each one is logged with its stack, counted, and
 // shown by sym_status. A broken stdout pipe means the host is gone, so that one shuts down instead.
+// Before the host is connected nothing could ever read the count, so a fault there exits as before:
+// a process that stays up but never answers initialize is worse than "Connection closed" (review F4).
 let internalErrors = 0;
 let lastInternalError = null;
+let mcpConnected = false;
 function recordInternalError(kind, err) {
   if (err && err.code === 'EPIPE') { shutdown('epipe'); return; }
+  if (!mcpConnected) {
+    try { process.stderr.write(`sym-mesh-channel: ${kind} before the host connected: ${err?.stack || err}\n`); } catch {}
+    process.exit(1);
+  }
   internalErrors++;
   lastInternalError = `${kind}: ${err?.message || err}`;
   try { process.stderr.write(`sym-mesh-channel: ${kind} (server kept running): ${err?.stack || err}\n`); } catch {}
@@ -1922,6 +1957,7 @@ async function main() {
     // Serve the tools anyway: that is the only way the session learns why the mesh is missing.
     const transport = new StdioServerTransport();
     await mcp.connect(transport);
+    mcpConnected = true;
     return;
   }
   await node.start();
@@ -1944,6 +1980,7 @@ async function main() {
   // Start MCP server — communicates with Claude Code via stdio
   const transport = new StdioServerTransport();
   await mcp.connect(transport);
+  mcpConnected = true;
 }
 
 main().catch((err) => {

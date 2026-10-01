@@ -60,17 +60,27 @@ const okS = (e, sent) => (sent ? `Sent CMB ${e.key}` : `Stored ${e.key} — no p
 async function unitTests() {
   console.log('\nchannel-delivery.js:');
 
-  await test('senderOf: the deliverer, not "<receiver>+<deliverer>" (P3)', () => {
-    assert.strictEqual(cd.senderOf({ source: 'claude-sym-agent-a+claude-sym-agent-b' }, 'claude-sym-agent-a'), 'claude-sym-agent-b');
-    assert.strictEqual(cd.senderOf({ from: 'claude-sym-agent-a+claude-sym-agent-b' }, 'claude-sym-agent-a'), 'claude-sym-agent-b');
-    assert.strictEqual(cd.senderOf({ source: 'claude-sym-agent-b' }, 'claude-sym-agent-a'), 'claude-sym-agent-b');
+  await test('delivererOf: the deliverer, not "<receiver>+<deliverer>" (P3)', () => {
+    assert.strictEqual(cd.delivererOf({ source: 'claude-sym-agent-a+claude-sym-agent-b' }, 'claude-sym-agent-a'), 'claude-sym-agent-b');
+    assert.strictEqual(cd.delivererOf({ from: 'claude-sym-agent-a+claude-sym-agent-b' }, 'claude-sym-agent-a'), 'claude-sym-agent-b');
+    assert.strictEqual(cd.delivererOf({ source: 'claude-sym-agent-b' }, 'claude-sym-agent-a'), 'claude-sym-agent-b');
     // A name that merely contains a '+' is not our key and is left alone.
-    assert.strictEqual(cd.senderOf({ source: 'x+y' }, 'claude-sym-agent-a'), 'x+y');
+    assert.strictEqual(cd.delivererOf({ source: 'x+y' }, 'claude-sym-agent-a'), 'x+y');
   });
 
-  await test('senderOf: prefers entry.author.name when the engine supplies it (0.13.12)', () => {
-    const e = { source: 'a+relay-node', author: { name: 'original-author', nodeId: null, via: { name: 'relay-node' } } };
-    assert.strictEqual(cd.senderOf(e, 'a'), 'original-author');
+  await test('a record claiming an allowlisted author is judged on its deliverer, and the line shows both (review F1)', () => {
+    // 0.13.12 shape: author.name is the record's own createdBy, which its writer chooses.
+    const forged = { from: 'trusted-b', author: { name: 'trusted-b', nodeId: null, via: { name: 'hostile-h', nodeId: 'h1' } } };
+    assert.strictEqual(cd.delivererOf(forged, 'a'), 'hostile-h', 'policy must see the peer that delivered it');
+    assert.strictEqual(cd.senderLabel(forged, 'a'), 'trusted-b via hostile-h', 'the claim stays visible, attributed');
+    const policy = deliveryPolicy.createDeliveryPolicy({ allowedPeers: ['trusted-b'], maxPayloadBytes: 1 << 20 });
+    const m = { id: 'in0001', ...forged, from: cd.delivererOf(forged, 'a'), label: cd.senderLabel(forged, 'a'), content: 'x', categories: { focus: { text: 'x' } }, receivedAt: Date.now() };
+    assert.strictEqual(deliveryPolicy.receiveLine(m, { policy, selfName: 'a' }).bucket, 'not-allowed');
+    // Claiming OUR name is no longer a way to be counted as our own echo.
+    const selfClaim = { author: { name: 'a', via: { name: 'hostile-h' } } };
+    assert.strictEqual(cd.delivererOf(selfClaim, 'a'), 'hostile-h');
+    const plain = { author: { name: 'b', via: { name: 'b' } } };
+    assert.strictEqual(cd.senderLabel(plain, 'a'), 'b', 'author and deliverer the same: one name');
   });
 
   await test('inboxIdFor: uses entry.inboxId when present, else the newest matching inbox item', () => {
@@ -92,6 +102,13 @@ async function unitTests() {
     assert.ok(t.isRead(items.in0002) && !t.isRead(items.in0001));
     assert.strictEqual(t.adjust(n, status).undrained, 1, 'the fetched item is no longer unread');
     assert.strictEqual(t.adjust(n, { seq: 2, cursor: 2, undrained: 0 }).undrained, 0, 'drained past it: nothing to subtract');
+  });
+
+  await test('readTracker: an inboxAck the engine refuses still takes the item out of the unread count (review F11)', () => {
+    const n = { inboxAck: () => { throw new Error('refused'); }, inboxGet: (id) => ({ id, seq: 4 }) };
+    const t = cd.createReadTracker();
+    t.markRead(n, 'in0004');
+    assert.strictEqual(t.adjust(n, { seq: 4, cursor: 0, undrained: 1 }).undrained, 0);
   });
 
   await test('readTracker: with engine inboxAck, the engine is told and its count is trusted as is', () => {
@@ -167,6 +184,19 @@ async function unitTests() {
     assert.ok(/Already read with sym_fetch, not repeated: 1 \(in0001\)/.test(r), r);
     assert.ok(!/new mesh message/.test(r));
   });
+
+  await test('receiveReport never says "Caught up" while another batch is waiting (review F3)', () => {
+    const r = deliveryPolicy.receiveReport({ shown: [], withheld: [], notAllowed: new Map(), alreadyRead: ['in0001'], remaining: 40, peek: false });
+    assert.ok(!/Caught up/.test(r), r);
+    assert.ok(/\+40 more — call sym_receive again/.test(r), r);
+  });
+
+  await test('fetchPart says which part ends the message, so only that one marks it read (review F12)', () => {
+    const body = 'x'.repeat(deliveryPolicy.FETCH_PAGE_CHARS + 10);
+    assert.strictEqual(deliveryPolicy.fetchPart({ id: 'in0001', head: 'h', body, offset: 0 }).last, false);
+    assert.strictEqual(deliveryPolicy.fetchPart({ id: 'in0001', head: 'h', body, offset: deliveryPolicy.FETCH_PAGE_CHARS }).last, true);
+    assert.strictEqual(deliveryPolicy.fetchPart({ id: 'in0001', head: 'h', body: 'short', offset: 0 }).last, true);
+  });
 }
 
 // ── End to end: real servers over stdio ───────────────────────────────────────
@@ -218,12 +248,13 @@ async function waitFor(pred, ms, every = 250) {
   return null;
 }
 
-async function e2eTests() {
+async function e2eTests({ lan }) {
   console.log('\nend to end (real servers):');
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'channel-reliability-'));
   const suffix = `${process.pid}-${Date.now().toString(36)}`;
   const room = `cr-${suffix}`.toLowerCase().replace(/[^a-z0-9-]/g, '-');
   try {
+    // Needs no discovery (two servers, one name), so it runs even where LAN multicast is unavailable.
     await test('a name held by a live process: the second server starts, says why, and every tool says so (I1)', async () => {
       const env = { SYM_STATE_DIR: stateDir, SYM_NODE_NAME: `cr-holder-${suffix}`, SYM_ROOM: room };
       const first = session(env);
@@ -240,6 +271,10 @@ async function e2eTests() {
       } finally { await second.close(); await first.close(); }
     });
 
+    if (!lan) {
+      console.log('  ! SKIP_E2E=1: the LAN test below is NOT run, so P2 and P3 are NOT verified end to end here.');
+      return;
+    }
     await test('a directed send arrives as ONE id under the real sender, and a fetched push is not repeated (P2, P3)', async () => {
       const a = session({ SYM_STATE_DIR: stateDir, SYM_NODE_NAME: `cr-a-${suffix}`, SYM_ROOM: room });
       const b = session({ SYM_STATE_DIR: stateDir, SYM_NODE_NAME: `cr-b-${suffix}`, SYM_ROOM: room });
@@ -274,8 +309,7 @@ async function e2eTests() {
 (async () => {
   console.log('\nsym-mesh-channel channel reliability (audit phase 1)');
   await unitTests();
-  if (process.env.SKIP_E2E === '1') console.log('\n(SKIP_E2E=1 — end-to-end tests skipped)');
-  else await e2eTests();
+  await e2eTests({ lan: process.env.SKIP_E2E !== '1' });
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
 })();

@@ -6,18 +6,31 @@
 // (entry.author, entry.inboxId, node.inboxAck, remember().delivery on every directed send).
 
 /**
- * The name to print for a delivery's sender. 0.13.12 hands us `author.name` (the record's own
- * createdBy — still an unverified label until the Core Secure handshake lands). Before that, an
- * SVAF-admitted entry's `source` is the SDK's store-local `<receiver>+<deliverer>` key, which
- * printed as "claude-sym-agent-a+claude-sym-agent-b" on agent-a's own screen; the part after our
- * own name is the delivering peer, which is the only sender identity 0.13.8 carries.
+ * The peer that handed us a delivery: the name this node's own connection knows it by. This, not
+ * the author a record names, is what the allowlist, the own-name check and the push rate key on.
+ * Anyone can write any createdBy into a record, so a record claiming to be from an allowlisted
+ * peer must not be let in on that claim (review F1). 0.13.12 names it in `author.via`; before that,
+ * an SVAF-admitted entry's `source` is the SDK's store-local `<receiver>+<deliverer>` key, which
+ * printed as "claude-sym-agent-a+claude-sym-agent-b" on agent-a's own screen — the part after our
+ * own name is the deliverer.
  */
-function senderOf(item, selfName) {
-  const author = item && item.author;
-  if (author && typeof author.name === 'string' && author.name) return author.name;
-  const raw = String((item && (item.from ?? item.source)) || '');
+function delivererOf(item, selfName) {
+  const via = item && item.author && item.author.via;
+  if (via && typeof via.name === 'string' && via.name) return via.name;
+  const raw = String((item && (item.source ?? item.from)) || '');
   const prefix = `${selfName}+`;
   return raw.startsWith(prefix) ? raw.slice(prefix.length) : raw;
+}
+
+/**
+ * The name to print for a delivery's sender. The record's author (0.13.12 `author.name`, still an
+ * unverified label until the Core Secure handshake lands) and, when it is a different node, the
+ * peer that delivered it — so a relayed or forged attribution is visible on the line itself.
+ */
+function senderLabel(item, selfName) {
+  const deliverer = delivererOf(item, selfName);
+  const author = item && item.author && typeof item.author.name === 'string' ? item.author.name : '';
+  return author && author !== deliverer ? `${author} via ${deliverer}` : deliverer;
 }
 
 /**
@@ -45,24 +58,28 @@ function inboxIdFor(n, entry) {
  * channels are not enabled for this server, the push goes nowhere and the inbox is all there is.
  */
 function createReadTracker() {
-  const read = new Map();   // inbox id → seq
+  const read = new Map();     // inbox id → seq, for everything read in full
+  const engineAcked = new Set();   // the subset the engine accepted an inboxAck for
   return {
     markRead(n, id) {
-      try { if (typeof n.inboxAck === 'function') n.inboxAck(id); } catch { /* engine refused — keep local state */ }
+      let acked = false;
+      try { if (typeof n.inboxAck === 'function') { n.inboxAck(id); acked = true; } } catch { /* engine refused — keep local state */ }
       try {
         const m = n.inboxGet(id);
         if (m) read.set(id, m.seq);
       } catch { /* no inbox on this engine */ }
+      if (acked) engineAcked.add(id);
     },
     isRead(m) {
       return !!m && (m.acked === true || read.has(m.id));
     },
-    /** inboxStatus() with fetched-but-undrained items taken out of the unread count. */
+    /** inboxStatus() with fetched-but-undrained items taken out of the unread count — except the
+     *  ones the engine accepted an ack for, which its own count already leaves out. */
     adjust(n, s) {
-      if (!s || typeof n.inboxAck === 'function') return s;   // the engine already excludes acked items
+      if (!s) return s;
       let fetched = 0;
-      for (const seq of read.values()) if (seq > s.cursor) fetched++;
-      return { ...s, undrained: Math.max(0, s.undrained - fetched) };
+      for (const [id, seq] of read) if (seq > s.cursor && !engineAcked.has(id)) fetched++;
+      return fetched ? { ...s, undrained: Math.max(0, s.undrained - fetched) } : s;
     },
   };
 }
@@ -178,6 +195,6 @@ function explicitSend(n, delivered, categories, sendOpts, okSummary, now) {
 }
 
 module.exports = {
-  senderOf, inboxIdFor, createReadTracker, sendOutcome, staleNote, STALE_AFTER_MS,
+  delivererOf, senderLabel, inboxIdFor, createReadTracker, sendOutcome, staleNote, STALE_AFTER_MS,
   cmbContentKey, deliveryTag, connectedPeerCount, explicitSend,
 };

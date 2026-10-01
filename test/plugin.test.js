@@ -806,13 +806,38 @@ async function runProjectInstallTests() {
       try {
         const live = path.join(__dirname, '..', 'server.js');
         const { code, claudeJson, backups, stdout } = await runStart([], tmpDir, {
-          claudeJson: { mcpServers: { 'claude-sym-mesh': { command: 'node', args: [live], env: { SYM_NODE_NAME: 'claude-old-host', SYM_ROOM: 'old-room' } } } },
+          claudeJson: { mcpServers: { 'claude-sym-mesh': { command: 'node', args: [live], env: {
+            SYM_NODE_NAME: 'claude-old-host', SYM_ROOM: 'old-room',
+            SYM_RELAY_URL: 'wss://relay.example', SYM_RELAY_TOKEN: 'tok-123',
+          } } } },
         });
         assert.strictEqual(code, 0);
         const env = claudeJson.mcpServers['claude-sym-mesh'].env;
         assert.ok(!('SYM_NODE_NAME' in env) && !('SYM_ROOM' in env), `pins removed: ${JSON.stringify(env)}`);
         assert.ok(backups.length >= 1, 'the old ~/.claude.json is backed up first');
         assert.ok(stdout.includes('for EVERY folder'), 'the rewrite says why');
+        // The folder being launched keeps the established identity and room (review F13)…
+        const cfg = JSON.parse(fs.readFileSync(path.join(tmpDir, '.sym', 'node.json'), 'utf8'));
+        assert.deepStrictEqual(cfg, { node_name: 'claude-old-host', room: 'old-room' });
+        // …and removing a name pin does not take the seat off its relay.
+        assert.strictEqual(env.SYM_RELAY_URL, 'wss://relay.example');
+        assert.strictEqual(env.SYM_RELAY_TOKEN, 'tok-123');
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    await testAsync('start replaces a node_name in .sym/node.json that breaks the naming rule (review F10)', async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-start-'));
+      try {
+        fs.mkdirSync(path.join(tmpDir, '.sym'));
+        const file = path.join(tmpDir, '.sym', 'node.json');
+        fs.writeFileSync(file, JSON.stringify({ node_name: '../../tmp/evil', room: 'team-x' }));
+        const { stderr } = await runStart([], tmpDir);
+        const cfg = JSON.parse(fs.readFileSync(file, 'utf8'));
+        assert.ok(!cfg.node_name.includes('/'), JSON.stringify(cfg));
+        assert.strictEqual(cfg.room, 'team-x', 'the rest of the file is kept');
+        assert.ok(stderr.includes('replacing it'), stderr);
       } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
       }
@@ -836,8 +861,12 @@ async function runProjectInstallTests() {
         const { code } = await runStart(['--room', 'xmesh-world-room'], tmpDir);
         assert.strictEqual(code, 0);
         const cfg = JSON.parse(fs.readFileSync(path.join(tmpDir, '.sym', 'node.json'), 'utf8'));
-        // The folder's own stable name comes with it (one folder, one agent, one name).
-        assert.deepStrictEqual(cfg, { node_name: `claude-${path.basename(tmpDir).toLowerCase().replace(/[^a-z0-9-]/g, '-')}`, room: 'xmesh-world-room' });
+        // The folder's own stable name comes with it (one folder, one agent, one name): its basename
+        // plus a hash of its full path, so two folders called `web` never share an identity.
+        assert.strictEqual(cfg.room, 'xmesh-world-room');
+        assert.ok(/^claude-[a-z0-9-]+-[0-9a-f]{6}$/.test(cfg.node_name), cfg.node_name);
+        assert.ok(cfg.node_name.length <= 64 && !/--/.test(cfg.node_name), cfg.node_name);
+        assert.ok(cfg.node_name.startsWith('claude-smc-start-'), cfg.node_name);
       } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
       }
@@ -878,7 +907,7 @@ async function runProjectInstallTests() {
       try {
         await runStart([], tmpDir);
         const cfg = JSON.parse(fs.readFileSync(path.join(tmpDir, '.sym', 'node.json'), 'utf8'));
-        assert.ok(cfg.node_name && cfg.node_name.startsWith('claude-smc-start-'), JSON.stringify(cfg));
+        assert.ok(cfg.node_name && /^claude-smc-start-[a-z0-9-]+-[0-9a-f]{6}$/.test(cfg.node_name), JSON.stringify(cfg));
         assert.ok(!('room' in cfg), 'no room is pinned when none was asked for');
       } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });

@@ -143,19 +143,17 @@ function preserveRoom(entry) {
 // instead of minting a fresh node every launch. `room` 'default' removes the room
 // key rather than pinning it. Other keys are kept. A file we cannot parse is left
 // alone and named: rewriting it would discard whatever the user put there.
+// The folder's name plus a short hash of its full path: two folders called `web` in different
+// trees must not share an identity, or the second session meets the identity lock (review F9).
 function folderNodeName(dir) {
-  const base = path.basename(path.resolve(dir)).toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^-+|-+$/g, '');
-  return `claude-${base || 'agent'}`.slice(0, 64);
+  const abs = path.resolve(dir);
+  const base = path.basename(abs).toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48);
+  const tag = require('crypto').createHash('sha256').update(abs).digest('hex').slice(0, 6);
+  return `claude-${base || 'agent'}-${tag}`;
 }
-// A node name becomes a directory under ~/.sym/nodes/, and MMP §3.1.2 bounds it to
-// 1–64 bytes of printable characters.
-function nodeNameProblem(name) {
-  if (!name || Buffer.byteLength(name, 'utf8') > 64) return 'must be 1–64 bytes';
-  if (/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2066-\u2069]/.test(name)) return 'must not contain control, zero-width or bidi characters';
-  if (name.includes('/') || name.includes('\\') || name === '.' || name === '..') return 'must not contain path separators or be . or ..';
-  return null;
-}
-function writeProjectConfig(dir, { room, name, defaultName = true }) {
+// The node-name rule (MMP §3.1.2 plus file-name safety) is shared with server.js.
+const { nodeNameProblem } = require('../identity.js');
+function writeProjectConfig(dir, { room, name, defaultName = true, inherit = {} }) {
   const file = path.join(dir, '.sym', 'node.json');
   let cfg = {};
   if (fs.existsSync(file)) {
@@ -169,10 +167,21 @@ function writeProjectConfig(dir, { room, name, defaultName = true }) {
     }
   }
   const before = JSON.stringify(cfg);
+  // A name already in the file meets the same rule as --name: a config file is an easier place to
+  // plant "../../x" than a command line (review F10).
+  if (typeof cfg.node_name === 'string' && nodeNameProblem(cfg.node_name)) {
+    process.stderr.write(`WARNING: ${file} node_name ${JSON.stringify(cfg.node_name)} ${nodeNameProblem(cfg.node_name)}; replacing it.\n`);
+    delete cfg.node_name;
+  }
+  const hasName = typeof cfg.node_name === 'string' && cfg.node_name.trim();
   if (name) cfg.node_name = name;
-  else if (defaultName && (typeof cfg.node_name !== 'string' || !cfg.node_name.trim())) cfg.node_name = folderNodeName(dir);
+  // `inherit` carries what an older user-scope entry pinned for every folder, so the folder being
+  // launched keeps that established identity and room instead of silently becoming a new node (F13).
+  else if (!hasName && inherit.name) cfg.node_name = inherit.name;
+  else if (!hasName && defaultName) cfg.node_name = folderNodeName(dir);
   if (room === 'default') delete cfg.room;
   else if (room) cfg.room = room;
+  else if (!cfg.room && inherit.room) cfg.room = inherit.room;
   if (JSON.stringify(cfg) !== before) {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     const tmp = `${file}.tmp-${process.pid}`;
@@ -289,8 +298,8 @@ if (cmd === 'start') {
           `\nThe user-scope 'claude-sym-mesh' entry in ~/.claude.json pins` +
           `${existing.env.SYM_NODE_NAME ? ` SYM_NODE_NAME=${existing.env.SYM_NODE_NAME}` : ''}` +
           `${existing.env.SYM_ROOM ? ` SYM_ROOM=${existing.env.SYM_ROOM}` : ''}` +
-          ` for EVERY folder. Removing the pin (a backup is written first); this folder's identity goes in .sym/node.json.` +
-          `\nOther folders launched with \`sym-mesh-channel start\` get their own name the same way.\n`,
+          ` for EVERY folder. Removing the pin (a backup is written first). This folder keeps that identity in its own` +
+          ` .sym/node.json; other folders launched with \`sym-mesh-channel start\` get a name of their own.\n`,
         );
       }
       const initArgs = ['init', '--no-pin'];
@@ -309,7 +318,13 @@ if (cmd === 'start') {
   // launch from, which is where server.js looks.
   // In --project mode the folder's .mcp.json already pins the name, so only the
   // room goes here; a second name would split the plugin node off under it.
-  if (!isProject) writeProjectConfig(launchDir, { room: roomArg, name: nameArg });
+  if (!isProject) {
+    const inherit = existing && existing.env ? {
+      name: typeof existing.env.SYM_NODE_NAME === 'string' && !nodeNameProblem(existing.env.SYM_NODE_NAME) ? existing.env.SYM_NODE_NAME : null,
+      room: typeof existing.env.SYM_ROOM === 'string' && existing.env.SYM_ROOM.trim() ? existing.env.SYM_ROOM.trim() : null,
+    } : {};
+    writeProjectConfig(launchDir, { room: roomArg, name: nameArg, inherit });
+  }
   else if (roomArg) writeProjectConfig(launchDir, { room: roomArg, defaultName: false });
 
   console.log(`\n▶ Launching Claude Code on the SYM mesh — real-time push on.\n  (channel: ${handle}; the dev flag is temporary until Anthropic allowlists it)\n`);
@@ -717,8 +732,10 @@ const entry = {
     //
     // To enable cross-network connectivity later, replace these empty
     // values with your relay URL and token (see README).
-    SYM_RELAY_URL: '',
-    SYM_RELAY_TOKEN: '',
+    // A --no-pin rewrite (what `start` runs on every pinned entry) keeps relay credentials the user
+    // put there by hand: removing a name pin must not also take a seat off its relay.
+    SYM_RELAY_URL: noPin && typeof existingTopEntry?.env?.SYM_RELAY_URL === 'string' ? existingTopEntry.env.SYM_RELAY_URL : '',
+    SYM_RELAY_TOKEN: noPin && typeof existingTopEntry?.env?.SYM_RELAY_TOKEN === 'string' ? existingTopEntry.env.SYM_RELAY_TOKEN : '',
   },
 };
 // SYM_ROOM only emitted when explicitly chosen — see project-mode comment

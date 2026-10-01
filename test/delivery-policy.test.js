@@ -208,7 +208,8 @@ test('receive lists what it shows, what it withheld, and what the allowlist kept
 
 test('a message that fits one part comes back exactly as before', () => {
   const r = p.fetchPart({ id: 'm001', head: '[dev2] 2026-09-28T00:00:00.000Z', body: 'short body' });
-  assert.deepStrictEqual(r, { text: '[dev2] 2026-09-28T00:00:00.000Z\n\nshort body' });
+  // The text is unchanged; `last` says this answer ends the message (so the caller may mark it read).
+  assert.deepStrictEqual(r, { text: '[dev2] 2026-09-28T00:00:00.000Z\n\nshort body', last: true });
 });
 
 test('a long message is read in parts that rebuild it exactly, and each part says which characters it holds (F10)', () => {
