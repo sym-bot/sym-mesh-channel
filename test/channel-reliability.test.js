@@ -350,6 +350,28 @@ async function e2eTests({ lan }) {
       } finally { await second.close(); await first.close(); }
     });
 
+    if (process.platform !== 'win32') {
+      await test('sym_status reads the push flag from the launching claude process (0.10.1)', async () => {
+        e2eRan++;
+        const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'cr-claude-'));
+        // A stand-in `claude` that runs the server as its child, the way Claude Code does.
+        const fake = path.join(bin, 'claude');
+        fs.writeFileSync(fake, `#!/bin/sh\n"${process.execPath}" "${SERVER}"\n`, { mode: 0o755 });
+        const statusVia = async (args) => {
+          const child = spawn(fake, args, { env: { ...process.env, SYM_STATE_DIR: stateDir, SYM_NODE_NAME: `cr-push-${suffix}-${args.length}`, SYM_ROOM: room, CLAUDE_PROJECT_DIR: stateDir, SYM_RELAY_URL: '', SYM_RELAY_TOKEN: '' }, stdio: ['pipe', 'pipe', 'pipe'] });
+          let buf = ''; const got = new Promise((res) => child.stdout.on('data', (d) => { buf += d; const lines = buf.split('\n'); for (const l of lines) { try { const m = JSON.parse(l); if (m.id === 2) res(m.result.content[0].text); } catch {} } }));
+          child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 't', version: '1' } } }) + '\n');
+          child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'sym_status', arguments: {} } }) + '\n');
+          const text = await Promise.race([got, new Promise((_, rej) => setTimeout(() => rej(new Error('no sym_status')), 20000))]);
+          child.kill(); return text;
+        };
+        try {
+          assert.match(await statusVia(['--dangerously-load-development-channels', 'server:claude-sym-mesh']), /Push: on/);
+          assert.match(await statusVia([]), /Push: off/);
+        } finally { fs.rmSync(bin, { recursive: true, force: true }); }
+      });
+    }
+
     if (!lan) {
       console.log('  ! SKIP_E2E=1: the LAN test below is NOT run, so P2 and P3 are NOT verified end to end here.');
       return;
@@ -411,7 +433,7 @@ async function e2eTests({ lan }) {
   const lan = process.env.SKIP_E2E !== '1';
   await e2eTests({ lan });
   // A floor, so a run that silently entered fewer end-to-end tests is not green (re-review F18).
-  const expected = lan ? 2 : 1;
+  const expected = (lan ? 2 : 1) + (process.platform !== 'win32' ? 1 : 0);
   if (e2eRan < expected) { failed++; console.log(`  ✗ only ${e2eRan} of ${expected} end-to-end tests ran`); }
   console.log(`  end-to-end tests run: ${e2eRan}${lan ? '' : ' (LAN test skipped — P2/P3 not verified end to end)'}`);
   console.log(`\n${passed} passed, ${failed} failed`);

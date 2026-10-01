@@ -92,9 +92,9 @@ step(`tag v${version} + push`);
 git("tag", "-a", `v${version}`, "-m", `v${version}\n\n${notes}`);
 run("git push origin main");
 run(`git push origin v${version}`);
-
-step("npm publish (ambient npm auth — no embedded token)");
-run("npm publish --access public", { stdio: "inherit" });
+// Order: push main, tag, GitHub release, THEN npm publish. The public package appears only after
+// everything it points at exists, and a failure before it leaves nothing published.
+if (run(`git ls-remote origin refs/tags/v${version}`) === "") die(`v${version} is not on origin after the push; not publishing`);
 
 if (isPrivateRepo()) {
   step("GitHub release: SKIPPED (private repo)");
@@ -104,5 +104,8 @@ if (isPrivateRepo()) {
   try { run(`gh release create v${version} --title ${JSON.stringify(`v${version}`)} --notes-file .release-notes.tmp`, { stdio: "inherit" }); }
   finally { fs.rmSync(".release-notes.tmp", { force: true }); }
 }
+
+step("npm publish (ambient npm auth — no embedded token)");
+run("npm publish --access public", { stdio: "inherit" });
 
 process.stdout.write(`\n✓ released ${pkg.name}@${version} — version, CHANGELOG, tag, npm, and release all aligned.\n`);

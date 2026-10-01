@@ -863,6 +863,46 @@ async function runProjectInstallTests() {
       }
     });
 
+    await testAsync('run from npx, start writes a versioned npx launch spec, not a path into npx\'s cache (0.10.1)', async () => {
+      // Lay the package out the way npx does: …/_npx/<hash>/node_modules/@sym-bot/mesh-channel/.
+      const npxRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-npx-'));
+      const pkgDir = path.join(npxRoot, '_npx', 'abc123', 'node_modules', '@sym-bot', 'mesh-channel');
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-start-'));
+      const home = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-home-'));
+      const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-bin-'));
+      try {
+        fs.mkdirSync(path.join(pkgDir, 'bin'), { recursive: true });
+        for (const f of ['package.json', 'server.js', 'identity.js']) fs.copyFileSync(path.join(__dirname, '..', f), path.join(pkgDir, f));
+        fs.copyFileSync(path.join(__dirname, '..', 'bin', 'install.js'), path.join(pkgDir, 'bin', 'install.js'));
+        fs.writeFileSync(path.join(home, '.claude.json'), '{}');
+        fs.writeFileSync(path.join(binDir, 'claude'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+        const r = require('child_process').spawnSync(process.execPath, [path.join(pkgDir, 'bin', 'install.js'), 'start', '--room', 'team-x'], {
+          cwd: tmpDir, encoding: 'utf8',
+          env: { ...process.env, HOME: home, USERPROFILE: home, PATH: `${binDir}${path.delimiter}${process.env.PATH}` },
+        });
+        assert.strictEqual(r.status, 0, r.stderr);
+        const entry = JSON.parse(fs.readFileSync(path.join(home, '.claude.json'), 'utf8')).mcpServers['claude-sym-mesh'];
+        const version = require('../package.json').version;
+        assert.strictEqual(entry.command, 'npx', JSON.stringify(entry));
+        assert.deepStrictEqual(entry.args, ['-y', `@sym-bot/mesh-channel@${version}`]);
+      } finally {
+        for (const d of [npxRoot, tmpDir, home, binDir]) fs.rmSync(d, { recursive: true, force: true });
+      }
+    });
+
+    await testAsync('an npx spec pinning an older version is upgraded by start; a newer one is never downgraded (0.10.1)', async () => {
+      const older = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-start-'));
+      const newer = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-start-'));
+      try {
+        const a = await runStart([], older, { claudeJson: { mcpServers: { 'claude-sym-mesh': { command: 'npx', args: ['-y', '@sym-bot/mesh-channel@0.0.1'], env: {} } } } });
+        assert.notDeepStrictEqual(a.claudeJson.mcpServers['claude-sym-mesh'].args, ['-y', '@sym-bot/mesh-channel@0.0.1'], 'an older pin is rewritten');
+        const b = await runStart([], newer, { claudeJson: { mcpServers: { 'claude-sym-mesh': { command: 'npx', args: ['-y', '@sym-bot/mesh-channel@99.0.0'], env: {} } } } });
+        assert.deepStrictEqual(b.claudeJson.mcpServers['claude-sym-mesh'].args, ['-y', '@sym-bot/mesh-channel@99.0.0'], 'a newer pin is left alone');
+      } finally {
+        for (const d of [older, newer]) fs.rmSync(d, { recursive: true, force: true });
+      }
+    });
+
     await testAsync('start turns the plugin off for its folder, keeping the settings already there (one agent, one node)', async () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-start-'));
       try {

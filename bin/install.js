@@ -108,8 +108,31 @@ validateRoomValue(process.env.SYM_ROOM, 'SYM_ROOM');
 // on postinstall means users who move or uninstall an old copy of the repo
 // get healed automatically on the next `npm install -g @sym-bot/mesh-channel`
 // without needing to know about --force.
+// The version of THIS installer, and the launch spec it writes. A server.js resolved inside npx's
+// cache (…/_npx/<hash>/…) is not a stable path: npm can garbage-collect it, and every session that
+// config serves then loses its mesh server with no clear error. So from an npx run the config names
+// the package and version instead, which npx resolves (and re-fetches if needed) on every launch.
+const PKG_VERSION = (() => { try { return require(path.join(__dirname, '..', 'package.json')).version; } catch { return null; } })();
+const versionLess = (a, b) => {
+  const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number);
+  for (let i = 0; i < 3; i++) { if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) < (y[i] || 0); }
+  return false;
+};
+function launchSpec(serverJs) {
+  if (/[\\/]_npx[\\/]/.test(serverJs) && PKG_VERSION) {
+    const pkg = `@sym-bot/mesh-channel@${PKG_VERSION}`;
+    // Native Windows runs npx through cmd /c (npx is a .cmd shim).
+    return process.platform === 'win32' ? { command: 'cmd', args: ['/c', 'npx', '-y', pkg] } : { command: 'npx', args: ['-y', pkg] };
+  }
+  return { command: 'node', args: [serverJs] };
+}
+
 function isStaleEntry(entry) {
   if (!entry || !Array.isArray(entry.args) || entry.args.length === 0) return false;
+  // An npx spec is stale only when it pins an OLDER version than this installer, so `start` from a
+  // newer release upgrades it and an older installer never downgrades it.
+  const pinned = entry.args.find((a) => typeof a === 'string' && a.startsWith('@sym-bot/mesh-channel@'));
+  if (pinned) return !!PKG_VERSION && versionLess(pinned.slice('@sym-bot/mesh-channel@'.length), PKG_VERSION);
   const p = entry.args[0];
   if (typeof p !== 'string' || !p) return false;
   try { return !fs.existsSync(p); } catch { return true; }
@@ -145,7 +168,7 @@ function preserveRoom(entry) {
 // alone and named: rewriting it would discard whatever the user put there.
 // The folder is the agent, so its name is the node's: `sym-agent-x` runs as `claude-sym-agent-x`.
 // Two live sessions in folders with the same name do share it, and the second one says so and names
-// the fix (`start --name`); a readable name was chosen over a path hash (user ruling, 2026-10-01).
+// the fix (`start --name`). A readable name is worth more here than a path hash that never collides.
 function folderNodeName(dir) {
   const base = path.basename(path.resolve(dir)).toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-+|-+$/g, '').slice(0, 57);
   return `claude-${base || 'agent'}`;
@@ -552,8 +575,7 @@ if (useProjectMode) {
 
   // Build the MCP entry (identical shape to global mode)
   const projectEntry = {
-    command: 'node',
-    args: [serverJsPath],
+    ...launchSpec(serverJsPath),
     env: {
       SYM_NODE_NAME: projectNodeName,
       // Explicitly blank relay env vars — see comment on the global
@@ -803,8 +825,7 @@ const topRoom = resolveRoom(existingTopEntry);
 // ── Build the entry ───────────────────────────────────────────────
 
 const entry = {
-  command: 'node',
-  args: [serverJsPath],
+  ...launchSpec(serverJsPath),
   env: {
     ...(noPin ? {} : { SYM_NODE_NAME: topNodeName }),
     // Explicitly blank the relay vars so the MCP doesn't inherit them
@@ -847,8 +868,7 @@ for (const [projPath, proj] of Object.entries(projects)) {
   // path issue must not silently revert their room membership.
   const projRoomName = preserveRoom(projEntry);
   const healedEntry = {
-    command: 'node',
-    args: [serverJsPath],
+    ...launchSpec(serverJsPath),
     env: {
       SYM_NODE_NAME: projNodeName,
       SYM_RELAY_URL: projEntry.env && typeof projEntry.env.SYM_RELAY_URL === 'string' ? projEntry.env.SYM_RELAY_URL : '',

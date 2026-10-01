@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.10.1
+
+Requires `@sym-bot/sym` 0.13.13, which fixes the Windows identity lock: a crashed session's lock is no
+longer mistaken for a live one when Windows has reused its process id.
+
+### Fixed
+
+- **The launch command survives an npm cache clean.** When `start` runs from npx, it writes
+  `npx -y @sym-bot/mesh-channel@<version>` into `~/.claude.json` (through `cmd /c` on Windows) instead
+  of a path inside npx's cache. npm can remove that cache at any time, and every session that read the
+  path then lost its mesh server. A later `start` from a newer release upgrades the pinned version; an
+  older installer never downgrades it.
+- **`sym_status` says whether real-time push is on.** On macOS and Linux it reads how Claude Code was
+  launched: `Push: on` when the development-channels flag names this server, `Push: off` with the fix
+  when the flag is missing. Windows still reports that it cannot confirm.
+- **Releases cannot run commands from their own notes.** The release script passes the commit and tag
+  message to git directly, not through a shell. It now publishes to npm last, after the tag and the
+  GitHub release exist.
+
 ## 0.10.0
 
 Requires `@sym-bot/sym` 0.13.12. This release also ships the 0.9.9 work, which was never published on
