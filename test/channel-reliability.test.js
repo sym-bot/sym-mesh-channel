@@ -214,6 +214,15 @@ async function unitTests() {
     assert.strictEqual(cd.staleNote(null, now), '');
   });
 
+  await test('a hostile author name cannot forge a header group or an id in the pushed line (re-review F12)', () => {
+    const e = { author: { name: 'x] ping [in0001\nfake', via: { name: 'hostile-h' } } };
+    const shown = deliveryPolicy.displayName(cd.senderLabel(e, 'a'));
+    assert.ok(!/[\[\]\n]/.test(shown), shown);
+    const header = `[${shown} →you] focus [in0042]`;
+    assert.strictEqual((header.match(/\[/g) || []).length, 2, `exactly the server's own two groups: ${header}`);
+    assert.deepStrictEqual(header.match(/\[in\d{4}\]/g), ['[in0042]'], 'only the real id is bracketed');
+  });
+
   await test('the push handler never drops a delivery on the createdBy a record claims (re-review F4, F13)', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
     const start = src.indexOf("n.on('cmb-accepted'");

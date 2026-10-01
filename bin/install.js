@@ -143,17 +143,16 @@ function preserveRoom(entry) {
 // instead of minting a fresh node every launch. `room` 'default' removes the room
 // key rather than pinning it. Other keys are kept. A file we cannot parse is left
 // alone and named: rewriting it would discard whatever the user put there.
-// The folder's name plus a short hash of its full path: two folders called `web` in different
-// trees must not share an identity, or the second session meets the identity lock (review F9).
+// The folder is the agent, so its name is the node's: `sym-agent-x` runs as `claude-sym-agent-x`.
+// Two live sessions in folders with the same name do share it, and the second one says so and names
+// the fix (`start --name`); a readable name was chosen over a path hash (user ruling, 2026-10-01).
 function folderNodeName(dir) {
-  const abs = path.resolve(dir);
-  const base = path.basename(abs).toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48);
-  const tag = require('crypto').createHash('sha256').update(abs).digest('hex').slice(0, 6);
-  return `claude-${base || 'agent'}-${tag}`;
+  const base = path.basename(path.resolve(dir)).toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-+|-+$/g, '').slice(0, 57);
+  return `claude-${base || 'agent'}`;
 }
 // The node-name rule (MMP §3.1.2 plus file-name safety) is shared with server.js.
 const { nodeNameProblem } = require('../identity.js');
-function writeProjectConfig(dir, { room, name, defaultName = true, inherit = {} }) {
+function writeProjectConfig(dir, { room, name, defaultName = true, inheritRoom = null }) {
   const file = path.join(dir, '.sym', 'node.json');
   let cfg = {};
   if (fs.existsSync(file)) {
@@ -169,19 +168,22 @@ function writeProjectConfig(dir, { room, name, defaultName = true, inherit = {} 
   const before = JSON.stringify(cfg);
   // A name already in the file meets the same rule as --name: a config file is an easier place to
   // plant "../../x" than a command line (review F10).
-  if (typeof cfg.node_name === 'string' && nodeNameProblem(cfg.node_name)) {
-    process.stderr.write(`WARNING: ${file} node_name ${JSON.stringify(cfg.node_name)} ${nodeNameProblem(cfg.node_name)}; replacing it.\n`);
-    delete cfg.node_name;
-  }
+  const refused = typeof cfg.node_name === 'string' && nodeNameProblem(cfg.node_name)
+    ? { value: cfg.node_name, problem: nodeNameProblem(cfg.node_name) } : null;
+  if (refused) delete cfg.node_name;
   const hasName = typeof cfg.node_name === 'string' && cfg.node_name.trim();
   if (name) cfg.node_name = name;
-  // `inherit` carries what an older user-scope entry pinned for every folder, so the folder being
-  // launched keeps that established identity and room instead of silently becoming a new node (F13).
-  else if (!hasName && inherit.name) cfg.node_name = inherit.name;
   else if (!hasName && defaultName) cfg.node_name = folderNodeName(dir);
+  // Say what actually happened to a refused name: replaced, or only removed (re-review F22).
+  if (refused) {
+    process.stderr.write(`WARNING: ${file} node_name ${JSON.stringify(refused.value)} ${refused.problem}; ` +
+      (cfg.node_name ? `replaced with '${cfg.node_name}'.\n` : 'removed.\n'));
+  }
   if (room === 'default') delete cfg.room;
   else if (room) cfg.room = room;
-  else if (!cfg.room && inherit.room) cfg.room = inherit.room;
+  // A room an older user-scope entry pinned for every folder carries over, so the folder stays in
+  // the room it was in. A pinned NAME does not: the folder is the agent and gets its own.
+  else if (!cfg.room && inheritRoom) cfg.room = inheritRoom;
   if (JSON.stringify(cfg) !== before) {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     const tmp = `${file}.tmp-${process.pid}`;
@@ -190,6 +192,40 @@ function writeProjectConfig(dir, { room, name, defaultName = true, inherit = {} 
     console.log(`✓ Mesh identity for this folder written to ${file}: ${cfg.node_name ? `node '${cfg.node_name}', ` : ''}room '${cfg.room || 'default'}'`);
   }
   return cfg;
+}
+
+// disablePluginForFolder: set enabledPlugins["sym-mesh-channel@<marketplace>"] = false in the folder's
+// .claude/settings.local.json (merged, other keys kept, backed up when changed). The marketplace key
+// is taken from what this machine has installed or enabled; sym-bot is the published marketplace.
+function disablePluginForFolder(dir) {
+  const keys = new Set();
+  const readJson = (p) => { try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return null; } };
+  for (const k of Object.keys(readJson(path.join(os.homedir(), '.claude', 'settings.json'))?.enabledPlugins || {})) {
+    if (k.startsWith('sym-mesh-channel@')) keys.add(k);
+  }
+  for (const k of Object.keys(readJson(path.join(os.homedir(), '.claude', 'plugins', 'installed_plugins.json'))?.plugins || {})) {
+    if (k.startsWith('sym-mesh-channel@')) keys.add(k);
+  }
+  if (!keys.size) keys.add('sym-mesh-channel@sym-bot');
+  const file = path.join(dir, '.claude', 'settings.local.json');
+  let settings = {};
+  if (fs.existsSync(file)) {
+    settings = readJson(file);
+    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
+      process.stderr.write(`WARNING: ${file} is not valid JSON; left unchanged, so the plugin may also start a node here.\n`);
+      return;
+    }
+  }
+  const before = JSON.stringify(settings);
+  settings.enabledPlugins = settings.enabledPlugins && typeof settings.enabledPlugins === 'object' ? settings.enabledPlugins : {};
+  for (const k of keys) settings.enabledPlugins[k] = false;
+  if (JSON.stringify(settings) === before) return;
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  if (fs.existsSync(file)) fs.copyFileSync(file, `${file}.bak-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}`);
+  const tmp = `${file}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, JSON.stringify(settings, null, 2) + '\n');
+  fs.renameSync(tmp, file);
+  console.log(`✓ The sym-mesh-channel plugin is off for this folder (${file}), so this session runs one mesh node.`);
 }
 
 // ── start: one command to a live mesh session ─────────────────────
@@ -298,8 +334,8 @@ if (cmd === 'start') {
           `\nThe user-scope 'claude-sym-mesh' entry in ~/.claude.json pins` +
           `${existing.env.SYM_NODE_NAME ? ` SYM_NODE_NAME=${existing.env.SYM_NODE_NAME}` : ''}` +
           `${existing.env.SYM_ROOM ? ` SYM_ROOM=${existing.env.SYM_ROOM}` : ''}` +
-          ` for EVERY folder. Removing the pin (a backup is written first). This folder keeps that identity in its own` +
-          ` .sym/node.json; other folders launched with \`sym-mesh-channel start\` get a name of their own.\n`,
+          ` for EVERY folder, so every agent on this machine claimed one identity. Removing the pin` +
+          ` (a backup is written first); each folder now gets its own name.\n`,
         );
       }
       const initArgs = ['init', '--no-pin'];
@@ -337,13 +373,22 @@ if (cmd === 'start') {
   // In --project mode the folder's .mcp.json already pins the name, so only the
   // room goes here; a second name would split the plugin node off under it.
   if (!isProject) {
-    const inherit = existing && existing.env ? {
-      name: typeof existing.env.SYM_NODE_NAME === 'string' && !nodeNameProblem(existing.env.SYM_NODE_NAME) ? existing.env.SYM_NODE_NAME : null,
-      room: typeof existing.env.SYM_ROOM === 'string' && existing.env.SYM_ROOM.trim() ? existing.env.SYM_ROOM.trim() : null,
-    } : {};
-    writeProjectConfig(launchDir, { room: roomArg, name: nameArg, inherit });
+    const oldName = existing?.env && typeof existing.env.SYM_NODE_NAME === 'string' ? existing.env.SYM_NODE_NAME.trim() : '';
+    const inheritRoom = existing?.env && typeof existing.env.SYM_ROOM === 'string' && existing.env.SYM_ROOM.trim() ? existing.env.SYM_ROOM.trim() : null;
+    const cfg = writeProjectConfig(launchDir, { room: roomArg, name: nameArg, inheritRoom });
+    // Report the outcome after it happened, from the file actually written (re-review F23).
+    if (oldName && cfg && cfg.node_name && cfg.node_name !== oldName) {
+      console.log(`  This folder's node is '${cfg.node_name}', no longer '${oldName}'. To keep the old identity here ` +
+        `(its memory, and the name peers allowlist), run: sym-mesh-channel start --name ${oldName}`);
+    }
   }
   else if (roomArg) writeProjectConfig(launchDir, { room: roomArg, defaultName: false });
+
+  // ONE AGENT, ONE NODE. `start` launches the server: registration with real-time push. If the Claude
+  // plugin is installed, Claude Code would start its node too, and that node reads the same
+  // .sym/node.json, so the session's two nodes would claim one name and whichever started first would
+  // win — a coin flip on whether the push-enabled node exists. Turn the plugin off for this folder.
+  disablePluginForFolder(launchDir);
 
   console.log(`\n▶ Launching Claude Code on the SYM mesh — real-time push on.\n  (channel: ${handle}; the dev flag is temporary until Anthropic allowlists it)\n`);
   // On Windows the `claude` CLI is a `.cmd`/`.ps1` shim (npm) or `.exe`

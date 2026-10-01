@@ -764,6 +764,9 @@ async function runProjectInstallTests() {
   // `start --room` must reach the plugin node too. The plugin's .mcp.json has
   // no SYM_ROOM, so with only the server: entry carrying the room, a session
   // ran one node in the named room and its plugin sibling in `default`.
+  // The folder IS the agent: `sym-agent-x` runs as `claude-sym-agent-x` (user ruling, 2026-10-01).
+  const expectedFolderName = (dir) => `claude-${path.basename(dir).toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-+|-+$/g, '')}`;
+
   // Returns the installer's result plus the fake home's ~/.claude.json and its backups afterwards.
   async function runStart(startArgs, tmpDir, { claudeJson = {}, allowFail = false } = {}) {
     const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-home-'));
@@ -816,12 +819,33 @@ async function runProjectInstallTests() {
         assert.ok(!('SYM_NODE_NAME' in env) && !('SYM_ROOM' in env), `pins removed: ${JSON.stringify(env)}`);
         assert.ok(backups.length >= 1, 'the old ~/.claude.json is backed up first');
         assert.ok(stdout.includes('for EVERY folder'), 'the rewrite says why');
-        // The folder being launched keeps the established identity and room (review F13)…
+        // The folder gets its OWN name, not the machine-wide pin (it is the agent), keeps the room, and
+        // is told how to keep the old identity if it wants it.
         const cfg = JSON.parse(fs.readFileSync(path.join(tmpDir, '.sym', 'node.json'), 'utf8'));
-        assert.deepStrictEqual(cfg, { node_name: 'claude-old-host', room: 'old-room' });
+        assert.deepStrictEqual(cfg, { node_name: expectedFolderName(tmpDir), room: 'old-room' });
+        assert.ok(stdout.includes('sym-mesh-channel start --name claude-old-host'), stdout);
         // …and removing a name pin does not take the seat off its relay.
         assert.strictEqual(env.SYM_RELAY_URL, 'wss://relay.example');
         assert.strictEqual(env.SYM_RELAY_TOKEN, 'tok-123');
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    await testAsync('start turns the plugin off for its folder, keeping the settings already there (one agent, one node)', async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-start-'));
+      try {
+        fs.mkdirSync(path.join(tmpDir, '.claude'));
+        const file = path.join(tmpDir, '.claude', 'settings.local.json');
+        fs.writeFileSync(file, JSON.stringify({ permissions: { allow: ['Bash(ls)'] }, enabledPlugins: { 'other@x': true } }));
+        const { code, stdout } = await runStart(['--room', 'team-x'], tmpDir);
+        assert.strictEqual(code, 0);
+        const st = JSON.parse(fs.readFileSync(file, 'utf8'));
+        assert.strictEqual(st.enabledPlugins['sym-mesh-channel@sym-bot'], false);
+        assert.strictEqual(st.enabledPlugins['other@x'], true, 'other plugins untouched');
+        assert.deepStrictEqual(st.permissions, { allow: ['Bash(ls)'] }, 'other keys kept');
+        assert.ok(fs.readdirSync(path.join(tmpDir, '.claude')).some((f) => f.startsWith('settings.local.json.bak-')), 'backed up first');
+        assert.ok(stdout.includes('plugin is off for this folder'), stdout);
       } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
       }
@@ -851,7 +875,7 @@ async function runProjectInstallTests() {
         const cfg = JSON.parse(fs.readFileSync(file, 'utf8'));
         assert.ok(!cfg.node_name.includes('/'), JSON.stringify(cfg));
         assert.strictEqual(cfg.room, 'team-x', 'the rest of the file is kept');
-        assert.ok(stderr.includes('replacing it'), stderr);
+        assert.ok(stderr.includes(`replaced with '${expectedFolderName(tmpDir)}'`), stderr);
       } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
       }
@@ -875,12 +899,10 @@ async function runProjectInstallTests() {
         const { code } = await runStart(['--room', 'xmesh-world-room'], tmpDir);
         assert.strictEqual(code, 0);
         const cfg = JSON.parse(fs.readFileSync(path.join(tmpDir, '.sym', 'node.json'), 'utf8'));
-        // The folder's own stable name comes with it (one folder, one agent, one name): its basename
-        // plus a hash of its full path, so two folders called `web` never share an identity.
+        // The folder's own stable name comes with it (one folder, one agent, one name).
         assert.strictEqual(cfg.room, 'xmesh-world-room');
-        assert.ok(/^claude-[a-z0-9-]+-[0-9a-f]{6}$/.test(cfg.node_name), cfg.node_name);
-        assert.ok(cfg.node_name.length <= 64 && !/--/.test(cfg.node_name), cfg.node_name);
-        assert.ok(cfg.node_name.startsWith('claude-smc-start-'), cfg.node_name);
+        assert.strictEqual(cfg.node_name, expectedFolderName(tmpDir));
+        assert.ok(cfg.node_name.length <= 64 && !/--/.test(cfg.node_name) && !cfg.node_name.endsWith('-'), cfg.node_name);
       } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
       }
@@ -921,7 +943,7 @@ async function runProjectInstallTests() {
       try {
         await runStart([], tmpDir);
         const cfg = JSON.parse(fs.readFileSync(path.join(tmpDir, '.sym', 'node.json'), 'utf8'));
-        assert.ok(cfg.node_name && /^claude-smc-start-[a-z0-9-]+-[0-9a-f]{6}$/.test(cfg.node_name), JSON.stringify(cfg));
+        assert.strictEqual(cfg.node_name, expectedFolderName(tmpDir), JSON.stringify(cfg));
         assert.ok(!('room' in cfg), 'no room is pinned when none was asked for');
       } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
