@@ -28,7 +28,7 @@
  *      Counting it again at read time withheld the 31st message of any backlog read in one call.
  */
 
-const { scanClassifierRisk, quarantineHeader } = require('./classifier-risk.js');
+const { scanClassifierRisk, quarantineHeader, neutralizeSurface } = require('./classifier-risk.js');
 const { hiddenFieldsTag } = require('./surface-truth.js');
 
 // ── Prompt-injection patterns ────────────────────────────────
@@ -213,6 +213,7 @@ function createDeliveryPolicy({ allowedPeers = [], maxPayloadBytes = DEFAULT_MAX
  *  sender is over `limit` arrivals in `windowMs`. */
 function createRateLimiter({ limit = 30, windowMs = 60_000 } = {}) {
   const windows = new Map();
+  let lastSweep = -Infinity;
   return {
     limit,
     admit(peer, now = Date.now()) {
@@ -220,7 +221,9 @@ function createRateLimiter({ limit = 30, windowMs = 60_000 } = {}) {
       w.push(now);
       windows.set(peer, w);
       // Bounded: a sender that changes its name every message must not grow this map forever.
-      if (windows.size > 1000) {
+      // At most one sweep per window, so a large map is not rescanned on every arrival (final review F6).
+      if (windows.size > 1000 && now - lastSweep >= windowMs) {
+        lastSweep = now;
         for (const [k, v] of windows) if (!v.some((t) => now - t < windowMs)) windows.delete(k);
       }
       return w.length <= limit;
@@ -247,7 +250,8 @@ function pushAction(verdict, rate, from, now = Date.now()) {
  *  most 120 characters. A sender chooses its own name, so a raw one could forge a line. A plain space
  *  stays: it cannot forge a line, and the printed name is the one a reply is addressed to. */
 function displayName(name) {
-  const s = String(name ?? '').replace(/[\r\n\t\v\f[\]\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, '_').slice(0, 120);
+  // `→` and ` via ` are this server's own line markers, so a name cannot carry them (final review F4).
+  const s = String(name ?? '').replace(/[\r\n\t\v\f[\]\u0000-\u001f\u007f-\u009f\u2028\u2029→]/g, '_').replace(/ via /gi, ' via_').slice(0, 120);
   return s || 'unknown';
 }
 
@@ -325,9 +329,11 @@ function recallLine(r, { policy, selfName }) {
     const focus = String(r.cmb?.categories?.focus?.text || r.content || '');
     // The same classifier-risk guard as push and receive: a recalled line enters the context too, and
     // a wording that trips the classifier costs the whole turn, which is worse than an elided line.
-    const risk = scanClassifierRisk(focus);
-    if (risk.risky) return { line: `${head}\n  [quarantined: ${risk.terms.length} flagged term(s); wording elided]`, audit: [`classifier-risk:${risk.terms.join(',')}`, focus] };
     const cut = focus.length > 150 ? '… [truncated — sym_fetch for full]' : '';
+    // Recall has no fetch path, so a flagged line is defanged rather than hidden (final review F1):
+    // each flagged word stays readable but no longer matches as a token.
+    const risk = scanClassifierRisk(focus);
+    if (risk.risky) return { line: `${head}\n  ${neutralizeSurface(focus.slice(0, 150))}${cut} [${risk.terms.length} flagged term(s) defanged]`, audit: [`classifier-risk:${risk.terms.join(',')}`, focus] };
     return { line: `${head}\n  ${focus.slice(0, 150)}${cut}` };
   } catch {
     return { line: `${head}\n  withheld: this node could not render it`, audit: ['render-failed', ''] };

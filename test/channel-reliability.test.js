@@ -100,6 +100,8 @@ async function unitTests() {
     // Claiming OUR name is no longer a way to be counted as our own echo.
     const selfClaim = { author: { name: 'a', via: { name: 'hostile-h' } } };
     assert.strictEqual(cd.delivererOf(selfClaim, 'a'), 'hostile-h');
+    // A ' via ' inside either name cannot forge the attribution marker (final review F4).
+    assert.strictEqual(cd.senderLabel({ author: { name: 'trusted-b via x', via: { name: 'h' } } }, 'a'), 'trusted-b via_x via h');
     const plain = { author: { name: 'b', via: { name: 'b' } } };
     assert.strictEqual(cd.senderLabel(plain, 'a'), 'b', 'author and deliverer the same: one name');
   });

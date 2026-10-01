@@ -174,6 +174,7 @@ function writeProjectConfig(dir, { room, name, defaultName = true, inheritRoom =
   const hasName = typeof cfg.node_name === 'string' && cfg.node_name.trim();
   if (name) cfg.node_name = name;
   else if (!hasName && defaultName) cfg.node_name = folderNodeName(dir);
+  const named = !hasName && !!cfg.node_name;   // this run gave the folder its name
   // Say what actually happened to a refused name: replaced, or only removed (re-review F22).
   if (refused) {
     process.stderr.write(`WARNING: ${file} node_name ${JSON.stringify(refused.value)} ${refused.problem}; ` +
@@ -191,6 +192,7 @@ function writeProjectConfig(dir, { room, name, defaultName = true, inheritRoom =
     fs.renameSync(tmp, file);
     console.log(`✓ Mesh identity for this folder written to ${file}: ${cfg.node_name ? `node '${cfg.node_name}', ` : ''}room '${cfg.room || 'default'}'`);
   }
+  Object.defineProperty(cfg, 'named', { value: named, enumerable: false });
   return cfg;
 }
 
@@ -205,6 +207,10 @@ function disablePluginForFolder(dir) {
   }
   for (const k of Object.keys(readJson(path.join(os.homedir(), '.claude', 'plugins', 'installed_plugins.json'))?.plugins || {})) {
     if (k.startsWith('sym-mesh-channel@')) keys.add(k);
+  }
+  // A plugin enabled only for this project is named in its own settings files (final review F11).
+  for (const f of [path.join(dir, '.claude', 'settings.json'), path.join(dir, '.claude', 'settings.local.json')]) {
+    for (const k of Object.keys(readJson(f)?.enabledPlugins || {})) if (k.startsWith('sym-mesh-channel@')) keys.add(k);
   }
   if (!keys.size) keys.add('sym-mesh-channel@sym-bot');
   const file = path.join(dir, '.claude', 'settings.local.json');
@@ -378,12 +384,20 @@ if (cmd === 'start') {
   // launch from, which is where server.js looks.
   // In --project mode the folder's .mcp.json already pins the name, so only the
   // room goes here; a second name would split the plugin node off under it.
+  // Every folder that shared an old machine-wide name is told, not only the first one to run start
+  // after the upgrade (final review F3): the removed pin is remembered under the state root.
+  const pinNote = path.join(process.env.SYM_STATE_DIR || path.join(os.homedir(), '.sym'), 'removed-user-pin.json');
   if (!isProject) {
-    const oldName = existing?.env && typeof existing.env.SYM_NODE_NAME === 'string' ? existing.env.SYM_NODE_NAME.trim() : '';
+    let oldName = existing?.env && typeof existing.env.SYM_NODE_NAME === 'string' ? existing.env.SYM_NODE_NAME.trim() : '';
+    if (oldName) {
+      try { fs.mkdirSync(path.dirname(pinNote), { recursive: true }); fs.writeFileSync(pinNote, JSON.stringify({ name: oldName, removedAt: new Date().toISOString() }) + '\n'); } catch { /* best effort */ }
+    } else {
+      try { oldName = JSON.parse(fs.readFileSync(pinNote, 'utf8')).name || ''; } catch { /* none removed here */ }
+    }
     const inheritRoom = existing?.env && typeof existing.env.SYM_ROOM === 'string' && existing.env.SYM_ROOM.trim() ? existing.env.SYM_ROOM.trim() : null;
     const cfg = writeProjectConfig(launchDir, { room: roomArg, name: nameArg, inheritRoom });
     // Report the outcome after it happened, from the file actually written (re-review F23).
-    if (oldName && cfg && cfg.node_name && cfg.node_name !== oldName) {
+    if (oldName && cfg && cfg.named && cfg.node_name !== oldName) {
       console.log(`  This folder's node is '${cfg.node_name}', no longer '${oldName}'. To keep the old identity here ` +
         `(its memory, and the name peers allowlist), run: sym-mesh-channel start --name ${oldName}`);
     }

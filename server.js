@@ -578,7 +578,7 @@ function registerNodeHandlers(n) {
 
   n.on('cmb-accepted', (entry) => {
     // The own-name check is on the deliverer (below), never on the createdBy a record claims (re-review F4).
-    if (entry.source === NODE_NAME) return;
+    if (entry.source === NODE_NAME) { securityAudit('push', 'own-name', NODE_NAME, '', inboxIdFor(n, entry) || undefined); return; }
     // An admitted entry's `source` is the SDK's store-local `<receiver>+<deliverer>` key, which
     // printed as "<us>+<them>" on every push. The allowlist, the own-name check and the rate key on
     // the DELIVERER, the peer our own connection knows; the line prints the record's claimed author

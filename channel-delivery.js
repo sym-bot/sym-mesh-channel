@@ -53,7 +53,9 @@ function recallSender(r, selfName) {
 function senderLabel(item, selfName, peers) {
   const deliverer = delivererOf(item, selfName, peers);
   const author = item && item.author && typeof item.author.name === 'string' ? item.author.name : '';
-  return author && author !== deliverer ? `${author} via ${deliverer}` : deliverer;
+  // Neither half may carry the marker itself, or "a via b" could be forged inside one name (F4).
+  const plain = (x) => String(x).replace(/ via /gi, ' via_');
+  return author && author !== deliverer ? `${plain(author)} via ${plain(deliverer)}` : deliverer;
 }
 
 /**

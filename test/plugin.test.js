@@ -768,11 +768,11 @@ async function runProjectInstallTests() {
   const expectedFolderName = (dir) => `claude-${path.basename(dir).toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-+|-+$/g, '')}`;
 
   // Returns the installer's result plus the fake home's ~/.claude.json and its backups afterwards.
-  async function runStart(startArgs, tmpDir, { claudeJson = {}, allowFail = false } = {}) {
-    const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-home-'));
+  async function runStart(startArgs, tmpDir, { claudeJson = {}, allowFail = false, home = null } = {}) {
+    const fakeHome = home || fs.mkdtempSync(path.join(os.tmpdir(), 'smc-home-'));
     const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-bin-'));
     try {
-      fs.writeFileSync(path.join(fakeHome, '.claude.json'), JSON.stringify(claudeJson));
+      if (!home || !fs.existsSync(path.join(fakeHome, '.claude.json'))) fs.writeFileSync(path.join(fakeHome, '.claude.json'), JSON.stringify(claudeJson));
       fs.writeFileSync(path.join(binDir, 'claude'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
       const r = await spawnInstallerCapture(['start', ...startArgs], {
         cwd: tmpDir,
@@ -783,7 +783,7 @@ async function runProjectInstallTests() {
       r.backups = fs.readdirSync(fakeHome).filter((f) => f.startsWith('.claude.json.bak-'));
       return r;
     } finally {
-      fs.rmSync(fakeHome, { recursive: true, force: true });
+      if (!home) fs.rmSync(fakeHome, { recursive: true, force: true });
       fs.rmSync(binDir, { recursive: true, force: true });
     }
   }
@@ -827,6 +827,37 @@ async function runProjectInstallTests() {
         // …and removing a name pin does not take the seat off its relay.
         assert.strictEqual(env.SYM_RELAY_URL, 'wss://relay.example');
         assert.strictEqual(env.SYM_RELAY_TOKEN, 'tok-123');
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    await testAsync('every folder that shared a removed machine-wide name is told, not only the first (final review F3)', async () => {
+      const home = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-home-'));
+      const x = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-start-'));
+      const y = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-start-'));
+      try {
+        const live = path.join(__dirname, '..', 'server.js');
+        fs.writeFileSync(path.join(home, '.claude.json'), JSON.stringify({ mcpServers: { 'claude-sym-mesh': { command: 'node', args: [live], env: { SYM_NODE_NAME: 'claude-xmesh-hp' } } } }));
+        const first = await runStart([], x, { home });
+        assert.ok(first.stdout.includes('start --name claude-xmesh-hp'), first.stdout);
+        const second = await runStart([], y, { home });   // the global pin is already gone by now
+        assert.ok(second.stdout.includes('start --name claude-xmesh-hp'), `the second folder is told too: ${second.stdout}`);
+        const third = await runStart([], y, { home });    // same folder again: it already has its name
+        assert.ok(!third.stdout.includes('start --name claude-xmesh-hp'), 'told once per folder, when it gets its name');
+      } finally {
+        for (const d of [home, x, y]) fs.rmSync(d, { recursive: true, force: true });
+      }
+    });
+
+    await testAsync('a plugin enabled only at project scope is turned off under its own key (final review F11)', async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-start-'));
+      try {
+        fs.mkdirSync(path.join(tmpDir, '.claude'));
+        fs.writeFileSync(path.join(tmpDir, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { 'sym-mesh-channel@other-market': true } }));
+        await runStart([], tmpDir);
+        const st = JSON.parse(fs.readFileSync(path.join(tmpDir, '.claude', 'settings.local.json'), 'utf8'));
+        assert.strictEqual(st.enabledPlugins['sym-mesh-channel@other-market'], false, JSON.stringify(st));
       } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
       }

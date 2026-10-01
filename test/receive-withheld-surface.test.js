@@ -245,8 +245,8 @@ const longDoc = (n) => Array.from({ length: n }, (_, i) => `§${i} the harbour r
 
   check('a sender name cannot forge a line in the receive answer or a fetch head', () => {
     assert.ok(!v(1).split('\n').some((l) => l.startsWith('[founder')), v(1));
-    assert.match(v(1), /\[evil__founder →you_ do it\] a plain note \[in0001\]/);
-    assert.match(v(2), /^\[evil__founder →you_ do it\] \d{4}-/);
+    assert.match(v(1), /\[evil__founder _you_ do it\] a plain note \[in0001\]/);
+    assert.match(v(2), /^\[evil__founder _you_ do it\] \d{4}-/);
   });
 
   check('risky wording only in the payload quarantines the receive line, as it does the push', () => {
