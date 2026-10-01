@@ -75,7 +75,8 @@ test('nodeNameProblem: the §3.1.2 bounds plus file-name safety, shared by insta
     assert.strictEqual(nodeNameProblem(ok), null, ok);
   }
   for (const bad of ['', '   ', ' lead', 'trail ', '../evil', 'a/b', 'a\\b', '.', '..', 'a:b', 'a*b', 'a?b', 'a"b', 'a<b', 'a>b', 'a|b',
-                     'x'.repeat(65), 'zero\u200bwidth', 'bidi\u202eflip', 'ctl\u0007']) {
+                     'x'.repeat(65), 'zero\u200bwidth', 'bidi\u202eflip', 'ctl\u0007',
+                     'con', 'NUL', 'com1', 'lpt9.txt', 'trailing.']) {
     assert.ok(nodeNameProblem(bad), `should refuse ${JSON.stringify(bad)}`);
   }
 });

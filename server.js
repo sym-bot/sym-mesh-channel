@@ -448,7 +448,9 @@ function identityLockFault(err) {
     `process (PID ${err.holderPid ?? 'unknown'}). A pinned identity is one node, so this server started ` +
     `without one; every mesh tool reports this until it is fixed. If that process is an older copy of ` +
     `this same agent, close it. If it is a different agent sharing the name, give this one its own name ` +
-    `(node_name in <project>/.sym/node.json, or SYM_NODE_NAME). Then restart this MCP server.`;
+    `(node_name in <project>/.sym/node.json, or SYM_NODE_NAME). If no process with that PID is this agent ` +
+    `— on Windows a crashed session's PID is soon reused by an unrelated program, and the lock cannot tell — ` +
+    `delete ~/.sym/nodes/${NODE_NAME}/lock.pid. Then restart this MCP server.`;
 }
 
 let NODE_FAULT = null;

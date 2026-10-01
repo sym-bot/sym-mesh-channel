@@ -49,6 +49,9 @@ function nodeNameProblem(name) {
   if (/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2066-\u2069]/.test(name)) return 'must not contain control, zero-width or bidi characters';
   if (/[\\/]/.test(name) || name === '.' || name === '..') return 'must not contain path separators or be . or ..';
   if (/[:*?"<>|]/.test(name)) return 'must not contain any of : * ? " < > | (not valid in a file name on every platform)';
+  // Windows refuses these as a directory name whatever the extension, and a trailing dot is dropped.
+  if (/^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\..*)?$/i.test(name)) return 'must not be a name Windows reserves (CON, PRN, AUX, NUL, COM1–9, LPT1–9)';
+  if (name.endsWith('.')) return 'must not end with a dot (Windows drops it, so two names would share one directory)';
   return null;
 }
 

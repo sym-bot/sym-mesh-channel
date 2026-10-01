@@ -1,6 +1,97 @@
 # Changelog
 
-## 0.9.9
+## 0.10.0
+
+Requires `@sym-bot/sym` 0.13.12. This release also ships the 0.9.9 work, which was never published on
+its own: one content policy for push, receive and fetch, and withheld deliveries named. Found and
+fixed during the 2026-10-01 MMP 2.0 audit, by two Claude Code agents coordinating over this channel.
+
+### Fixed — a name held by another session no longer kills this one silently
+
+The engine takes its identity lock while the node is being constructed, which happened at module
+load, before the MCP server connected. A second session using the same node name therefore died
+before it could say why, and the host showed only "Connection closed". It happened on 2026-10-01:
+two folders' sessions shared the name `~/.claude.json` pinned for every folder.
+
+- The server now starts without a node. It names the conflict in its instructions, and every mesh
+  tool returns that reason until the conflict is fixed and the server restarted.
+- A `sym_join_room` that can't build or start the new node restores the previous room. Before, it
+  left a stopped node, or no node at all.
+- An uncaught error after the host connects is logged with its stack, counted, and shown by
+  `sym_status`; it no longer kills the process. Before the host connects, it exits as before.
+
+### Fixed — one delivery, one id, and a fetched message is read
+
+- A push and `sym_receive` name a delivery with the same inbox id (`[inNNNN]`). The push used to
+  mint its own `mNNN` for a delivery the inbox already held, so every message arrived twice under
+  two names.
+- `sym_fetch` marks an inbox delivery read once it has returned the message's last part. A
+  delivery read that way is no longer repeated by `sym_receive` or counted in the "Mesh inbox:
+  N unread" footer. A push alone marks nothing read, because the server can't tell whether the push
+  reached the session.
+- `sym_receive` tags a line `·pushed` when that delivery already went out as a notification.
+
+### Fixed — the sender is the sender
+
+- Headers printed `<receiver>+<sender>` for every message SVAF admitted, because the SDK's
+  store-local key was used as the sender name.
+- The line now shows the record's author. When a different peer delivered it, the line reads
+  `author via deliverer`.
+- `SYM_ALLOWED_PEERS`, the own-name check and the push rate limit key on the delivering peer, not on
+  the author a record claims. A record can name anyone as its author.
+
+### Fixed — "Sent" means something was sent
+
+- `sym_send` trusts the engine's own account of the send (`remember().delivery`). A directed send
+  that reached no transport says NOT DELIVERED, and is held in the outbox until the peer reappears,
+  instead of reporting "Sent". This happened when the target session had just restarted.
+- A send to a peer that has been silent for 30 seconds warns that its connection may be gone.
+- Success reads "handed to the transport; MMP has no delivery receipt". The tool no longer claims
+  delivery it can't know.
+
+### Changed — one agent, one node, one name per folder
+
+- `sym-mesh-channel start` names the node after its folder. Run in `sym-agent-x`, it gives the node
+  `claude-sym-agent-x`. The name and room are kept in the folder's `.sym/node.json`, which the Claude
+  plugin's node reads too.
+- The user-scope `~/.claude.json` entry no longer pins `SYM_NODE_NAME` or `SYM_ROOM`. Every folder
+  reads that entry, so a pin there gave every agent on the machine the same identity (on Windows,
+  `claude-<hostname>`). A second agent then lost its node to the identity lock, and every agent shared
+  one inbox.
+- An older entry that pinned them is rewritten after a backup.
+  - The pinned room carries over to the folder you launch from.
+  - The pinned name does not, because the folder is the agent. `start` prints the old name and
+    `start --name <old>` for anyone who wants to keep that identity.
+  - Relay credentials in the entry are kept.
+- `start` turns the Claude plugin off for its folder (`enabledPlugins` in `.claude/settings.local.json`,
+  merged and backed up). The session then runs exactly one mesh node, the one launched with real-time
+  push. Before, the plugin's node joined `default`, and once both read the same `.sym/node.json` they
+  would have fought over one name.
+- `start` warns when a project-scope entry in `~/.claude.json` still pins the folder, and names the
+  command that removes it.
+- `--name`, and a `node_name` in `.sym/node.json`, must satisfy MMP §3.1.2 and be safe as a directory
+  name.
+- A session running both the plugin and a `claude-sym-mesh` server is two mesh nodes, and both servers
+  now say so. `sym_status` says the server can't confirm whether real-time push is enabled, and names
+  the flag that enables it.
+
+### Known limits
+
+- **Peer identity is trust-on-first-use.** Peers still connect with the pre-2.0 one-frame
+  handshake. The MMP 2.0 Core Secure handshake is in the engine but not yet switched on; it is
+  planned for a coming engine release. Until then a peer's name is a label, not a credential (see
+  SECURITY.md). The channel keys its own decisions on the delivering connection.
+- **Windows: a crashed session's identity lock** can't yet be told from a live one when Windows has
+  reused its PID. The no-node message says which lock file to delete. An engine fix is planned for
+  `@sym-bot/sym` 0.13.13.
+- On engines before 0.13.12, a held directed send that is flushed later carries a `[re-sent …]`
+  suffix on its focus. 0.13.12 re-sends the stored record unchanged.
+
+### Docs
+
+- README, SECURITY.md, docs/reference.md and README_zh.md describe the per-folder identity, the
+  one-node-per-session rule, the `server:claude-sym-mesh` relaunch after `start`, and the current
+  limits of peer identity. They no longer claim the handshake authenticates peers.
 
 ### Fixed — a withheld delivery is named, never reported as nothing
 

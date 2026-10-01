@@ -255,9 +255,9 @@ The plugin composes two open specs:
 
 ## Advanced: per-project node identity
 
-By default each session picks up an identity automatically — fine for one-machine, one-peer use. Override it when you want a project to appear as a **stable, named peer** every time: a `cto` session and a `melotune-dev` session on the same laptop, each keeping its name (and team room) across restarts instead of an auto-generated `claude-<repo>-<hash>` that changes per session.
+`sym-mesh-channel start` gives every folder a **stable, named peer**. It writes `.sym/node.json` with the node named after the folder (`claude-<folder>`, or `--name`) and the room (`--room`), so a `cto` folder and a `melotune-dev` folder on the same laptop each keep their name and room across restarts.
 
-Commit a `.sym/node.json` to the project — e.g. `path/to/project/.sym/node.json`:
+Without `start`, the plugin names each session `claude-<repo>-<session>`, which changes per session. To pin a name by hand, commit a `.sym/node.json` to the project, e.g. `path/to/project/.sym/node.json`:
 
 ```json
 {
@@ -266,9 +266,14 @@ Commit a `.sym/node.json` to the project — e.g. `path/to/project/.sym/node.jso
 }
 ```
 
-The plugin reads it on launch (v0.3.22+) whenever Claude Code runs from that directory — the node takes that name and joins that room. It lives in the repo, so it survives a plugin reinstall; `SYM_NODE_NAME` / `SYM_ROOM` still override it; a missing or malformed file just falls back to the auto name. Gitignore `.sym/` if the name is per-machine rather than something the team shares.
+Both the plugin's node and the `claude-sym-mesh` server read it on launch whenever Claude Code runs from that directory: the node takes that name and joins that room.
 
-> ⚠️ **Don't add a project `.mcp.json` when the plugin is installed.** Claude Code runs the plugin's mesh server *and* the project's, with no dedup across them — so you get a phantom `<name>-2` peer beside your node. `.sym/node.json` gives per-project identity through the plugin alone, with no second registration. (This is what the older `init --project` did — use `.sym/node.json` instead.)
+- It lives in the repo, so it survives a plugin reinstall.
+- `SYM_NODE_NAME` / `SYM_ROOM` in the server's env still override it.
+- A missing file falls back to the auto name. A malformed file, or a `node_name` that breaks the naming rule (MMP §3.1.2; no path separators or names Windows reserves), is named on stderr and ignored.
+- Gitignore `.sym/` if the name is per-machine rather than something the team shares.
+
+> ⚠️ **One mesh server per session.** If the plugin is enabled and the project also registers `claude-sym-mesh` (a `.mcp.json`, or the `~/.claude.json` entry `start` writes), Claude Code runs both: one agent, two nodes, and only one of them gets real-time push. Both servers report this at startup and in `sym_status`. `start` prevents it by turning the plugin off for its folder (`"enabledPlugins": {"sym-mesh-channel@sym-bot": false}` in `.claude/settings.local.json`).
 
 *Standalone npm, no plugin?* A project-scoped server is fine there: `SYM_NODE_NAME=… npx @sym-bot/mesh-channel init --project` writes `<project>/.mcp.json`. Just never combine it with the plugin.
 
@@ -326,7 +331,8 @@ Clear-eyed about what's not there yet:
 - **Channels still needs a dev flag** for real-time push. The MCP tools work without it; the async push UX does not. Tracking: [anthropics/claude-plugins-official#1512](https://github.com/anthropics/claude-plugins-official/issues/1512).
 - **Corporate networks often block mDNS multicast.** If LAN discovery fails on the same wifi, fall back to a relay.
 - **No offline directory of known rooms.** `sym_rooms_discover` only shows rooms with at least one node currently online. For cross-network relay-backed rooms, invite URLs must be shared out of band.
-- **One mesh identity per process.** Two Claude Code sessions on the same machine with the same `SYM_NODE_NAME` will collide — the second one exits with `EIDENTITYLOCK`. Use distinct `SYM_NODE_NAME`s or install per-project (above).
+- **One mesh identity per process.** Two Claude Code sessions on the same machine with the same node name collide. The second one's server starts without a mesh node, and every mesh tool says which name is held and how to fix it. Use one folder per agent (`start` names the node after the folder), or `--name`.
+- **Peer identity is trust-on-first-use until MMP 2.0 Core Secure ships.** See [SECURITY.md](../SECURITY.md#layer-1-transport-and-peer-identity).
 - **Transport protection is peer- and version-dependent.** Do not assume every peer or metadata path is encrypted. Mixed-version peers may fall back to plaintext, and outer routing metadata remains visible where required for delivery. Review [SECURITY.md](../SECURITY.md) before carrying sensitive material.
 
 ## Troubleshooting
@@ -387,11 +393,15 @@ Your shell profile (`~/.zshrc`, `~/.bashrc`) exports `SYM_RELAY_URL`. Claude Cod
 
 ### Multiple Claude Code sessions on the same machine want to share an identity
 
-Don't. Each session should have a distinct `SYM_NODE_NAME`. The SymNode acquires an exclusive lockfile on its identity (`~/.sym/nodes/<name>/lock.pid`) and refuses to start a second process with the same name. If you see `EIDENTITYLOCK`, kill the other process or pick a different name. For multiple parallel sessions with their own identities, use [per-project node identity](#advanced-per-project-node-identity).
+Don't. Each agent should have a distinct node name; `start` gives each folder its own. The SymNode takes an exclusive lockfile on its identity (`~/.sym/nodes/<name>/lock.pid`) and refuses a second process with the same name. That second server starts without a node, and every mesh tool answers `MESH NODE NOT RUNNING: node identity '<name>' … is already held by a live process (PID n)`. Close the other session, or give this one its own name with `--name`, `node_name` in `.sym/node.json`, or `SYM_NODE_NAME`.
 
-### A peer named `<name>-2` you didn't create
+On **Windows** the lock can't yet tell a live holder from a crashed session whose PID has been reused by another program. If no process with that PID is this agent, delete `~/.sym/nodes/<name>/lock.pid` and restart.
 
-Two mesh servers are registering one node. Almost always the plugin is installed *and* the project has its own `.mcp.json` for `claude-sym-mesh` (often from an older `init --project`): Claude Code runs both, the second collides on the name and renames itself `-2`. Remove the project `.mcp.json` and use [`.sym/node.json`](#advanced-per-project-node-identity) for per-project identity.
+### Two mesh nodes in one session (a `MESH NODE ADVISORY` at startup)
+
+The plugin is enabled *and* the session also runs a `claude-sym-mesh` server: from `~/.claude.json`, which `start` writes, or from a project `.mcp.json`. Claude Code runs both, so one agent shows up as two nodes, and real-time push reaches only the one named in `--dangerously-load-development-channels`. Run `sym-mesh-channel start` in the folder, which turns the plugin off there. Or set `"enabledPlugins": {"sym-mesh-channel@sym-bot": false}` in `.claude/settings.local.json` yourself. Or remove the `claude-sym-mesh` server and use the plugin alone.
+
+(Older versions named the second node `<name>-2`. Names are never auto-suffixed now: a suffix would be a separate store with a separate signing key.)
 
 ## Advanced: named agents, teams & the CLI
 
@@ -467,8 +477,8 @@ SYM_ROOM = "your-room"   # REQUIRED — a wrong or missing room fails silently
 - **`required = true`** makes a failed startup fail loudly instead of leaving a silently
   tool-less session.
 - **Absolute paths** — do not rely on `PATH` resolution.
-- **`SYM_NODE_NAME`** pins identity; a name collision otherwise auto-suffixes, and each
-  suffix is a separate store with a separate signing key.
+- **`SYM_NODE_NAME`** pins identity. A collision is refused, never auto-suffixed: the second
+  process runs without a node and says why on every tool.
 - **`SYM_ROOM` is required.** For Codex the fallback is `process.cwd()` — a seat launched
   from the wrong directory joins `default` while its Claude Code sibling stays in the
   named room. Nothing errors; the two simply stop seeing each other.
