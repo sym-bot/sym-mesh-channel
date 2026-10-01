@@ -28,23 +28,34 @@ async function test(name, fn) {
 }
 
 // ── A fake engine, shaped like the parts of SymNode the channel uses ──────────
-function fakeNode({ peers = 1, delivery = 'report', collapseOnce = false } = {}) {
+// `reachable` models the P4 state itself: a peer still listed in peers() whose transport takes no
+// frame. `dupDispatch` models 0.13.12, where remember() of an already-stored directed record
+// re-sends it and reports the dispatch instead of returning null.
+function fakeNode({ peers = 1, delivery = 'report', collapseOnce = false, reachable = null, dupDispatch = false } = {}) {
   const stored = new Set();
   const crypto = require('crypto');
   const key = (f) => 'cmb-' + crypto.createHash('sha256').update(JSON.stringify(f)).digest('hex').slice(0, 16);
   let collapse = collapseOnce;
   return {
     peerCount: peers,
+    reachable,
     peers() { return Array.from({ length: this.peerCount }, (_, i) => ({ peerId: 'p' + i })); },
     status() { return { peerCount: this.peerCount }; },
     remember(fields, opts = {}) {
       const k = key(fields);
       if (collapse) { collapse = false; return { key: k, collapsed: true }; }
-      if (stored.has(k)) return null;
+      const reach = (to) => (this.reachable ? this.reachable.has(to) : this.peerCount > 0);
+      if (stored.has(k)) {
+        if (!(dupDispatch && opts.to)) return null;
+        const dup = { key: k, duplicate: true };
+        const dispatched = reach(opts.to) ? 1 : 0;
+        Object.defineProperty(dup, 'delivery', { value: { directed: true, to: opts.to, dispatched, undelivered: dispatched === 0 }, enumerable: false });
+        return dup;
+      }
       stored.add(k);
       const entry = { key: k };
       if (delivery === 'report') {
-        const dispatched = opts.to ? (this.peerCount > 0 ? 1 : 0) : this.peerCount;
+        const dispatched = opts.to ? (reach(opts.to) ? 1 : 0) : this.peerCount;
         Object.defineProperty(entry, 'delivery', {
           value: { directed: !!opts.to, to: opts.to || null, dispatched, undelivered: !!opts.to && dispatched === 0 },
           enumerable: false,
@@ -54,6 +65,7 @@ function fakeNode({ peers = 1, delivery = 'report', collapseOnce = false } = {})
     },
   };
 }
+function reachableAdd(n, id) { n.reachable.add(id); }
 const F = { focus: 'hi', issue: 'none', intent: 'directive', motivation: '', commitment: '', perspective: 'me', mood: {} };
 const okS = (e, sent) => (sent ? `Sent CMB ${e.key}` : `Stored ${e.key} — no peers`);
 
@@ -130,8 +142,9 @@ async function unitTests() {
     assert.strictEqual(cd.sendOutcome({ key: 'k' }), 'unknown');
   });
 
-  await test('explicitSend: a directed send that reached no transport is NOT reported as sent (P4)', () => {
-    const n = fakeNode({ peers: 0 });
+  await test('explicitSend: a directed send to a peer still LISTED but unreachable is NOT reported as sent (P4)', () => {
+    // Two peers listed; the target's transport is gone — the restarted-session state itself.
+    const n = fakeNode({ peers: 2, reachable: new Set(['p1']) });
     const delivered = new Set();
     const r = cd.explicitSend(n, delivered, F, { to: 'gone-peer' }, () => 'Sent to gone-peer', () => 'T');
     assert.ok(r.undelivered, 'flagged undelivered');
@@ -139,10 +152,29 @@ async function unitTests() {
     assert.strictEqual(delivered.size, 0, 'nothing is credited as delivered');
   });
 
+  await test('explicitSend: a held directed send flushed on 0.13.12 goes out unsalted (re-review F1)', () => {
+    const n = fakeNode({ peers: 1, reachable: new Set(), dupDispatch: true });
+    const first = cd.explicitSend(n, new Set(), F, { to: 'p0' }, () => 'Sent to p0', () => 'T');
+    assert.ok(first.undelivered, 'first attempt: target unreachable');
+    reachableAdd(n, 'p0');
+    const flushed = cd.explicitSend(n, new Set(), F, { to: 'p0' }, (e) => `Sent ${e.key}`, () => 'T');
+    assert.ok(/^Sent /.test(flushed.text) && !/re-sent/.test(flushed.text), flushed.text);
+  });
+
+  await test('explicitSend: after one salted re-send, the same content again is a duplicate, not another re-send (re-review F2)', () => {
+    const n = fakeNode({ peers: 0 }); const delivered = new Set();
+    cd.explicitSend(n, delivered, F, {}, okS, () => 'T1');            // stored, nobody connected
+    n.peerCount = 1;
+    assert.ok(/Re-sent CMB/.test(cd.explicitSend(n, delivered, F, {}, okS, () => 'T2').text));
+    const third = cd.explicitSend(n, delivered, F, {}, okS, () => 'T3');
+    assert.ok(third.duplicate && /already dispatched/.test(third.text), `no unbounded re-salting: ${third.text}`);
+  });
+
   await test('explicitSend: true duplicate after a real dispatch is suppressed (no flood regression)', () => {
     const n = fakeNode({ peers: 2 }); const delivered = new Set();
     assert.ok(/^Sent CMB/.test(cd.explicitSend(n, delivered, F, {}, okS, () => 'T').text));
-    assert.ok(/already delivered/.test(cd.explicitSend(n, delivered, F, {}, okS, () => 'T').text));
+    const dup = cd.explicitSend(n, delivered, F, {}, okS, () => 'T');
+    assert.ok(dup.duplicate && /already dispatched/.test(dup.text) && /not a delivery receipt/.test(dup.text), dup.text);
   });
 
   await test('explicitSend: an undelivered copy is re-issued once a peer connects (E8 variant c)', () => {
@@ -163,11 +195,32 @@ async function unitTests() {
     assert.ok(/^Sent CMB/.test(cd.explicitSend(n, new Set(), F, {}, okS, () => 'T').text));
   });
 
+  await test('the engine\'s peers() really carries the name and lastSeen that staleNote reads (re-review F7)', () => {
+    const src = fs.readFileSync(require.resolve('@sym-bot/sym/lib/node.js', { paths: [path.join(__dirname, '..')] }), 'utf8');
+    const body = src.slice(src.indexOf('\n  peers() {'), src.indexOf('\n  }', src.indexOf('\n  peers() {')) + 4);
+    assert.ok(/\bname:/.test(body) && /\blastSeen:/.test(body) && /\bpeerId:/.test(body), 'peers() must return peerId, name and lastSeen');
+  });
+
+  await test('recallSender: a stored record shows its deliverer, and a pre-0.13.12 self-rewritten author is not shown (re-review F8)', () => {
+    assert.deepStrictEqual(cd.recallSender({ source: 'a+b', cmb: { createdBy: 'a' } }, 'a'), { from: 'b', label: 'b' });
+    assert.deepStrictEqual(cd.recallSender({ source: 'a+relay', cmb: { createdBy: 'c' } }, 'a'), { from: 'relay', label: 'c via relay' });
+    assert.deepStrictEqual(cd.recallSender({ source: 'a', cmb: { createdBy: 'a' } }, 'a'), { from: 'a', label: 'a' });
+  });
+
   await test('staleNote: silent for a live peer, a warning past 30 s of silence', () => {
     const now = 1_000_000;
     assert.strictEqual(cd.staleNote({ name: 'b', lastSeen: now - 5000 }, now), '');
     assert.ok(/nothing has arrived from b for 45s/.test(cd.staleNote({ name: 'b', lastSeen: now - 45000 }, now)));
     assert.strictEqual(cd.staleNote(null, now), '');
+  });
+
+  await test('the push handler never drops a delivery on the createdBy a record claims (re-review F4, F13)', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+    const start = src.indexOf("n.on('cmb-accepted'");
+    const handler = src.slice(start, src.indexOf("n.on('message'", start));
+    assert.ok(start > 0 && handler.length > 0, 'cmb-accepted handler not found');
+    assert.ok(!/createdBy\s*===\s*NODE_NAME/.test(handler), 'no own-name drop keyed on the claimed author');
+    assert.ok(!/delivererOf\([^)]*\)\s*\|\|\s*entry\.cmb\?\.createdBy/.test(handler), 'no fallback from deliverer to the claimed author');
   });
 
   console.log('\ndelivery-policy.js receive surface:');
@@ -248,6 +301,7 @@ async function waitFor(pred, ms, every = 250) {
   return null;
 }
 
+let e2eRan = 0;
 async function e2eTests({ lan }) {
   console.log('\nend to end (real servers):');
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'channel-reliability-'));
@@ -256,6 +310,7 @@ async function e2eTests({ lan }) {
   try {
     // Needs no discovery (two servers, one name), so it runs even where LAN multicast is unavailable.
     await test('a name held by a live process: the second server starts, says why, and every tool says so (I1)', async () => {
+      e2eRan++;
       const env = { SYM_STATE_DIR: stateDir, SYM_NODE_NAME: `cr-holder-${suffix}`, SYM_ROOM: room };
       const first = session(env);
       await first.init();
@@ -276,6 +331,7 @@ async function e2eTests({ lan }) {
       return;
     }
     await test('a directed send arrives as ONE id under the real sender, and a fetched push is not repeated (P2, P3)', async () => {
+      e2eRan++;
       const a = session({ SYM_STATE_DIR: stateDir, SYM_NODE_NAME: `cr-a-${suffix}`, SYM_ROOM: room });
       const b = session({ SYM_STATE_DIR: stateDir, SYM_NODE_NAME: `cr-b-${suffix}`, SYM_ROOM: room });
       try {
@@ -292,9 +348,15 @@ async function e2eTests({ lan }) {
         const id = (header.match(/\[(in\d{4})\]$/) || [])[1];
         assert.ok(id, `the push must carry the delivery's inbox id: ${header}`);
 
+        // Positive control (re-review F17): the footer is there before the fetch…
+        const before = await a.tool('sym_status');
+        assert.ok(/Mesh inbox: 1 unread/.test(before.text), `before the fetch the delivery is unread: ${before.text}`);
         const fetched = await a.tool('sym_fetch', { msg_id: id });
         assert.ok(fetched.text.startsWith(`[cr-b-${suffix}]`) && fetched.text.includes(`ping ${suffix}`), fetched.text);
+        // …and gone after it.
         assert.ok(!/Mesh inbox: \d+ unread/.test(fetched.text), `a fetched delivery is not unread any more: ${fetched.text}`);
+        const after = await a.tool('sym_status');
+        assert.ok(!/Mesh inbox: \d+ unread/.test(after.text), `still read on the next call: ${after.text}`);
 
         const recv = await a.tool('sym_receive');
         assert.ok(new RegExp(`Already read with sym_fetch, not repeated: 1 \\(${id}\\)`).test(recv.text), recv.text);
@@ -309,7 +371,12 @@ async function e2eTests({ lan }) {
 (async () => {
   console.log('\nsym-mesh-channel channel reliability (audit phase 1)');
   await unitTests();
-  await e2eTests({ lan: process.env.SKIP_E2E !== '1' });
+  const lan = process.env.SKIP_E2E !== '1';
+  await e2eTests({ lan });
+  // A floor, so a run that silently entered fewer end-to-end tests is not green (re-review F18).
+  const expected = lan ? 2 : 1;
+  if (e2eRan < expected) { failed++; console.log(`  ✗ only ${e2eRan} of ${expected} end-to-end tests ran`); }
+  console.log(`  end-to-end tests run: ${e2eRan}${lan ? '' : ' (LAN test skipped — P2/P3 not verified end to end)'}`);
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
 })();

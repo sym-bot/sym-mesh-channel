@@ -299,7 +299,7 @@ test('true duplicate to a connected peer is suppressed (no flood regression)', (
   const a = explicitSend(n, delivered, F, {}, okS, () => 'T');
   assert.ok(/^Sent CMB/.test(a.text), 'first broadcast should send');
   const b = explicitSend(n, delivered, F, {}, okS, () => 'T');
-  assert.ok(/already delivered/.test(b.text), 'identical resend after real delivery is a suppressed duplicate');
+  assert.ok(/already dispatched/.test(b.text), 'identical resend after a real dispatch is a suppressed duplicate');
 });
 
 test('undelivered re-send (variant c) is re-issued, not swallowed', () => {
@@ -822,6 +822,20 @@ async function runProjectInstallTests() {
         // …and removing a name pin does not take the seat off its relay.
         assert.strictEqual(env.SYM_RELAY_URL, 'wss://relay.example');
         assert.strictEqual(env.SYM_RELAY_TOKEN, 'tok-123');
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    await testAsync('start warns when a project-scope entry in ~/.claude.json still pins this folder (re-review F10)', async () => {
+      const tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'smc-start-')));
+      try {
+        const live = path.join(__dirname, '..', 'server.js');
+        const { code, stderr } = await runStart([], tmpDir, {
+          claudeJson: { projects: { [tmpDir]: { mcpServers: { 'claude-sym-mesh': { command: 'node', args: [live], env: { SYM_NODE_NAME: 'claude-old-host' } } } } } },
+        });
+        assert.strictEqual(code, 0);
+        assert.ok(stderr.includes('project-scope') && stderr.includes('SYM_NODE_NAME=claude-old-host') && stderr.includes('claude mcp remove claude-sym-mesh -s local'), stderr);
       } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
       }

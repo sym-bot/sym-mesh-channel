@@ -466,7 +466,7 @@ try {
 // tests exercise the shipped code rather than a copy of it. The engine's own delivery report
 // (remember().delivery) decides whether a send left this node.
 const crypto = require('crypto');
-const { explicitSend, delivererOf, senderLabel, inboxIdFor, createReadTracker, staleNote } = require('./channel-delivery.js');
+const { explicitSend, delivererOf, senderLabel, recallSender, inboxIdFor, createReadTracker, staleNote } = require('./channel-delivery.js');
 
 // ── input hygiene (0.3.39) — silent semantic drops must fail loudly ──────────────
 // Root-caused 2026-07-18: minds habitually call sym_publish/sym_send with a single
@@ -511,8 +511,9 @@ async function flushOutboxFor(peerName, peerId) {
       if (item.opts && item.opts.payload !== undefined) opts.payload = item.opts.payload;
       const r = explicitSend(node, deliveredCmbKeys, item.categories, opts, (entry) => `flushed ${entry.key}`);
       // The peer can vanish again between peer-joined and this send; an undelivered item stays held.
-      if (r.undelivered) break;
-      if (!r.isError) sent.push(item.seq);
+      // Held items leave in order: anything not sent stops the flush, and the tail waits with it.
+      if (r.undelivered || r.isError) break;
+      sent.push(item.seq);
     } catch (e) {
       process.stderr.write(`sym-mesh-channel: outbox flush failed for #${item.seq}: ${e?.message || e}\n`);
       break;   // keep ordering; a later item must not overtake a failed earlier one
@@ -574,12 +575,14 @@ function registerNodeHandlers(n) {
   });
 
   n.on('cmb-accepted', (entry) => {
-    if (entry.source === NODE_NAME || entry.cmb?.createdBy === NODE_NAME) return;
+    // The own-name check is on the deliverer (below), never on the createdBy a record claims (re-review F4).
+    if (entry.source === NODE_NAME) return;
     // An admitted entry's `source` is the SDK's store-local `<receiver>+<deliverer>` key, which
     // printed as "<us>+<them>" on every push. The allowlist, the own-name check and the rate key on
     // the DELIVERER, the peer our own connection knows; the line prints the record's claimed author
     // as well when that is someone else ("author via deliverer"). Neither is a verified identity.
-    const sender = delivererOf(entry, NODE_NAME) || entry.cmb?.createdBy || 'unknown';
+    // No recoverable deliverer is judged as 'unknown', never as the record's own claim (re-review F13).
+    const sender = delivererOf(entry, NODE_NAME) || 'unknown';
     if (sender === NODE_NAME) return;
     const source = deliveryPolicy.displayName(senderLabel(entry, NODE_NAME) || sender);   // what lines print
     const categories = entry.cmb?.categories || {};
@@ -817,7 +820,10 @@ function pushStatusLine() {
     `was launched with --dangerously-load-development-channels ${handle}; otherwise deliveries wait for sym_receive.${declared}`;
 }
 
-const startupAdvisory = [...roomAdvisory(), ...dualNodeAdvisory()];
+// Built before the MCP server exists, on the path NODE_FAULT needs to survive: never let it throw.
+let startupAdvisory = [];
+try { startupAdvisory = [...roomAdvisory(), ...dualNodeAdvisory()]; }
+catch (e) { process.stderr.write(`sym-mesh-channel: startup advisory skipped: ${e?.message || e}\n`); }
 
 const mcp = new Server(
   { name: 'sym-mesh', version: '0.1.0' },
@@ -1178,7 +1184,8 @@ async function dispatchTool(request) {
           : ` The outbox could not hold it either (${h.reason}), so nothing is queued.`;
         return { content: [{ type: 'text', text: r.text + held }], ...(h.held ? {} : { isError: true }) };
       }
-      return { content: [{ type: 'text', text: r.text }], ...(r.isError ? { isError: true } : {}) };
+      const dupNote = r.duplicate && targetPeer ? staleNote(targetPeer) : '';
+      return { content: [{ type: 'text', text: r.text + dupNote }], ...(r.isError ? { isError: true } : {}) };
     }
 
     case 'sym_publish': {
@@ -1210,9 +1217,12 @@ async function dispatchTool(request) {
         return { content: [{ type: 'text', text: 'No memories found.' }] };
       }
       // A memory is text the session reads like any delivery: a peer's memory passes the same policy.
-      const lines = results.slice(0, 10).map((r) => {
+      const lines = results.slice(0, 10).map((stored) => {
+        // The fourth surface: the same deliverer/label split as push, receive and fetch (re-review F8).
+        const who = recallSender(stored, NODE_NAME);
+        const r = { ...stored, source: who.from, label: who.label };
         const out = deliveryPolicy.recallLine(r, { policy, selfName: NODE_NAME });
-        if (out.audit) securityAudit('recall', out.audit[0], r.source || r.cmb?.createdBy || 'unknown', out.audit[1]);
+        if (out.audit) securityAudit('recall', out.audit[0], who.from, out.audit[1]);
         return out.line;
       });
       const more = results.length > 10
@@ -1591,7 +1601,7 @@ async function dispatchTool(request) {
             restored = buildNode({ serviceType: prevServiceType, room: prevRoom, relay: RELAY_URL, relayToken: RELAY_TOKEN });
           } catch (e) {
             // Our own half-stopped node can still hold the lock for a moment; wait once, then retry.
-            if (e?.code !== 'EIDENTITYLOCK' || e.holderPid !== process.pid) throw e;
+            if (e?.code !== 'EIDENTITYLOCK' || (e.holderPid !== undefined && e.holderPid !== process.pid)) throw e;
             await new Promise((r) => setTimeout(r, 500));
             restored = buildNode({ serviceType: prevServiceType, room: prevRoom, relay: RELAY_URL, relayToken: RELAY_TOKEN });
           }

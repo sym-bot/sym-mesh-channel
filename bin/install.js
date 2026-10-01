@@ -311,6 +311,24 @@ if (cmd === 'start') {
     }
   }
 
+  // A `claude-sym-mesh` entry for THIS folder in ~/.claude.json's project scope wins over the
+  // user-scope entry, so a name or room pinned there would still override .sym/node.json. Say so
+  // and name the fix rather than report the folder as configured (re-review F10).
+  if (!isProject) {
+    try {
+      const cj = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.claude.json'), 'utf8'));
+      const projEnv = cj?.projects?.[launchDir]?.mcpServers?.['claude-sym-mesh']?.env || {};
+      const projPins = ['SYM_NODE_NAME', 'SYM_ROOM'].filter((k) => typeof projEnv[k] === 'string' && projEnv[k].trim());
+      if (projPins.length) {
+        process.stderr.write(
+          `WARNING: ~/.claude.json has a project-scope 'claude-sym-mesh' entry for ${launchDir} that pins ` +
+          `${projPins.map((k) => `${k}=${projEnv[k]}`).join(' ')}. It overrides this folder's .sym/node.json. ` +
+          `Remove it with: claude mcp remove claude-sym-mesh -s local   (run in this folder), then start again.\n`,
+        );
+      }
+    } catch { /* no ~/.claude.json, or unreadable: nothing pinned there */ }
+  }
+
   // The folder's identity: also what the sym-mesh-channel plugin's node reads.
   // Without it, `start --room` reached only the server: registration, and the
   // plugin node — which carries no SYM_ROOM — joined `default` while its sibling

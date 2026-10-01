@@ -23,6 +23,18 @@ function delivererOf(item, selfName) {
 }
 
 /**
+ * The deliverer and display label for a STORED record (sym_recall), which carries the store-local
+ * `<receiver>+<deliverer>` source and the record's createdBy. On engines before 0.13.12 an admitted
+ * record's createdBy was rewritten to the receiver, i.e. our own name, so that claim is not shown.
+ */
+function recallSender(r, selfName) {
+  const from = delivererOf({ source: r && r.source }, selfName) || 'unknown';
+  const claimed = r && r.cmb && typeof r.cmb.createdBy === 'string' ? r.cmb.createdBy : '';
+  const label = claimed && claimed !== from && claimed !== selfName ? `${claimed} via ${from}` : from;
+  return { from, label };
+}
+
+/**
  * The name to print for a delivery's sender. The record's author (0.13.12 `author.name`, still an
  * unverified label until the Core Secure handshake lands) and, when it is a different node, the
  * peer that delivered it — so a relayed or forged attribution is visible on the line itself.
@@ -35,9 +47,10 @@ function senderLabel(item, selfName) {
 
 /**
  * The inbox id of the delivery a cmb-accepted entry describes, so the push and sym_receive name
- * one message with one id. The SDK registers its inbox listener in the SymNode constructor, ahead
- * of ours, so by the time we see the entry its inbox item is the newest one. 0.13.12 stamps the id
- * on the entry; on 0.13.8 we read the newest item and accept it only if it is this delivery.
+ * one message with one id. 0.13.12 stamps the id on the entry, and this package requires it. The
+ * fallback is best effort for older engines only: their inbox listener runs first and synchronously
+ * per delivery, so the newest item is this delivery's, built from the same entry.content compared
+ * here; anything else falls back to an mNNN id rather than guessing.
  */
 function inboxIdFor(n, entry) {
   if (entry && typeof entry.inboxId === 'string' && entry.inboxId) return entry.inboxId;
@@ -183,7 +196,7 @@ function explicitSend(n, delivered, categories, sendOpts, okSummary, now) {
   const first = attempt(categories);
   if (first) return first.undelivered ? first : { text: okSummary(first.entry, first.sent), entry: first.entry };
   if (delivered.has(tag(categories))) {
-    return { text: `Duplicate — identical CMB already delivered${targetPeerId ? '' : ' to the room'}, not re-broadcast.` };
+    return { text: `Duplicate — an identical CMB was already dispatched${targetPeerId ? '' : ' to the room'}, so it was not re-sent. Dispatch is not a delivery receipt; change the content to send it again.`, duplicate: true };
   }
   const salted = Object.assign({}, categories, { focus: `${categories.focus} [re-sent ${stamp()}]` });
   const retry = attempt(salted);
@@ -191,10 +204,13 @@ function explicitSend(n, delivered, categories, sendOpts, okSummary, now) {
     return { text: 'Send failed: the prior copy was undelivered and the disambiguated re-send did not store (persist error). Nothing broadcast.', isError: true };
   }
   if (retry.undelivered) return retry;
+  // Credit the original content too: the salted copy stands for it, so the next identical send is a
+  // duplicate, not another salted re-send (each with a new timestamp, so unbounded) (re-review F2).
+  if (retry.sent) delivered.add(tag(categories));
   return { text: `Re-sent CMB ${retry.entry.key}${targetPeerId ? '' : ' to the room'} — a prior identical copy was in the local store but had never been delivered; content-addressed dedup would otherwise have silently suppressed this send.`, entry: retry.entry };
 }
 
 module.exports = {
-  delivererOf, senderLabel, inboxIdFor, createReadTracker, sendOutcome, staleNote, STALE_AFTER_MS,
+  delivererOf, senderLabel, recallSender, inboxIdFor, createReadTracker, sendOutcome, staleNote, STALE_AFTER_MS,
   cmbContentKey, deliveryTag, connectedPeerCount, explicitSend,
 };

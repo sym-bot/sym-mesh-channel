@@ -292,7 +292,7 @@ function receiveLine(m, { policy, selfName, now = Date.now(), pushed = false }) 
  */
 function recallLine(r, { policy, selfName }) {
   const sender = r.source || r.cmb?.createdBy || 'unknown';
-  const head = `[${displayName(sender)}] ${r.timestamp ? new Date(r.timestamp).toLocaleString() : ''}`;
+  const head = `[${displayName(r.label || sender)}] ${r.timestamp ? new Date(r.timestamp).toLocaleString() : ''}`;
   try {
     const verdict = policy.judge({ from: sender, content: r.content, categories: r.cmb?.categories, payload: r.cmb?.payload }, { self: sender === selfName });
     if (!verdict.show) return { line: `${head}\n  withheld: ${verdict.detail}`, audit: [verdict.reason, verdict.excerpt] };
