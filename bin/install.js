@@ -108,8 +108,62 @@ validateRoomValue(process.env.SYM_ROOM, 'SYM_ROOM');
 // on postinstall means users who move or uninstall an old copy of the repo
 // get healed automatically on the next `npm install -g @sym-bot/mesh-channel`
 // without needing to know about --force.
+// The version of THIS installer, and the launch spec it writes. A server.js resolved inside npx's
+// cache (…/_npx/<hash>/…) is not a stable path: npm can garbage-collect it, and every session that
+// config serves then loses its mesh server with no clear error. So from an npx run the config names
+// the package and version instead, which npx resolves (and re-fetches if needed) on every launch.
+const PKG_VERSION = (() => { try { return require(path.join(__dirname, '..', 'package.json')).version; } catch { return null; } })();
+// Semver order for the pins this tool writes: numeric core first; at an equal core a prerelease
+// (`0.11.0-rc.1`) is LOWER than its release, so an rc pin is upgraded to the release and a release
+// is never rewritten to an rc. `(x || 0)` would read `0-rc` as 0, a real 0 and NaN alike.
+const versionLess = (a, b) => {
+  const parse = (v) => {
+    const [core, pre = ''] = String(v).split('+')[0].split(/-(.*)/s);
+    return { nums: core.split('.').map((n) => (/^\d+$/.test(n) ? Number(n) : -1)), pre };
+  };
+  const x = parse(a), y = parse(b);
+  for (let i = 0; i < 3; i++) { const p = x.nums[i] ?? 0, q = y.nums[i] ?? 0; if (p !== q) return p < q; }
+  if (x.pre && !y.pre) return true;
+  if (!x.pre && y.pre) return false;
+  // Identifier by identifier, numbers as numbers: rc.9 < rc.10 (semver §11).
+  const a2 = x.pre.split('.'), b2 = y.pre.split('.');
+  for (let i = 0; i < Math.max(a2.length, b2.length); i++) {
+    if (a2[i] === undefined) return true;
+    if (b2[i] === undefined) return false;
+    const na = /^\d+$/.test(a2[i]), nb = /^\d+$/.test(b2[i]);
+    if (na && nb) { if (Number(a2[i]) !== Number(b2[i])) return Number(a2[i]) < Number(b2[i]); continue; }
+    if (na !== nb) return na;   // numeric identifiers sort before alphanumeric ones
+    if (a2[i] !== b2[i]) return a2[i] < b2[i];
+  }
+  return false;
+};
+function launchSpec(serverJs) {
+  if (/[\\/]_npx[\\/]/.test(serverJs) && PKG_VERSION) {
+    const pkg = `@sym-bot/mesh-channel@${PKG_VERSION}`;
+    // Native Windows runs npx through cmd /c (npx is a .cmd shim).
+    return process.platform === 'win32' ? { command: 'cmd', args: ['/c', 'npx', '-y', pkg] } : { command: 'npx', args: ['-y', pkg] };
+  }
+  return { command: 'node', args: [serverJs] };
+}
+
+// A pin NEWER than this installer is left alone (never downgrade), but said, because nothing here can
+// tell whether that version resolves on npm: if it doesn't, every session that reads it has no server.
+function warnNewerPin(entry, where) {
+  const pinned = entry && Array.isArray(entry.args) && entry.args.find((a) => typeof a === 'string' && a.startsWith('@sym-bot/mesh-channel@'));
+  if (!pinned || !PKG_VERSION) return;
+  const v = pinned.slice('@sym-bot/mesh-channel@'.length);
+  if (versionLess(PKG_VERSION, v)) {
+    process.stderr.write(`NOTE: ${where} pins @sym-bot/mesh-channel@${v}, newer than this installer (${PKG_VERSION}); left as is. ` +
+      `If that version is not on npm, sessions get no mesh server: re-run a ${v} start, or this one with --force.\n`);
+  }
+}
+
 function isStaleEntry(entry) {
   if (!entry || !Array.isArray(entry.args) || entry.args.length === 0) return false;
+  // An npx spec is stale only when it pins an OLDER version than this installer, so `start` from a
+  // newer release upgrades it and an older installer never downgrades it.
+  const pinned = entry.args.find((a) => typeof a === 'string' && a.startsWith('@sym-bot/mesh-channel@'));
+  if (pinned) return !!PKG_VERSION && versionLess(pinned.slice('@sym-bot/mesh-channel@'.length), PKG_VERSION);
   const p = entry.args[0];
   if (typeof p !== 'string' || !p) return false;
   try { return !fs.existsSync(p); } catch { return true; }
@@ -145,7 +199,7 @@ function preserveRoom(entry) {
 // alone and named: rewriting it would discard whatever the user put there.
 // The folder is the agent, so its name is the node's: `sym-agent-x` runs as `claude-sym-agent-x`.
 // Two live sessions in folders with the same name do share it, and the second one says so and names
-// the fix (`start --name`); a readable name was chosen over a path hash (user ruling, 2026-10-01).
+// the fix (`start --name`). A readable name is worth more here than a path hash that never collides.
 function folderNodeName(dir) {
   const base = path.basename(path.resolve(dir)).toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-+|-+$/g, '').slice(0, 57);
   return `claude-${base || 'agent'}`;
@@ -294,6 +348,7 @@ if (cmd === 'start') {
 
   const existing = rawEntryInScope();
   const stale = existing ? isStaleEntry(existing) : false;
+  if (existing) warnNewerPin(existing, isProject ? '.mcp.json' : '~/.claude.json');
   if (nameArg) {
     const problem = nodeNameProblem(nameArg);
     if (problem) {
@@ -552,8 +607,7 @@ if (useProjectMode) {
 
   // Build the MCP entry (identical shape to global mode)
   const projectEntry = {
-    command: 'node',
-    args: [serverJsPath],
+    ...launchSpec(serverJsPath),
     env: {
       SYM_NODE_NAME: projectNodeName,
       // Explicitly blank relay env vars — see comment on the global
@@ -779,7 +833,13 @@ const topEntryIsStale = isStaleEntry(existingTopEntry);
 
 // Refuse to overwrite a LIVE entry without --force. A stale entry is
 // always rewritable — see isStaleEntry comment at top of file.
-if (existingTopEntry && !force && !topEntryIsStale) {
+// A live top entry must not stop the project-scoped heal below, which is exactly what the
+// "N stale entries — run init to heal" line sends a user here for (review F2).
+const staleProjectEntries = Object.values(claudeJson.projects && typeof claudeJson.projects === 'object' ? claudeJson.projects : {})
+  .filter((proj) => proj && proj.mcpServers && proj.mcpServers['claude-sym-mesh'] && isStaleEntry(proj.mcpServers['claude-sym-mesh'])).length;
+const keepTop = !!existingTopEntry && !force && !topEntryIsStale && staleProjectEntries > 0;
+if (existingTopEntry) warnNewerPin(existingTopEntry, '~/.claude.json');
+if (existingTopEntry && !force && !topEntryIsStale && !keepTop) {
   if (isPostinstall) {
     // During postinstall, silently skip if already configured and live
     console.log('sym-mesh-channel: already configured in ~/.claude.json (skipping)');
@@ -802,9 +862,14 @@ const topRoom = resolveRoom(existingTopEntry);
 
 // ── Build the entry ───────────────────────────────────────────────
 
+// A pin newer than this installer is kept even when the entry is rewritten (to drop name pins, say):
+// the launch spec is the one thing an older installer must not downgrade (re-review F5).
+const pinnedNewer = (() => {
+  const p = existingTopEntry && Array.isArray(existingTopEntry.args) && existingTopEntry.args.find((a) => typeof a === 'string' && a.startsWith('@sym-bot/mesh-channel@'));
+  return p && PKG_VERSION && versionLess(PKG_VERSION, p.slice('@sym-bot/mesh-channel@'.length));
+})();
 const entry = {
-  command: 'node',
-  args: [serverJsPath],
+  ...(pinnedNewer ? { command: existingTopEntry.command, args: existingTopEntry.args } : launchSpec(serverJsPath)),
   env: {
     ...(noPin ? {} : { SYM_NODE_NAME: topNodeName }),
     // Explicitly blank the relay vars so the MCP doesn't inherit them
@@ -825,7 +890,7 @@ const entry = {
 // for the rationale. Omitted = node uses the global _sym._tcp default.
 if (topRoom && !noPin) entry.env.SYM_ROOM = topRoom;
 
-claudeJson.mcpServers['claude-sym-mesh'] = entry;
+if (!keepTop) claudeJson.mcpServers['claude-sym-mesh'] = entry;   // keepTop: heal projects only
 
 // ── Heal stale project-scoped entries ─────────────────────────────
 // ~/.claude.json can contain per-project mcpServers overrides under
@@ -847,8 +912,7 @@ for (const [projPath, proj] of Object.entries(projects)) {
   // path issue must not silently revert their room membership.
   const projRoomName = preserveRoom(projEntry);
   const healedEntry = {
-    command: 'node',
-    args: [serverJsPath],
+    ...launchSpec(serverJsPath),
     env: {
       SYM_NODE_NAME: projNodeName,
       SYM_RELAY_URL: projEntry.env && typeof projEntry.env.SYM_RELAY_URL === 'string' ? projEntry.env.SYM_RELAY_URL : '',
@@ -904,6 +968,11 @@ const healedLines = healedProjects.length
   : '';
 
 const nodeNameSuffix = topEntryIsStale ? ' (preserved from stale entry)' : '';
+
+if (keepTop) {
+  console.log(`\n✓ The user-scope entry in ~/.claude.json is current and was left as is.${healedLines || '\n'}`);
+  process.exit(0);
+}
 
 console.log(`
 ✓ sym-mesh-channel configured globally in ~/.claude.json

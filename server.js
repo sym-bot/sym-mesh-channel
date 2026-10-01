@@ -80,7 +80,7 @@ const { isValidRoom, roomServiceType, serviceTypeToRoom, KEBAB_CASE_RE } = sdkRo
 /**
  * Whether a room name is canonical: one name per room, one room per name.
  *
- * Founder ruling 2026-08-27. sym enforces this inside isValidRoom as of
+ * sym enforces this inside isValidRoom as of
  * lib/rooms.js 2a06ccb, but that is not released — the published 0.12.3 this
  * node resolves still answers true for `sym`, which maps to `_sym._tcp` whose
  * inverse is `default`. Without this, a peer could join a room named `sym`
@@ -136,7 +136,7 @@ function roomRefusalReason(room) {
 //    a module-level function so it's trivially unit-testable and the
 //    same regex doesn't drift between two call sites.
 
-// ONE VOCABULARY: room (LAN) and team (relay). Founder ruling 2026-08-12 — the legacy scheme
+// ONE VOCABULARY: room (LAN) and team (relay). The legacy scheme
 // is removed everywhere rather than carried, to keep one name in front of users. RELEASE
 // ORDER IS LOAD-BEARING: this ships only after the App-side parsers accept sym://room, so the
 // fix precedes the break it would otherwise cause in shipped apps.
@@ -814,8 +814,56 @@ function dualNodeAdvisory() {
 }
 
 // Whether <channel> notifications reach the session is decided by how Claude Code was launched, and
-// MCP gives this server no signal of it — pushChannel() succeeds either way. Say what is known.
+// MCP gives this server no signal of it — pushChannel() succeeds either way. The launch command line
+// is the next best evidence: walk up the process tree to the `claude` process and read its flags
+// (macOS and Linux; Windows has no cheap equivalent, so it stays "cannot be confirmed").
+let _launch;
+function claudeLaunch() {
+  if (_launch !== undefined) return _launch;
+  _launch = null;
+  if (process.platform === 'win32') return _launch;
+  try {
+    const { execFileSync } = require('child_process');
+    let pid = process.ppid;
+    const until = Date.now() + 2000;   // one budget for the whole walk, not 1.5 s per step (review F16)
+    for (let i = 0; i < 6 && pid > 1 && Date.now() < until; i++) {
+      const out = execFileSync('ps', ['-ww', '-o', 'ppid=,command=', '-p', String(pid)], { encoding: 'utf8', timeout: Math.max(200, until - Date.now()) }).trim();
+      const m = out.match(/^(\d+)\s+([\s\S]*)$/);
+      if (!m) break;
+      const cmd = m[2];
+      // Claude Code is `claude` as the program, `claude` as the script node or a shell runs (npm's bin
+      // shim), or node running its package's cli.js. Not just any command that ends in "claude" (F11).
+      // ps gives one string, so a path may hold spaces ("/Users/Jo Doe/.local/bin/claude"): match
+      // an absolute path that ends in /claude at the program position, or after node or a shell.
+      const PROG = '(?:\\/.*?\\/)?claude(?:\\s|$)';
+      const isClaude = new RegExp(`^${PROG}`).test(cmd)
+        || new RegExp(`^(?:\\S*\\/)?(?:node|sh|bash|zsh|dash)\\s+${PROG}`).test(cmd)
+        || /@anthropic-ai\/claude-code\/.*?cli\.m?js(\s|$)/.test(cmd);
+      if (isClaude) {
+        _launch = { flagged: /--dangerously-load-development-channels\b/.test(cmd), cmd };
+        break;
+      }
+      pid = Number(m[1]);
+    }
+  } catch { /* no ps, or no permission: unknown */ }
+  return _launch;
+}
+
 function pushStatusLine() {
+  const launch = claudeLaunch();
+  if (launch) {
+    // The whole handle, so `server:claude-sym-mesh-2` does not count as this server's (review F7).
+    const mine = IS_PLUGIN_HOST ? /plugin:sym-mesh-channel@\S+/ : /server:claude-sym-mesh(\s|,|$)/;
+    if (launch.flagged && mine.test(launch.cmd)) {
+      return `Push: on — Claude Code was launched with --dangerously-load-development-channels for this server, so deliveries arrive as <channel> notifications.`;
+    }
+    if (!launch.flagged) {
+      return `Push: off — Claude Code was launched without --dangerously-load-development-channels, so deliveries wait for sym_receive. ` +
+        `Relaunch with it (sym-mesh-channel start does) for real-time push.`;
+    }
+    return `Push: probably off for this server — Claude Code was launched with --dangerously-load-development-channels, but not naming ` +
+      `${IS_PLUGIN_HOST ? 'plugin:sym-mesh-channel@<marketplace>' : 'server:claude-sym-mesh'}.`;
+  }
   const handle = IS_PLUGIN_HOST ? 'plugin:sym-mesh-channel@<marketplace>' : 'server:<this server\'s MCP name, normally claude-sym-mesh>';
   let declared = '';
   try {

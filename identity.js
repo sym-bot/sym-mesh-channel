@@ -10,7 +10,7 @@
 // starting a fresh identity in place of the intended one. This module does no pid/lock inspection;
 // that decision is delegated to the engine.
 //
-// FOUNDER RULING 2026-08-10: NEVER -2, NEVER -3. autoSuffix is OFF for every
+// NEVER -2, NEVER -3. autoSuffix is OFF for every
 // identity, pinned or not. A suffix looks like a courtesy and is a data event:
 // `foo-2` is a DIFFERENT store with a DIFFERENT signing key, so the seat keeps
 // its name in conversation while silently becoming a new cryptographic identity
