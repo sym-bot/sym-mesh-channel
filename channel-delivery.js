@@ -14,9 +14,18 @@
  * printed as "claude-sym-agent-a+claude-sym-agent-b" on agent-a's own screen — the part after our
  * own name is the deliverer.
  */
-function delivererOf(item, selfName) {
+//
+// The order is by how much of it the sending peer can write (delta review F2): 0.13.12's author.via
+// comes from our connection; an entry's peerId, resolved through peers(), is the connection too; the
+// `source` string is last, because the engine builds it from the wire frame's own `source` field when
+// a frame carries one, which a hostile peer can set to any name.
+function delivererOf(item, selfName, peers) {
   const via = item && item.author && item.author.via;
   if (via && typeof via.name === 'string' && via.name) return via.name;
+  if (item && item.peerId && Array.isArray(peers)) {
+    const p = peers.find((x) => x && x.peerId === item.peerId);
+    if (p && typeof p.name === 'string' && p.name) return p.name;
+  }
   const raw = String((item && (item.source ?? item.from)) || '');
   const prefix = `${selfName}+`;
   return raw.startsWith(prefix) ? raw.slice(prefix.length) : raw;
@@ -28,6 +37,8 @@ function delivererOf(item, selfName) {
  * record's createdBy was rewritten to the receiver, i.e. our own name, so that claim is not shown.
  */
 function recallSender(r, selfName) {
+  // A stored record that carries 0.13.12's author fields is named exactly as the push names it.
+  if (r && r.author) return { from: delivererOf(r, selfName) || 'unknown', label: senderLabel(r, selfName) || 'unknown' };
   const from = delivererOf({ source: r && r.source }, selfName) || 'unknown';
   const claimed = r && r.cmb && typeof r.cmb.createdBy === 'string' ? r.cmb.createdBy : '';
   const label = claimed && claimed !== from && claimed !== selfName ? `${claimed} via ${from}` : from;
@@ -39,8 +50,8 @@ function recallSender(r, selfName) {
  * unverified label until the Core Secure handshake lands) and, when it is a different node, the
  * peer that delivered it — so a relayed or forged attribution is visible on the line itself.
  */
-function senderLabel(item, selfName) {
-  const deliverer = delivererOf(item, selfName);
+function senderLabel(item, selfName, peers) {
+  const deliverer = delivererOf(item, selfName, peers);
   const author = item && item.author && typeof item.author.name === 'string' ? item.author.name : '';
   return author && author !== deliverer ? `${author} via ${deliverer}` : deliverer;
 }

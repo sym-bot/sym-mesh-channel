@@ -80,6 +80,15 @@ async function unitTests() {
     assert.strictEqual(cd.delivererOf({ source: 'x+y' }, 'claude-sym-agent-a'), 'x+y');
   });
 
+  await test('a forged frame `source` cannot name the deliverer when the connection is known (delta review F2)', () => {
+    // 0.13.8 shape: the engine builds source from the wire frame's own `source` when present.
+    const forged = { source: 'a+trusted-b', peerId: 'h1' };
+    const peers = [{ peerId: 'h1', name: 'hostile-h' }];
+    assert.strictEqual(cd.delivererOf(forged, 'a', peers), 'hostile-h', 'the connection wins over the frame');
+    assert.strictEqual(cd.delivererOf({ source: 'a', peerId: 'h1' }, 'a', peers), 'hostile-h', 'claiming our name through source does not make it our echo');
+    assert.strictEqual(cd.delivererOf(forged, 'a', []), 'trusted-b', 'with no live connection the source string is the last resort');
+  });
+
   await test('a record claiming an allowlisted author is judged on its deliverer, and the line shows both (review F1)', () => {
     // 0.13.12 shape: author.name is the record's own createdBy, which its writer chooses.
     const forged = { from: 'trusted-b', author: { name: 'trusted-b', nodeId: null, via: { name: 'hostile-h', nodeId: 'h1' } } };
@@ -198,13 +207,17 @@ async function unitTests() {
   await test('the engine\'s peers() really carries the name and lastSeen that staleNote reads (re-review F7)', () => {
     const src = fs.readFileSync(require.resolve('@sym-bot/sym/lib/node.js', { paths: [path.join(__dirname, '..')] }), 'utf8');
     const body = src.slice(src.indexOf('\n  peers() {'), src.indexOf('\n  }', src.indexOf('\n  peers() {')) + 4);
-    assert.ok(/\bname:/.test(body) && /\blastSeen:/.test(body) && /\bpeerId:/.test(body), 'peers() must return peerId, name and lastSeen');
+    // A value, not just a key name: `lastSeen: undefined` would leave staleNote silent (delta review F6).
+    assert.ok(/\bname:\s*[^,\s}]/.test(body) && /\blastSeen:\s*(?!undefined)[^,\s}]/.test(body) && /\bpeerId:/.test(body), 'peers() must return peerId, name and lastSeen');
   });
 
   await test('recallSender: a stored record shows its deliverer, and a pre-0.13.12 self-rewritten author is not shown (re-review F8)', () => {
     assert.deepStrictEqual(cd.recallSender({ source: 'a+b', cmb: { createdBy: 'a' } }, 'a'), { from: 'b', label: 'b' });
     assert.deepStrictEqual(cd.recallSender({ source: 'a+relay', cmb: { createdBy: 'c' } }, 'a'), { from: 'relay', label: 'c via relay' });
     assert.deepStrictEqual(cd.recallSender({ source: 'a', cmb: { createdBy: 'a' } }, 'a'), { from: 'a', label: 'a' });
+    // A stored record with 0.13.12 author fields is named exactly as the push names it (delta review F7).
+    const r = { source: 'a+h', author: { name: 'c', via: { name: 'h' } }, cmb: { createdBy: 'c' } };
+    assert.deepStrictEqual(cd.recallSender(r, 'a'), { from: 'h', label: cd.senderLabel(r, 'a') });
   });
 
   await test('staleNote: silent for a live peer, a warning past 30 s of silence', () => {

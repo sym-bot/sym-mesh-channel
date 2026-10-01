@@ -350,15 +350,21 @@ if (cmd === 'start') {
   // A `claude-sym-mesh` entry for THIS folder in ~/.claude.json's project scope wins over the
   // user-scope entry, so a name or room pinned there would still override .sym/node.json. Say so
   // and name the fix rather than report the folder as configured (re-review F10).
-  if (!isProject) {
+  // Both modes: a local-scope entry also outranks a project .mcp.json (delta review F4). The key is
+  // matched by real path, because Claude Code may record /private/tmp/x for a /tmp/x launch (F5).
+  {
     try {
       const cj = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.claude.json'), 'utf8'));
-      const projEnv = cj?.projects?.[launchDir]?.mcpServers?.['claude-sym-mesh']?.env || {};
+      const real = (p) => { try { return fs.realpathSync(p); } catch { return p; } };
+      const here = real(launchDir);
+      const projKey = Object.keys(cj?.projects || {}).find((k) => k === launchDir || real(k) === here);
+      const projEnv = (projKey && cj.projects[projKey]?.mcpServers?.['claude-sym-mesh']?.env) || {};
       const projPins = ['SYM_NODE_NAME', 'SYM_ROOM'].filter((k) => typeof projEnv[k] === 'string' && projEnv[k].trim());
       if (projPins.length) {
         process.stderr.write(
           `WARNING: ~/.claude.json has a project-scope 'claude-sym-mesh' entry for ${launchDir} that pins ` +
-          `${projPins.map((k) => `${k}=${projEnv[k]}`).join(' ')}. It overrides this folder's .sym/node.json. ` +
+          `${projPins.map((k) => `${k}=${projEnv[k]}`).join(' ')}. Whatever the summary above says, it overrides ` +
+          `this folder's .sym/node.json${isProject ? ' and .mcp.json' : ''}. ` +
           `Remove it with: claude mcp remove claude-sym-mesh -s local   (run in this folder), then start again.\n`,
         );
       }

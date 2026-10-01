@@ -582,12 +582,13 @@ function registerNodeHandlers(n) {
     // the DELIVERER, the peer our own connection knows; the line prints the record's claimed author
     // as well when that is someone else ("author via deliverer"). Neither is a verified identity.
     // No recoverable deliverer is judged as 'unknown', never as the record's own claim (re-review F13).
-    const sender = delivererOf(entry, NODE_NAME) || 'unknown';
+    const livePeers = (() => { try { return n.peers(); } catch { return []; } })();
+    const sender = delivererOf(entry, NODE_NAME, livePeers) || 'unknown';
     const inboxId = inboxIdFor(n, entry);
     // A peer delivering under our own name is an echo or an impostor; either way it is named on
     // stderr with its id, and sym_receive lists the id, so it is never dropped without a trace.
     if (sender === NODE_NAME) { securityAudit('push', 'own-name', sender, '', inboxId || undefined); return; }
-    const source = deliveryPolicy.displayName(senderLabel(entry, NODE_NAME) || sender);   // what lines print
+    const source = deliveryPolicy.displayName(senderLabel(entry, NODE_NAME, livePeers) || sender);   // what lines print
     const categories = entry.cmb?.categories || {};
     const payload = entry.cmb?.payload;
     // The same judgement sym_receive, sym_fetch and sym_recall make (delivery-policy.js). This delivery
