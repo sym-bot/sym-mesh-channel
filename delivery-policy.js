@@ -90,6 +90,24 @@ function readMaxPayloadBytes(raw) {
   return { bytes: Number(s) };
 }
 
+/** SYM_RATE_LIMIT, read like SYM_MAX_PAYLOAD_BYTES: a whole number of pushes per sender per minute
+ *  (0 holds every push back for sym_receive). Anything else is reported, never silently defaulted. */
+const DEFAULT_RATE_LIMIT = 30;
+function readRateLimit(raw) {
+  const s = raw === undefined || raw === null ? '' : String(raw).trim();
+  if (!s) return { limit: DEFAULT_RATE_LIMIT };
+  if (!/^\d+$/.test(s)) return { limit: DEFAULT_RATE_LIMIT, invalid: s };
+  return { limit: Number(s) };
+}
+
+// The classifier-risk scan reads the body a line could lead to, capped: the line itself shows only
+// the focus, and scanning every byte of a 1 MiB payload per delivery cost more than it bought.
+const RISK_SCAN_CHARS = 64 * 1024;
+function riskText(focus, body) {
+  const b = String(body ?? '');
+  return `${focus}\n${b.length > RISK_SCAN_CHARS ? b.slice(0, RISK_SCAN_CHARS) : b}`;
+}
+
 // ── One delivery, serialised once ────────────────────────────
 
 const PREPARED = Symbol('a prepared delivery');
@@ -124,9 +142,9 @@ function payloadBytes(p) {
 }
 
 /** The payload marker on a header: its size in the characters a fetch returns. */
+// The size shown is the one the limit is applied to: UTF-8 bytes of the compact JSON.
 function payloadTag(p) {
-  const t = prepare(p).indented;
-  return t === null ? '' : ` [+payload ${t.length}b]`;
+  return prepare(p).indented === null ? '' : ` [+payload ${fmt(payloadBytes(p))} bytes]`;
 }
 
 /** A message body as sym_fetch returns it, for the push store and the inbox alike. */
@@ -201,6 +219,10 @@ function createRateLimiter({ limit = 30, windowMs = 60_000 } = {}) {
       const w = (windows.get(peer) || []).filter((t) => now - t < windowMs);
       w.push(now);
       windows.set(peer, w);
+      // Bounded: a sender that changes its name every message must not grow this map forever.
+      if (windows.size > 1000) {
+        for (const [k, v] of windows) if (!v.some((t) => now - t < windowMs)) windows.delete(k);
+      }
       return w.length <= limit;
     },
   };
@@ -222,9 +244,10 @@ function pushAction(verdict, rate, from, now = Date.now()) {
 // ── What the session and the operator read ───────────────────
 
 /** A sender's name as this node prints it: no line breaks, no brackets, no control characters, at
- *  most 120 characters. A sender chooses its own name, so a raw one could forge a line. */
+ *  most 120 characters. A sender chooses its own name, so a raw one could forge a line. A plain space
+ *  stays: it cannot forge a line, and the printed name is the one a reply is addressed to. */
 function displayName(name) {
-  const s = String(name ?? '').replace(/[\s[\]\u0000-\u001f\u007f-\u009f]/g, '_').slice(0, 120);
+  const s = String(name ?? '').replace(/[\r\n\t\v\f[\]\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, '_').slice(0, 120);
   return s || 'unknown';
 }
 
@@ -238,7 +261,10 @@ function withheldLine(id, from, decision) {
  *  own into the audit nor send escape sequences to the operator's terminal. */
 function auditLine(surface, reason, peer, excerpt, id) {
   const safe = String(excerpt ?? '').replace(/[\u0000-\u001f\u007f-\u009f"]/g, ' ').slice(0, 120);
-  return `[sym-security] WITHHELD surface=${surface} reason=${reason} peer=${displayName(peer)}${id ? ` id=${id}` : ''} excerpt="${safe}"\n`;
+  // The audit line is space-separated key=value, so here a space in a name could forge a field
+  // ("x reason=none peer=trusted"); whitespace is replaced on this line even though display keeps it.
+  const who = displayName(peer).replace(/\s/g, '_');
+  return `[sym-security] WITHHELD surface=${surface} reason=${reason} peer=${who}${id ? ` id=${id}` : ''} excerpt="${safe}"\n`;
 }
 
 /**
@@ -251,7 +277,7 @@ function receiveLine(m, { policy, selfName, now = Date.now(), pushed = false }) 
   try {
     // Under this node's own name: an echo of its own words, or a node using its name. Counted, never
     // silently dropped, since the name alone cannot tell the two apart.
-    if (m.from === selfName) return { bucket: 'own-name' };
+    if (m.from === selfName) return { bucket: 'own-name', id: m.id, audit: ['own-name', ''] };
     const p = prepare({ from: m.from, content: m.content, categories: m.categories, payload: m.payload });
     const verdict = policy.judge(p);
     if (verdict.reason === 'sender-not-allowed') return { bucket: 'not-allowed' };
@@ -268,7 +294,7 @@ function receiveLine(m, { policy, selfName, now = Date.now(), pushed = false }) 
     const payTag = payloadTag(p);
     // The push's classifier-risk quarantine, over the text the push scans, so one delivery gets one
     // verdict on both surfaces; this line enters the context the same way a push does.
-    const risk = scanClassifierRisk(`${focus}\n${renderBody(m.content || focus, p)}`);
+    const risk = scanClassifierRisk(riskText(focus, renderBody(m.content || focus, p)));
     if (risk.risky) {
       return { bucket: 'shown', line: `${quarantineHeader(name, dirTag, risk.terms.length, `${memTag}${payTag}${hiddenFieldsTag(m.categories)}`)} [${m.id}] (${age}s ago)`, audit: [`classifier-risk:${risk.terms.join(',')}`, focus] };
     }
@@ -297,6 +323,10 @@ function recallLine(r, { policy, selfName }) {
     const verdict = policy.judge({ from: sender, content: r.content, categories: r.cmb?.categories, payload: r.cmb?.payload }, { self: sender === selfName });
     if (!verdict.show) return { line: `${head}\n  withheld: ${verdict.detail}`, audit: [verdict.reason, verdict.excerpt] };
     const focus = String(r.cmb?.categories?.focus?.text || r.content || '');
+    // The same classifier-risk guard as push and receive: a recalled line enters the context too, and
+    // a wording that trips the classifier costs the whole turn, which is worse than an elided line.
+    const risk = scanClassifierRisk(focus);
+    if (risk.risky) return { line: `${head}\n  [quarantined: ${risk.terms.length} flagged term(s); wording elided]`, audit: [`classifier-risk:${risk.terms.join(',')}`, focus] };
     const cut = focus.length > 150 ? '… [truncated — sym_fetch for full]' : '';
     return { line: `${head}\n  ${focus.slice(0, 150)}${cut}` };
   } catch {
@@ -318,7 +348,7 @@ function recallLine(r, { policy, selfName }) {
  * @param {number} r.remaining      deliveries past this batch
  * @param {boolean} r.peek
  */
-function receiveReport({ shown, withheld, notAllowed, ownName = 0, alreadyRead = [], remaining, peek }) {
+function receiveReport({ shown, withheld, notAllowed, ownName = 0, ownIds = [], alreadyRead = [], remaining, peek }) {
   const kept = [...notAllowed.values()].reduce((a, b) => a + b, 0);
   const more = remaining > 0 ? ` (+${remaining} more — call sym_receive again)` : '';
   const peekTag = peek ? ' (peek — not drained)' : '';
@@ -340,7 +370,7 @@ function receiveReport({ shown, withheld, notAllowed, ownName = 0, alreadyRead =
     const who = [...notAllowed].map(([n, c]) => `${displayName(n)} ×${c}`).join(', ');
     parts.push(`Not shown, sender outside SYM_ALLOWED_PEERS: ${kept} (${who}).`);
   }
-  if (ownName) parts.push(`Not shown, sent under this node's own name: ${ownName} (an echo of this node's own words, or another node using its name).`);
+  if (ownName) parts.push(`Not shown, sent under this node's own name: ${ownName}${ownIds.length ? ` (${ownIds.join(', ')})` : ''} — an echo of this node's own words, or another node using its name; sym_fetch an id to look.`);
   if (readLine) parts.push(readLine);
   if (shown.length) parts.push('Use sym_fetch <id> for full content; reply via sym_send to=<peer>.');
   return parts.join('\n\n');
@@ -376,7 +406,8 @@ function fetchPart({ id, head, body, offset = 0, pageChars = FETCH_PAGE_CHARS })
   // Never split a surrogate pair at either end: a character cut in half is lost from both parts.
   // An offset from this tool is always a boundary; a typed one may land inside a pair.
   let start = offset;
-  if (start > 0 && /[\uDC00-\uDFFF]/.test(body[start])) start--;
+  // Step back only over a real pair's second half; an unpaired low surrogate is a character of its own.
+  if (start > 0 && /[\uDC00-\uDFFF]/.test(body[start]) && /[\uD800-\uDBFF]/.test(body[start - 1])) start--;
   let end = Math.min(total, start + pageChars);
   if (end < total && /[\uD800-\uDBFF]/.test(body[end - 1])) end = end - 1 > start ? end - 1 : end + 1;
   const where = `characters ${fmt(start + 1)}–${fmt(end)} of ${fmt(total)}`;
@@ -391,6 +422,10 @@ module.exports = {
   DEFAULT_MAX_PAYLOAD_BYTES,
   FETCH_PAGE_CHARS,
   readMaxPayloadBytes,
+  DEFAULT_RATE_LIMIT,
+  readRateLimit,
+  RISK_SCAN_CHARS,
+  riskText,
   prepare,
   payloadBytes,
   payloadTag,

@@ -583,7 +583,10 @@ function registerNodeHandlers(n) {
     // as well when that is someone else ("author via deliverer"). Neither is a verified identity.
     // No recoverable deliverer is judged as 'unknown', never as the record's own claim (re-review F13).
     const sender = delivererOf(entry, NODE_NAME) || 'unknown';
-    if (sender === NODE_NAME) return;
+    const inboxId = inboxIdFor(n, entry);
+    // A peer delivering under our own name is an echo or an impostor; either way it is named on
+    // stderr with its id, and sym_receive lists the id, so it is never dropped without a trace.
+    if (sender === NODE_NAME) { securityAudit('push', 'own-name', sender, '', inboxId || undefined); return; }
     const source = deliveryPolicy.displayName(senderLabel(entry, NODE_NAME) || sender);   // what lines print
     const categories = entry.cmb?.categories || {};
     const payload = entry.cmb?.payload;
@@ -595,11 +598,12 @@ function registerNodeHandlers(n) {
     // only the push is held back: the delivery waits in the inbox and the unread line counts it.
     const action = deliveryPolicy.pushAction(verdict, pushRate, sender);
     if (action !== 'push') {
-      if (action === 'rate-held') securityAudit('push', 'rate-limit', sender, `over ${pushRate.limit}/min from this sender; push held, delivery waits in the inbox`);
-      else securityAudit('push', verdict.reason, sender, verdict.excerpt);
-      // A withheld delivery is announced in our words only (the sender's name and our reason), so the
-      // session learns it arrived while it happens. An allowlisted-out sender stays silent by design.
-      if (action === 'notice') pushChannel('cmb-withheld', `[${source}] \u26a0 delivery withheld \u00b7 ${verdict.detail} \u00b7 sym_receive names it by id`);
+      if (action === 'rate-held') securityAudit('push', 'rate-limit', sender, `over ${pushRate.limit}/min from this sender; push held, delivery waits in the inbox`, inboxId || undefined);
+      // An allowlisted-out sender is configuration, not an incident: no line per arrival on stderr.
+      else if (action !== 'silent') securityAudit('push', verdict.reason, sender, verdict.excerpt, inboxId || undefined);
+      // A withheld delivery is announced in our words only (the sender's name and our reason), with its
+      // id, so the session can tie the notice to the sym_receive line that names it.
+      if (action === 'notice') pushChannel('cmb-withheld', `[${source}] \u26a0 delivery withheld \u00b7 ${verdict.detail}${inboxId ? ` [${inboxId}]` : ''} \u00b7 sym_receive names it by id`);
       return;
     }
     const focus = categories?.focus?.text || entry.content || '';
@@ -624,10 +628,10 @@ function registerNodeHandlers(n) {
     // its text is auto-surfaced. Scan what we're about to surface; if flagged, quarantine — auto-push
     // metadata only (quarantineHeader carries no peer free-text), keep the verbatim body stored for a
     // deliberate sym_fetch. Guarantee is in NOT auto-surfacing, not in guessing the classifier.
-    const risk = scanClassifierRisk(`${focus}\n${body}`);
+    const risk = scanClassifierRisk(deliveryPolicy.riskText(focus, body));
     let header;
     if (risk.risky) {
-      securityAudit('push', `classifier-risk:${risk.terms.join(',')}`, source, focus);
+      securityAudit('push', `classifier-risk:${risk.terms.join(',')}`, sender, focus);
       // m122: a quarantined header that says only 'sym_fetch to view' gets ignored — the
       // observed failure is the fetch round-trip NOT happening, twice this week (m034, the
       // m053 original). Field NAMES and sizes are OUR vocabulary, not peer free-text, so the
@@ -640,8 +644,7 @@ function registerNodeHandlers(n) {
     // One message, one id: push under the delivery's inbox id, so sym_receive and sym_fetch name the
     // same thing the notification did. Before, the push minted its own mNNN for a delivery the inbox
     // already held as inNNNN, and the session met every message twice under two names.
-    const inboxId = inboxIdFor(n, entry);
-    const msgId = inboxId || storeMessage(source, body, header);   // mNNN: an engine without an inbox
+    const msgId = inboxId || storeMessage(sender, body, header);   // mNNN: an engine without an inbox; stores the routable name
     // Credit the push only once it has gone out: one that failed (before mcp.connect, say) must not
     // tag the sym_receive line as already seen.
     const sent = pushChannel('cmb', `${header} [${msgId}]`);
@@ -670,7 +673,7 @@ function registerNodeHandlers(n) {
     } else {
       header = `[${name}] ${extractCompactHeader(from, content)}`;
     }
-    const msgId = storeMessage(name, content, header);
+    const msgId = storeMessage(from, content, header);   // the routable name; lines print `name`
     pushChannel('message', `${header} [${msgId}]`);
   });
 }
@@ -1359,7 +1362,7 @@ async function dispatchTool(request) {
       // of (2026-09-27: a requested review, withheld for its size, reported as "Caught up").
       // receiveLine never throws, so one delivery that cannot be rendered costs one line, not the batch.
       const now = Date.now();
-      const shown = [], withheld = [], notAllowed = new Map(), alreadyRead = [];
+      const shown = [], withheld = [], notAllowed = new Map(), alreadyRead = [], ownIds = [];
       let ownName = 0;
       for (const stored of messages) {
         // Read in full with sym_fetch already: the drain moves past it and the answer names it, once.
@@ -1372,9 +1375,9 @@ async function dispatchTool(request) {
         if (r.bucket === 'shown') shown.push(r.line);
         else if (r.bucket === 'withheld') withheld.push(r.line);
         else if (r.bucket === 'not-allowed') notAllowed.set(m.from, (notAllowed.get(m.from) || 0) + 1);
-        else ownName++;
+        else { ownName++; if (r.id) ownIds.push(r.id); }
       }
-      return { content: [{ type: 'text', text: deliveryPolicy.receiveReport({ shown, withheld, notAllowed, ownName, alreadyRead, remaining, peek: !!args.peek }) }] };
+      return { content: [{ type: 'text', text: deliveryPolicy.receiveReport({ shown, withheld, notAllowed, ownName, ownIds, alreadyRead, remaining, peek: !!args.peek }) }] };
     }
 
     case 'sym_status': {
@@ -1797,8 +1800,14 @@ if (MAX_PAYLOAD.invalid !== undefined) {
 }
 const policy = deliveryPolicy.createDeliveryPolicy({ allowedPeers: ALLOWED_PEERS, maxPayloadBytes: MAX_PAYLOAD.bytes });
 
-const RATE = Number.parseInt(process.env.SYM_RATE_LIMIT || '30', 10);
-const pushRate = deliveryPolicy.createRateLimiter({ limit: Number.isInteger(RATE) && RATE > 0 ? RATE : 30 });
+const RATE = deliveryPolicy.readRateLimit(process.env.SYM_RATE_LIMIT);
+if (RATE.invalid !== undefined) {
+  process.stderr.write(
+    `sym-mesh-channel: SYM_RATE_LIMIT=${JSON.stringify(RATE.invalid)} is not a whole number of pushes per minute; ` +
+    `using the default of ${deliveryPolicy.DEFAULT_RATE_LIMIT}.\n`
+  );
+}
+const pushRate = deliveryPolicy.createRateLimiter({ limit: RATE.limit });
 
 function securityAudit(surface, reason, peer, excerpt, id) {
   process.stderr.write(deliveryPolicy.auditLine(surface, reason, peer, excerpt, id));

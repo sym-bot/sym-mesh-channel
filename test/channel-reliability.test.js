@@ -332,7 +332,8 @@ async function e2eTests({ lan }) {
     }
     await test('a directed send arrives as ONE id under the real sender, and a fetched push is not repeated (P2, P3)', async () => {
       e2eRan++;
-      const a = session({ SYM_STATE_DIR: stateDir, SYM_NODE_NAME: `cr-a-${suffix}`, SYM_ROOM: room });
+      // A's push rate is 1/min, so the second delivery below must be held from push yet still listed.
+      const a = session({ SYM_STATE_DIR: stateDir, SYM_NODE_NAME: `cr-a-${suffix}`, SYM_ROOM: room, SYM_RATE_LIMIT: '1' });
       const b = session({ SYM_STATE_DIR: stateDir, SYM_NODE_NAME: `cr-b-${suffix}`, SYM_ROOM: room });
       try {
         await a.init(); await b.init();
@@ -361,6 +362,18 @@ async function e2eTests({ lan }) {
         const recv = await a.tool('sym_receive');
         assert.ok(new RegExp(`Already read with sym_fetch, not repeated: 1 \\(${id}\\)`).test(recv.text), recv.text);
         assert.ok(!recv.text.includes(`ping ${suffix}`), 'the fetched delivery is not shown a second time');
+
+        // Over the push rate (PR #31 review F5): no second push, but the delivery waits in the inbox.
+        const second = await b.tool('sym_send', { to: `cr-a-${suffix}`, focus: `second ${suffix}` });
+        assert.ok(/^Sent CMB/.test(second.text), second.text);
+        const listed = await waitFor(async () => {
+          const r = await a.tool('sym_receive', { peek: true });
+          return r.text.includes(`second ${suffix}`) ? r : null;
+        }, 15000, 500);
+        assert.ok(listed, 'the rate-held delivery is listed by sym_receive');
+        const cmbPushes = a.notes.filter((n) => n.params?.meta?.event_type === 'cmb');
+        assert.strictEqual(cmbPushes.length, 1, `only the first delivery was pushed: ${cmbPushes.map((n) => n.params.content).join(' | ')}`);
+        assert.ok(!/second .*·pushed/.test(listed.text), 'the held one is not tagged as pushed');
       } finally { await a.close(); await b.close(); }
     });
   } finally {
