@@ -11,7 +11,7 @@
  * published tarball always carries its own changelog. Uses your ambient npm auth (~/.npmrc) —
  * it never embeds a token.
  */
-import { execSync } from "node:child_process";
+import { execSync, execFileSync } from "node:child_process";
 import fs from "node:fs";
 
 const version = process.argv[2];
@@ -81,10 +81,15 @@ if (fs.existsSync(".mcp.json")) {
 }
 
 run("git add package.json package-lock.json CHANGELOG.md .mcp.json .claude-plugin/plugin.json");
-run(`git commit -m ${JSON.stringify(`${version}\n\n${notes}\n\nCo-Authored-By: Claude Fable 5 <noreply@anthropic.com>`)}`);
+// The message goes to git as an ARGUMENT, never through a shell. JSON.stringify gives a double-quoted
+// string, inside which a shell still runs `backticks` and $(…): the 0.10.0 release ran
+// `sym-mesh-channel start` and `npm test` straight out of its CHANGELOG notes and committed their
+// output as the message. execFileSync passes the text untouched.
+const git = (...args) => execFileSync("git", args, { stdio: "pipe", encoding: "utf8" });
+git("commit", "-m", `${version}\n\n${notes}\n\nCo-Authored-By: Claude Fable 5 <noreply@anthropic.com>`);
 
 step(`tag v${version} + push`);
-run(`git tag -a v${version} -m ${JSON.stringify(`v${version}\n\n${notes}`)}`);
+git("tag", "-a", `v${version}`, "-m", `v${version}\n\n${notes}`);
 run("git push origin main");
 run(`git push origin v${version}`);
 
