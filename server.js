@@ -833,11 +833,12 @@ function claudeLaunch() {
       const cmd = m[2];
       // Claude Code is `claude` as the program, `claude` as the script node or a shell runs (npm's bin
       // shim), or node running its package's cli.js. Not just any command that ends in "claude" (F11).
-      const argv = cmd.split(/\s+/);
-      const base = (t) => String(t || '').split('/').pop();
-      const isClaude = base(argv[0]) === 'claude'
-        || (/^(node|sh|bash|zsh|dash)$/.test(base(argv[0])) && base(argv[1]) === 'claude')
-        || /@anthropic-ai\/claude-code\/\S*cli\.m?js(\s|$)/.test(cmd);
+      // ps gives one string, so a path may hold spaces ("/Users/Jo Doe/.local/bin/claude"): match
+      // an absolute path that ends in /claude at the program position, or after node or a shell.
+      const PROG = '(?:\\/.*?\\/)?claude(?:\\s|$)';
+      const isClaude = new RegExp(`^${PROG}`).test(cmd)
+        || new RegExp(`^(?:\\S*\\/)?(?:node|sh|bash|zsh|dash)\\s+${PROG}`).test(cmd)
+        || /@anthropic-ai\/claude-code\/.*?cli\.m?js(\s|$)/.test(cmd);
       if (isClaude) {
         _launch = { flagged: /--dangerously-load-development-channels\b/.test(cmd), cmd };
         break;

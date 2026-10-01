@@ -894,6 +894,49 @@ async function runProjectInstallTests() {
       }
     });
 
+    await testAsync('pins order by semver, prereleases included: rc.9 < rc.10 < release (re-review F6)', async () => {
+      const src = fs.readFileSync(path.join(__dirname, '..', 'bin', 'install.js'), 'utf8');
+      const fnSrc = src.match(/const versionLess = [\s\S]*?\n};/)[0].replace('const versionLess = ', '').replace(/;\s*$/, '');
+      const versionLess = eval(`(${fnSrc})`);
+      for (const [a, b] of [['0.11.0-rc.9', '0.11.0-rc.10'], ['0.11.0-rc.10', '0.11.0'], ['0.10.9', '0.10.10'], ['0.11.0-alpha', '0.11.0-beta'], ['0.11.0-1', '0.11.0-alpha']]) {
+        assert.ok(versionLess(a, b) && !versionLess(b, a), `${a} < ${b}`);
+      }
+      assert.ok(!versionLess('0.10.1', '0.10.1'));
+    });
+
+    await testAsync('init heals a stale project entry while leaving a current top entry alone, and says so (re-review F1, F9)', async () => {
+      const home = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-home-'));
+      try {
+        const live = path.join(__dirname, '..', 'server.js');
+        fs.writeFileSync(path.join(home, '.claude.json'), JSON.stringify({
+          mcpServers: { 'claude-sym-mesh': { command: 'node', args: [live], env: { SYM_RELAY_URL: '', SYM_RELAY_TOKEN: '' } } },
+          projects: { '/some/project': { mcpServers: { 'claude-sym-mesh': { command: 'node', args: ['/gone/server.js'], env: { SYM_NODE_NAME: 'claude-proj' } } } } },
+        }));
+        const r = await spawnInstallerCapture(['init'], { env: { ...process.env, HOME: home, USERPROFILE: home } });
+        assert.strictEqual(r.code, 0, r.stderr);
+        assert.ok(r.stdout.includes('is current and was left as is'), r.stdout);
+        assert.ok(!r.stdout.includes('configured globally'), 'no banner for a write that did not happen');
+        const j = JSON.parse(fs.readFileSync(path.join(home, '.claude.json'), 'utf8'));
+        assert.deepStrictEqual(j.mcpServers['claude-sym-mesh'].args, [live], 'top entry untouched');
+        assert.notStrictEqual(j.projects['/some/project'].mcpServers['claude-sym-mesh'].args[0], '/gone/server.js', 'project entry healed');
+        assert.strictEqual(j.projects['/some/project'].mcpServers['claude-sym-mesh'].env.SYM_NODE_NAME, 'claude-proj');
+      } finally {
+        fs.rmSync(home, { recursive: true, force: true });
+      }
+    });
+
+    await testAsync('removing old name pins never downgrades a newer launch pin (re-review F5)', async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-start-'));
+      try {
+        const r = await runStart([], tmpDir, { claudeJson: { mcpServers: { 'claude-sym-mesh': { command: 'npx', args: ['-y', '@sym-bot/mesh-channel@99.0.0'], env: { SYM_NODE_NAME: 'claude-old' } } } } });
+        const e = r.claudeJson.mcpServers['claude-sym-mesh'];
+        assert.ok(!('SYM_NODE_NAME' in e.env), 'the name pin is removed');
+        assert.deepStrictEqual(e.args, ['-y', '@sym-bot/mesh-channel@99.0.0'], 'the newer launch pin is kept');
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
     await testAsync('start says so when the entry pins a version newer than itself (review F3)', async () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-start-'));
       try {

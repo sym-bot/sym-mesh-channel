@@ -28,10 +28,15 @@ function die(msg) { process.stderr.write(`\n✗ ${msg}\n`); process.exit(1); }
 const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
 const hasScript = (name) => !!pkg.scripts?.[name];
 const carvesOut = JSON.stringify(pkg.files || []).includes("learning-private");
-const isPrivateRepo = () => { try { return run("gh repo view --json visibility -q .visibility") === "PRIVATE"; } catch { return true; } };
+// Visibility decides whether a GitHub release is made, so it is read once, up front, and never
+// guessed: a failing gh (missing, unauthenticated, rate-limited) used to read as "private", which
+// skipped the GitHub release and published anyway.
+let repoVisibility = null;
+const isPrivateRepo = () => repoVisibility === "PRIVATE";
 
 // ── GATES (nothing ships until every one passes) ──
-step("preflight: branch, clean tree, up to date");
+step("preflight: gh can read this repo, branch, clean tree, up to date");
+try { repoVisibility = run("gh repo view --json visibility -q .visibility"); } catch (e) { die(`gh cannot read this repo (not installed, not authenticated, or rate-limited): ${e.message.split("\n")[0]}. Fix gh, then re-run; nothing has been changed yet.`); }
 if (run("git rev-parse --abbrev-ref HEAD") !== "main") die("not on main");
 if (run("git status --porcelain")) die("working tree not clean — commit or stash first (the CHANGELOG entry is the only change that should be here, staged by this script)");
 run("git fetch -q origin");
@@ -98,9 +103,6 @@ let tagOnOrigin = "";
 try { tagOnOrigin = run(`git ls-remote origin refs/tags/v${version}`); } catch (e) { die(`could not check v${version} on origin (${e.message}); not publishing`); }
 if (tagOnOrigin === "") die(`v${version} is not on origin after the push; not publishing`);
 // A public repo gets its GitHub release BEFORE npm publish, so a missing gh is a stop, not a skip.
-let ghOk = true;
-try { run("gh --version"); } catch { ghOk = false; }
-if (!ghOk) die("the gh CLI is not available, so the GitHub release cannot be created before publish; install gh and re-run from the GitHub-release step");
 
 if (isPrivateRepo()) {
   step("GitHub release: SKIPPED (private repo)");

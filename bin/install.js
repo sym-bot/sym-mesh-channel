@@ -125,7 +125,17 @@ const versionLess = (a, b) => {
   for (let i = 0; i < 3; i++) { const p = x.nums[i] ?? 0, q = y.nums[i] ?? 0; if (p !== q) return p < q; }
   if (x.pre && !y.pre) return true;
   if (!x.pre && y.pre) return false;
-  return x.pre < y.pre;
+  // Identifier by identifier, numbers as numbers: rc.9 < rc.10 (semver §11).
+  const a2 = x.pre.split('.'), b2 = y.pre.split('.');
+  for (let i = 0; i < Math.max(a2.length, b2.length); i++) {
+    if (a2[i] === undefined) return true;
+    if (b2[i] === undefined) return false;
+    const na = /^\d+$/.test(a2[i]), nb = /^\d+$/.test(b2[i]);
+    if (na && nb) { if (Number(a2[i]) !== Number(b2[i])) return Number(a2[i]) < Number(b2[i]); continue; }
+    if (na !== nb) return na;   // numeric identifiers sort before alphanumeric ones
+    if (a2[i] !== b2[i]) return a2[i] < b2[i];
+  }
+  return false;
 };
 function launchSpec(serverJs) {
   if (/[\\/]_npx[\\/]/.test(serverJs) && PKG_VERSION) {
@@ -852,8 +862,14 @@ const topRoom = resolveRoom(existingTopEntry);
 
 // ── Build the entry ───────────────────────────────────────────────
 
+// A pin newer than this installer is kept even when the entry is rewritten (to drop name pins, say):
+// the launch spec is the one thing an older installer must not downgrade (re-review F5).
+const pinnedNewer = (() => {
+  const p = existingTopEntry && Array.isArray(existingTopEntry.args) && existingTopEntry.args.find((a) => typeof a === 'string' && a.startsWith('@sym-bot/mesh-channel@'));
+  return p && PKG_VERSION && versionLess(PKG_VERSION, p.slice('@sym-bot/mesh-channel@'.length));
+})();
 const entry = {
-  ...launchSpec(serverJsPath),
+  ...(pinnedNewer ? { command: existingTopEntry.command, args: existingTopEntry.args } : launchSpec(serverJsPath)),
   env: {
     ...(noPin ? {} : { SYM_NODE_NAME: topNodeName }),
     // Explicitly blank the relay vars so the MCP doesn't inherit them
@@ -952,6 +968,11 @@ const healedLines = healedProjects.length
   : '';
 
 const nodeNameSuffix = topEntryIsStale ? ' (preserved from stale entry)' : '';
+
+if (keepTop) {
+  console.log(`\n✓ The user-scope entry in ~/.claude.json is current and was left as is.${healedLines || '\n'}`);
+  process.exit(0);
+}
 
 console.log(`
 ✓ sym-mesh-channel configured globally in ~/.claude.json
