@@ -247,7 +247,7 @@ function auditLine(surface, reason, peer, excerpt, id) {
  * that reason, so one bad message costs one line and never the batch the drain has already taken.
  * `audit` is [reason, excerpt] when the operator's log should record the decision.
  */
-function receiveLine(m, { policy, selfName, now = Date.now() }) {
+function receiveLine(m, { policy, selfName, now = Date.now(), pushed = false }) {
   try {
     // Under this node's own name: an echo of its own words, or a node using its name. Counted, never
     // silently dropped, since the name alone cannot tell the two apart.
@@ -260,7 +260,9 @@ function receiveLine(m, { policy, selfName, now = Date.now() }) {
     const age = Math.round((now - m.receivedAt) / 1000);
     const focus = String(m.categories?.focus?.text || m.content || '');
     const dirTag = m.directed ? ' →you' : '';
-    const memTag = m.directed && m.remixed === false ? ' ·not-stored' : '';
+    // The same delivery already went out as a <channel> push under this id. Said, not hidden: the
+    // server cannot tell whether that push reached the session, so the line still appears.
+    const memTag = (m.directed && m.remixed === false ? ' ·not-stored' : '') + (pushed ? ' ·pushed' : '');
     const payTag = payloadTag(p);
     // The push's classifier-risk quarantine, over the text the push scans, so one delivery gets one
     // verdict on both surfaces; this line enters the context the same way a push does.
@@ -310,14 +312,19 @@ function recallLine(r, { policy, selfName }) {
  * @param {string[]} r.withheld     withheldLine() for each delivery withheld on its content
  * @param {Map<string,number>} r.notAllowed  sender → count, for deliveries kept out by SYM_ALLOWED_PEERS
  * @param {number} [r.ownName]      deliveries under this node's own name
+ * @param {string[]} [r.alreadyRead] ids of deliveries the session already read in full with sym_fetch
  * @param {number} r.remaining      deliveries past this batch
  * @param {boolean} r.peek
  */
-function receiveReport({ shown, withheld, notAllowed, ownName = 0, remaining, peek }) {
+function receiveReport({ shown, withheld, notAllowed, ownName = 0, alreadyRead = [], remaining, peek }) {
   const kept = [...notAllowed.values()].reduce((a, b) => a + b, 0);
   const more = remaining > 0 ? ` (+${remaining} more — call sym_receive again)` : '';
   const peekTag = peek ? ' (peek — not drained)' : '';
+  const readLine = alreadyRead.length
+    ? `Already read with sym_fetch, not repeated: ${alreadyRead.length} (${alreadyRead.join(', ')}).`
+    : '';
   if (!shown.length && !withheld.length && !kept && !ownName) {
+    if (readLine) return `Caught up — nothing unread${peekTag}${more}. ${readLine}`;
     return remaining > 0
       ? `No delivery in this batch${peekTag}${more}.`
       : 'Caught up — nothing new delivered since your last sym_receive.';
@@ -331,6 +338,7 @@ function receiveReport({ shown, withheld, notAllowed, ownName = 0, remaining, pe
     parts.push(`Not shown, sender outside SYM_ALLOWED_PEERS: ${kept} (${who}).`);
   }
   if (ownName) parts.push(`Not shown, sent under this node's own name: ${ownName} (an echo of this node's own words, or another node using its name).`);
+  if (readLine) parts.push(readLine);
   if (shown.length) parts.push('Use sym_fetch <id> for full content; reply via sym_send to=<peer>.');
   return parts.join('\n\n');
 }

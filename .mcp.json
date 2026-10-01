@@ -9,7 +9,8 @@
       "env": {
         "SYM_RELAY_URL": "${user_config.relay_url}",
         "SYM_RELAY_TOKEN": "${user_config.relay_token}",
-        "SYM_ALLOWED_PEERS": "${user_config.allowed_peers}"
+        "SYM_ALLOWED_PEERS": "${user_config.allowed_peers}",
+        "SYM_CHANNEL_HOST": "plugin"
       }
     }
   }
