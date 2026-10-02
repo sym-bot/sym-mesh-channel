@@ -97,6 +97,9 @@ function emitOutcome(entry, metrics, directed) {
     if (m.has('remix-rejected')) return { outcome: 'remix-refused' };
     return { outcome: 'already-in-memory' };
   }
+  // Spec draft #35's shapes: a refusal says so, and a broadcast duplicate names its key.
+  if (entry.refused) return { outcome: 'remix-refused', reason: entry.refused };
+  if (entry.duplicate === true && !entry.cmb && !directed) return { outcome: 'already-in-memory', key: entry.key || null };
   const key = entry.key || entry.cmb?.metadata?.key || null;
   const assertionId = entry.cmb?.metadata?.assertionId || null;
   const d = entry.delivery;

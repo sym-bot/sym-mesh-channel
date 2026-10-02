@@ -38,22 +38,19 @@ function normal(code) {
 
 function createPushStatement({ now = Date.now, rand } = {}) {
   let state = 'unconfirmed';
-  let code = null;
   let sentAt = null;
   let stateAt = null;
-  let checksSent = 0;
   const codesIssued = new Set();   // every code this process issued: an older check, answered late, still proves receipt
 
   return {
     /** Issue a fresh code for a check about to be sent. */
     issue() {
-      code = newCode(rand);
+      const code = newCode(rand);
       codesIssued.add(normal(code));
       return code;
     },
     /** The check went out (its notification was written). */
-    sent() { sentAt = now(); checksSent++; },
-    get code() { return code; },
+    sent() { sentAt = now(); },
 
     /**
      * The session's answer. Returns { ok, state, reason? }.
@@ -76,7 +73,7 @@ function createPushStatement({ now = Date.now, rand } = {}) {
     /** True only when the session confirmed, first-hand, that pushes reach it. */
     confirmed() { return state === 'confirmed'; },
     state() { return state; },
-    facts() { return { state, stateAt, sentAt, checksSent }; },
+    facts() { return { state, stateAt, sentAt }; },
   };
 }
 

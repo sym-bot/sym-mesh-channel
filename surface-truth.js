@@ -17,6 +17,8 @@
 
 /** Fields whose text is the message's own metadata, or already on the header. */
 const ON_HEADER = new Set(['focus', 'mood']);
+/** The only fields a record signs (design D6): a key outside CAT7 is never named, not even as a name. */
+const CAT7_BODY = ['issue', 'intent', 'motivation', 'commitment', 'perspective'];
 /** Default/filler values that carry no substance worth flagging. */
 const FILLER = new Set(['', 'none', 'directive', 'neutral']);
 
@@ -29,8 +31,9 @@ function hiddenFieldsTag(categories) {
   if (!categories || typeof categories !== 'object') return '';
   const parts = [];
   let bytes = 0;
-  for (const [k, v] of Object.entries(categories)) {
-    if (ON_HEADER.has(k)) continue;
+  for (const k of CAT7_BODY) {
+    if (!Object.prototype.hasOwnProperty.call(categories, k)) continue;
+    const v = categories[k];
     const raw = v && typeof v === 'object' && 'text' in v ? v.text : v;
     const s = String(raw ?? '').trim();
     if (FILLER.has(s.toLowerCase())) continue;

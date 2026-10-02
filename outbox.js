@@ -7,9 +7,13 @@
 // therefore says HELD, never "delivered", and a queue that is not flushing is reported loudly.
 //
 // KEYED BY NODE ID (design D6). A name is a label the sender chose, so it is never a route: the
-// queue holds only for a nodeId this node has had a PROVEN session with. sym 0.14 raises
-// `peer-joined` only for a confirmed §5.2 session, and that is where a nodeId becomes known here.
-// An unknown nodeId is refused rather than held, so a typo creates no state.
+// queue holds only for a nodeId this node has had a Core Secure session with: the node host records a
+// nodeId here from `peer-joined` only when `peers()` shows that nodeId's session as a proven Core
+// Secure one (sym 0.14 at 341dafb raises peer-joined for a Legacy Import session too). An unknown
+// nodeId is refused rather than held, so a typo creates no state.
+//
+// A held item the SDK refuses to send when the peer returns is marked STUCK with the reason, and is
+// reported as stuck, never as waiting (design D7). Both files are 0600: they hold what this agent said.
 //
 // It lives in the node's own directory (sym 0.14: `nodes/by-id/<nodeId>/`), which sym's migration
 // moved there with the rest of a 0.13 node's files. A 0.10 item addressed by NAME is converted
@@ -27,11 +31,13 @@ function readJson(file, fallback) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; }
 }
 
-// Atomic: a torn write here loses mail that the sender has already promised to hold.
+// Atomic and private: a torn write here loses mail the sender has already promised to hold, and the
+// queue holds what this agent said (review L9).
 function writeJsonAtomic(file, value) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(value, null, 2));
+  fs.writeFileSync(tmp, JSON.stringify(value, null, 2), { mode: 0o600 });
+  try { fs.chmodSync(tmp, 0o600); } catch { /* best effort on platforms without modes */ }
   fs.renameSync(tmp, file);
 }
 
@@ -147,8 +153,9 @@ function createOutbox(dir) {
     for (const i of d.items) {
       if (i.to) {
         const k = i.to;
-        byPeer[k] = byPeer[k] || { count: 0, label: i.label || '' };
+        byPeer[k] = byPeer[k] || { count: 0, label: i.label || '', stuck: 0, stuckReason: null };
         byPeer[k].count++;
+        if (i.stuck) { byPeer[k].stuck++; byPeer[k].stuckReason = i.stuck.reason; }
       } else {
         byLabelOnly[i.label] = (byLabelOnly[i.label] || 0) + 1;
       }
@@ -156,6 +163,24 @@ function createOutbox(dir) {
       if (age !== null && (oldestDays === null || age > oldestDays)) oldestDays = age;
     }
     return { total: d.items.length, byPeer, byLabelOnly, oldestDays, bytes: Buffer.byteLength(JSON.stringify(d.items)) };
+  }
+
+  /** Mark an item the SDK refused to send: it stays held, and is reported as stuck with the reason. */
+  function markStuck(seq, reason) {
+    const d = load();
+    const it = d.items.find((i) => i.seq === seq);
+    if (!it) return false;
+    it.stuck = { reason: String(reason || 'refused').slice(0, 300), at: Date.now() };
+    writeJsonAtomic(outboxFile, d);
+    return true;
+  }
+  function clearStuck(seq) {
+    const d = load();
+    const it = d.items.find((i) => i.seq === seq);
+    if (!it || !it.stuck) return false;
+    delete it.stuck;
+    writeJsonAtomic(outboxFile, d);
+    return true;
   }
 
   /** Remove items once they have actually been sent — never on dispatch alone. */
@@ -167,7 +192,7 @@ function createOutbox(dir) {
     return d.items.length;
   }
 
-  return { hold, pendingFor, heldForLabel, summary, drop, rememberPeer, isKnown, knownLabel, outboxFile, rosterFile };
+  return { hold, pendingFor, heldForLabel, summary, drop, markStuck, clearStuck, rememberPeer, isKnown, knownLabel, outboxFile, rosterFile };
 }
 
 module.exports = { createOutbox, ageDays, MAX_ITEMS, MAX_BYTES };

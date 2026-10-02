@@ -1,31 +1,51 @@
 'use strict';
 
 /**
- * node-host.js — NODE MODE: this session is the agent, and the agent is its own SymNode (design §2.5).
+ * node-host.js — NODE MODE: this session is the agent, and the agent is its own SymNode.
  *
- * Everything here goes through sym 0.14's public host API (design D1): the constructor with
- * `nodeId` / `create`, `remember`, `recall`, `peers`, `status`, `inbox` / `inboxGet` / `inboxAck` /
- * `inboxStatus`, `inviteURL` / `acceptInvite`, `awaitRelayOutcome`, and the events `verified-record`,
- * `cmb-accepted`, `message`, `mood-delivered`, `peer-joined`, `metric`, `relay-auth-refused` and
- * `identity-collision`. No underscore field, no frame handler, no daemon IPC.
+ * Only sym 0.14's public host API: the constructor with `nodeId` / `create`, `remember`, `recall`,
+ * `peers`, `status`, `canRemix`, `inbox` / `inboxGet` / `inboxAck` / `inboxStatus`, `inviteURL` /
+ * `acceptInvite`, `awaitRelayOutcome`, the accessors this round adds when present (`publicKey`,
+ * `keyBindings()`, `remix`), and the events `verified-record`, `cmb-accepted`, `message`,
+ * `mood-delivered`, `legacy-record`, `peer-joined`, `metric`, `relay-auth-refused` and
+ * `identity-collision`.
  *
- * Deliveries (design D2) are the node's admission joined to its verification:
- *   - `verified-record` → the facts wait in the ledger by assertion id;
- *   - `cmb-accepted`    → the SDK has put the delivery in its durable inbox (its own listener runs
- *                         first and stamps `inboxId`); the facts are attached to that inbox id;
- *   - `message`         → a directed message record: kept in this host's own feed (mNNN);
- *   - `mood-delivered`  → §9.3: kept in the feed, attributed only when the join is exact.
- * Every one is announced as 'delivery' for the server to push.
+ * Deliveries (design D2, D4). Every one is decided by provenance.js from the delivery's own facts:
+ *   - `cmb-accepted`   → the SDK has put it in its durable inbox and stamped `inboxId` (its own
+ *                        listener runs first). Shown as verified only if the entry passes the gate.
+ *   - `message`        → a directed message record; its facts are gated the same way.
+ *   - `mood-delivered` → shown only with the record and the proven sender (design D4).
+ *   - `legacy-record`  → a Legacy Import record: listed by id, never shown.
+ * Messages, moods and legacy records are kept in this host's own feed (an `m` id), in memory.
  */
 
 const EventEmitter = require('events');
-const { createFactsLedger } = require('./delivery-facts.js');
 const { createOutbox } = require('./outbox.js');
+const { gate, entryFacts, createInterimJoin } = require('./provenance.js');
+const { createKeyBook } = require('./key-display.js');
 const cd = require('./channel-delivery.js');
 
 const FEED_MAX = 200;
+const MOOD_TEXT_MAX = 2000;
+const CAT7 = ['focus', 'issue', 'intent', 'motivation', 'commitment', 'perspective', 'mood'];
 
-/** The host's own feed, for deliveries the SDK inbox does not hold (messages, moods). In memory. */
+/**
+ * The signed parts of a record's categories (design D6; spec draft #34): the seven CAT7 categories,
+ * each as its text only. A non-CAT7 key, a mood's valence and arousal, and per-category metadata are
+ * not part of what was signed, so they are not carried into anything a line can show.
+ */
+function signedCategories(cats) {
+  const out = {};
+  if (!cats || typeof cats !== 'object') return out;
+  for (const f of CAT7) {
+    const v = cats[f];
+    const t = typeof v === 'string' ? v : (v && typeof v === 'object' && typeof v.text === 'string' ? v.text : null);
+    if (t !== null) out[f] = { text: t };
+  }
+  return out;
+}
+
+/** The host's own feed, for deliveries the SDK inbox does not hold. In memory. */
 function createLocalFeed(max = FEED_MAX) {
   const items = [];
   let seq = 0;
@@ -38,12 +58,9 @@ function createLocalFeed(max = FEED_MAX) {
       while (items.length > max) items.shift();
       return d;
     },
-    drain({ peek = false, limit = 50 } = {}) {
-      const fresh = items.filter((d) => d.seq > cursor);
-      const slice = fresh.slice(0, limit);
-      if (!peek && slice.length) cursor = slice[slice.length - 1].seq;
-      return { items: slice, remaining: fresh.length - slice.length };
-    },
+    peek(limit) { return items.filter((d) => d.seq > cursor).slice(0, limit); },
+    pending() { return items.filter((d) => d.seq > cursor).length; },
+    advanceTo(s) { if (s > cursor) cursor = s; },
     get(id) { return items.find((d) => d.id === id) || null; },
     markRead(id) { const d = items.find((x) => x.id === id); if (d) d.acked = true; return !!d; },
     unread() { return items.filter((d) => d.seq > cursor && !d.acked).length; },
@@ -54,8 +71,7 @@ function createLocalFeed(max = FEED_MAX) {
 class NodeHost extends EventEmitter {
   /**
    * @param {object} o
-   * @param {function(object): object} o.build — builds the SymNode for { room, serviceType, relay,
-   *   relayToken, nodeId, create } (server.js owns the configuration)
+   * @param {function(object): object} o.build — builds the SymNode (server.js owns the configuration)
    * @param {function(string): string} o.nodeDir — sym's identity.nodeDirById
    * @param {function(string): void} [o.log]
    */
@@ -66,9 +82,10 @@ class NodeHost extends EventEmitter {
     this._nodeDir = nodeDir;
     this._log = log;
     this.node = null;
-    this.ledger = null;
     this.outbox = null;
     this.feed = createLocalFeed();
+    this.join = createInterimJoin();
+    this.keys = createKeyBook({ bindings: () => (this.node && typeof this.node.keyBindings === 'function' ? this.node.keyBindings() : []) });
     this._cfg = null;
   }
 
@@ -77,58 +94,68 @@ class NodeHost extends EventEmitter {
     const node = this._build(cfg);
     this._cfg = { ...cfg, nodeId: node.nodeId, create: false };
     this.node = node;
-    const dir = this._nodeDir(node.nodeId);
-    let seq = 0;
-    try { seq = node.inboxStatus().seq; } catch { /* an engine without an inbox status */ }
-    this.ledger = createFactsLedger({ dir, inboxSeq: seq });
-    this.outbox = createOutbox(dir);
+    this.outbox = createOutbox(this._nodeDir(node.nodeId));
     this._wire(node);
+    const own = this.ownKey();
+    if (own) this.keys.learn({ key: own, nodeId: node.nodeId, label: node.name });
     return node;
   }
 
   async start() { await this.node.start(); }
-
-  async stop() {
-    if (this.ledger) this.ledger.flush();
-    if (this.node) { try { await this.node.stop(); } catch { /* exiting */ } }
-  }
+  async stop() { if (this.node) { try { await this.node.stop(); } catch { /* exiting */ } } }
 
   get nodeId() { return this.node ? this.node.nodeId : null; }
   get name() { return this.node ? this.node.name : null; }
 
+  /** This node's own public key, from the SDK's accessor (design §6 item 4), or null where it has none. */
+  ownKey() {
+    const n = this.node;
+    if (!n) return null;
+    const k = typeof n.publicKey === 'function' ? n.publicKey() : n.publicKey;
+    return typeof k === 'string' && k ? k : null;
+  }
+
+  _learn(facts) {
+    if (!facts) return;
+    if (facts.signer) this.keys.learn({ key: facts.signer.key, nodeId: facts.signer.nodeId, label: facts.signer.label });
+    if (facts.deliverer) this.keys.learn({ key: facts.deliverer.key, nodeId: facts.deliverer.nodeId, label: facts.deliverer.label });
+  }
+
+  /** A delivery as every surface reads it, from an entry and what the gate decided. */
+  _delivery(base, verdict) {
+    const facts = verdict.facts || null;
+    this._learn(facts);
+    return { ...base, facts, withheld: facts ? null : verdict.withheld, directed: facts ? facts.audience === 'directed' : !!base.directed };
+  }
+
   _wire(node) {
-    node.on('verified-record', (e) => { try { this.ledger.noteVerified(e); } catch { /* a bad event must not stop verification */ } });
+    node.on('verified-record', (e) => { try { this.join.noteVerified(e); } catch { /* a bad event must not stop verification */ } });
 
     node.on('cmb-accepted', (entry) => {
       try {
-        const aid = entry && entry.cmb && entry.cmb.metadata ? entry.cmb.metadata.assertionId : null;
-        const facts = this.ledger.take(aid);
-        let d;
-        if (entry && entry.inboxId) {
-          this.ledger.recordInbox(entry.inboxId, facts, { profile: entry.profile });
-          const item = node.inboxGet(entry.inboxId);
-          d = item ? this._fromInbox(item) : null;
-        }
-        if (!d) {
-          // An engine that did not stamp an inbox id: the delivery is kept in this host's feed.
-          d = this.feed.add({
-            kind: 'cmb', facts, withheld: facts ? null : (entry && entry.profile === 'legacy-import' ? 'legacy-import' : 'unverified'),
-            content: entry && entry.content, categories: entry && entry.cmb && entry.cmb.categories, payload: entry && entry.cmb ? entry.cmb.payload : null,
-            key: (facts && facts.key) || (entry && entry.key) || null, directed: facts ? facts.audience === 'directed' : !!(entry && entry.directed), remixed: entry && entry.remixed,
-          });
-        }
-        this.emit('delivery', d);
+        if (!entry || !entry.inboxId) { this._log('a delivery came without an inbox id; it cannot be listed'); return; }
+        const own = entryFacts(entry);
+        // sym 0.14 at 341dafb returns inbox() items with no facts to decide again from, so the verdict
+        // made now, against this entry, is kept for this process. (With design §6 item 1 the item
+        // itself carries them, and nothing is kept.)
+        if (!own) this.join.recordLive(entry.inboxId, gate(entry, this.join.take(entry)));
+        const item = node.inboxGet(entry.inboxId);
+        if (!item) return;
+        this.emit('delivery', this._fromInbox(item));
       } catch (err) { this._log(`delivery bookkeeping failed: ${err && err.message}`); }
     });
 
     node.on('message', (fromName, text, meta) => {
       try {
-        const facts = this.ledger.take(meta && meta.assertionId);
-        const d = this.feed.add({
-          kind: 'message', facts, withheld: facts ? null : 'unverified',
-          content: typeof text === 'string' ? text : '', categories: null, payload: null,
-          key: (meta && meta.key) || (facts && facts.key) || null, directed: true, remixed: false,
-        });
+        const m = meta || {};
+        // A message record's facts: on the event (this round), or the interim join, gated against what
+        // the event itself says of its author and the session that delivered it.
+        const pseudo = {
+          verified: true, profile: 'core-secure', assertionId: m.assertionId, verification: m.verification, session: m.session, key: m.key,
+          author: { nodeId: m.from, key: m.authorKey, via: { nodeId: m.via } },
+        };
+        const facts = entryFacts(pseudo) || this.join.take(pseudo);
+        const d = this.feed.add(this._delivery({ kind: 'message', text: typeof text === 'string' ? text : '', categories: {}, payload: null, key: m.key || (facts && facts.key) || null, directed: true, remixed: false }, gate(pseudo, facts)));
         this.emit('delivery', d);
       } catch (err) { this._log(`message bookkeeping failed: ${err && err.message}`); }
     });
@@ -136,24 +163,25 @@ class NodeHost extends EventEmitter {
     node.on('mood-delivered', (m) => {
       try {
         if (!m || typeof m.mood !== 'string' || !m.mood) return;
-        const fromRejected = typeof m.context === 'string' && /rejected/i.test(m.context);
-        const facts = fromRejected ? this.ledger.moodSource(m.from, m.mood) : null;
-        const d = this.feed.add({
-          kind: 'mood', facts, withheld: null,
-          mood: { text: m.mood, valence: m.valence, arousal: m.arousal },
-          moodFrom: typeof m.from === 'string' ? m.from : '',
-          content: m.mood, categories: { mood: { text: m.mood } }, payload: null,
-          key: facts ? facts.key : null, directed: false, remixed: false,
-        });
+        const d = this.feed.add(this._delivery({ kind: 'mood', text: m.mood.slice(0, MOOD_TEXT_MAX), categories: {}, payload: null, key: null, directed: false, remixed: false }, this._moodVerdict(m)));
+        if (d.facts) d.key = d.facts.key;
         this.emit('delivery', d);
       } catch (err) { this._log(`mood bookkeeping failed: ${err && err.message}`); }
     });
 
-    // A nodeId becomes known for the outbox only through a proven session: sym 0.14 raises
-    // peer-joined for a confirmed §5.2 session and for nothing else.
+    node.on('legacy-record', () => {
+      try { this.emit('delivery', this.feed.add({ kind: 'cmb', facts: null, withheld: 'legacy-import', categories: {}, payload: null, key: null, directed: false })); }
+      catch (err) { this._log(`legacy bookkeeping failed: ${err && err.message}`); }
+    });
+
+    // A nodeId becomes known for the outbox only through a Core Secure session (review L4): sym 0.14 at
+    // 341dafb raises peer-joined for a Legacy Import session too, so the session is checked in peers().
     node.on('peer-joined', (p) => {
       try {
         if (!p || !p.id) return;
+        const peer = node.peers().find((x) => x.peerId === p.id);
+        const proven = !!peer && peer.profile === 'core-secure' && Array.isArray(peer.sessions) && peer.sessions.length > 0 && peer.sessions.every((s) => !s.legacy);
+        if (!proven) return;
         this.outbox.rememberPeer(p.id, p.name);
         this._flushOutbox(p.id).catch(() => {});
       } catch { /* bookkeeping never breaks peer handling */ }
@@ -163,28 +191,58 @@ class NodeHost extends EventEmitter {
     node.on('identity-collision', (info) => this.emit('identity-collision', info));
   }
 
+  /**
+   * A mood is shown only with the record and the proven sender (design D4, review M1): the event names
+   * the record (key, assertion), says it verified, names the author and the session that delivered it,
+   * and the record's verified facts agree with all of it.
+   */
+  _moodVerdict(m) {
+    const by = m.deliveredBy && typeof m.deliveredBy === 'object' ? m.deliveredBy : null;
+    if (m.verified !== true || typeof m.key !== 'string' || typeof m.assertionId !== 'string' || typeof m.authorNodeId !== 'string' || !by || typeof by.nodeId !== 'string') {
+      return { withheld: 'mood-unattributed' };
+    }
+    const facts = this.join.peek(m.assertionId);
+    if (!facts) return { withheld: 'mood-unattributed' };
+    const v = gate({ verified: true, profile: 'core-secure', author: { nodeId: m.authorNodeId, via: { nodeId: by.nodeId } } }, facts);
+    if (v.facts && v.facts.key !== m.key) return { withheld: 'facts-mismatch' };
+    return v;
+  }
+
   // ── The delivery feed ──────────────────────────────────────
 
   _fromInbox(item) {
-    const k = this.ledger.forInbox(item);
-    const facts = k.facts || null;
-    return {
+    // The item's own facts when the SDK stamps them (design §6 item 1); otherwise what this process
+    // decided when the delivery arrived; otherwise nothing, and it is not shown as verified.
+    const own = entryFacts(item);
+    const verdict = own ? gate(item, own) : (this.join.live(item.id) || gate(item, null));
+    return this._delivery({
       id: item.id, kind: 'cmb', seq: item.seq, receivedAt: item.receivedAt,
-      facts, withheld: facts ? null : k.withheld,
-      content: item.content, categories: item.categories, payload: item.payload,
-      key: (facts && facts.key) || item.key || null,
-      directed: facts ? facts.audience === 'directed' : !!item.directed,
-      remixed: item.remixed, acked: item.acked === true,
-    };
+      categories: signedCategories(item.categories), payload: item.payload ?? null,
+      key: item.key || null, directed: !!item.directed, remixed: item.remixed, acked: item.acked === true,
+    }, verdict);
   }
 
-  /** Drain the SDK inbox and this host's feed. Every item comes back; the caller accounts for each. */
+  /**
+   * Drain the SDK inbox and this host's feed, oldest first, at most `limit` in all (review L10). Each
+   * source is peeked, the batch is chosen, and only then is each source's cursor moved past what the
+   * batch took from it.
+   */
   drain({ peek = false, limit = 50 } = {}) {
-    const r = this.node.inbox({ peek, limit });
-    const a = r.messages.map((m) => this._fromInbox(m));
-    const b = this.feed.drain({ peek, limit });
-    const items = [...a, ...b.items].sort((x, y) => (x.receivedAt || 0) - (y.receivedAt || 0));
-    return { items, remaining: (r.remaining || 0) + b.remaining };
+    const lim = Math.max(1, Math.min(Number.isInteger(limit) ? limit : 50, 500));
+    const a = this.node.inbox({ peek: true, limit: lim });
+    const fromInbox = a.messages.map((m) => this._fromInbox(m));
+    const feedPending = this.feed.pending();
+    const fromFeed = this.feed.peek(lim);
+    const batch = [...fromInbox, ...fromFeed].sort((x, y) => (x.receivedAt || 0) - (y.receivedAt || 0)).slice(0, lim);
+    const tookInbox = batch.filter((d) => !d.local);
+    const tookFeed = batch.filter((d) => d.local);
+    if (!peek) {
+      // inbox() drains oldest first, the same items the peek listed, up to this many unread ones.
+      if (tookInbox.length) this.node.inbox({ limit: Math.max(1, tookInbox.filter((d) => !d.acked).length) });
+      if (tookFeed.length) this.feed.advanceTo(tookFeed[tookFeed.length - 1].seq);
+    }
+    const remaining = (a.remaining || 0) + (fromInbox.length - tookInbox.length) + (feedPending - tookFeed.length);
+    return { items: batch, remaining: Math.max(0, remaining) };
   }
 
   get(id) {
@@ -232,16 +290,23 @@ class NodeHost extends EventEmitter {
 
   // ── Emitting ───────────────────────────────────────────────
 
+  /** Whether this SDK still gates a cited record with §15.7 (before spec draft #35, which adds `remix()`). */
+  remixGated() { return !!this.node && typeof this.node.remix !== 'function'; }
+
   /**
-   * One remember(), and the node's own account of it (channel-delivery.emitOutcome). Not `emit`: that is EventEmitter's. A directed send
-   * to a nodeId with no session is held when this node has had a proven session with it.
-   * @returns {object} an outcome: { outcome, key?, assertionId?, dispatched?, reason?, held? }
+   * One remember(), and the node's own account of it (channel-delivery.emitOutcome). Not `emit`: that
+   * is EventEmitter's. A directed send to a nodeId with no session is held when this node has had a
+   * Core Secure session with it — unless this SDK would refuse to send it at all (design D7).
    */
   emitRecord({ categories, to = null, parents = [], payload }) {
     const node = this.node;
     if (to) {
       const connected = node.peers().some((p) => p.peerId === to);
-      if (!connected) return this._holdOrRefuse(to, { categories, parents, payload }, 'no-session');
+      if (!connected) {
+        // The guard is checked at hold time: a held reply the SDK will refuse would never flush.
+        if (parents.length && this.remixGated() && typeof node.canRemix === 'function' && !node.canRemix()) return { outcome: 'remix-refused' };
+        return this._holdOrRefuse(to, { categories, parents, payload }, 'no-session');
+      }
     }
     const metrics = [];
     const onMetric = (m) => { metrics.push(m && m.type); };
@@ -271,26 +336,39 @@ class NodeHost extends EventEmitter {
     return { outcome: 'held', to, seq: h.seq, queued: h.queued, held: true, label: this.outbox.knownLabel(to), why };
   }
 
-  /** Flush what is held for a nodeId whose session has just been confirmed. In order; never past a failure. */
+  /**
+   * Flush what is held for a nodeId whose Core Secure session has just been confirmed. In order; never
+   * past a failure. An item the SDK refuses to send is marked stuck, with its reason, and sym_peers
+   * reports it as stuck rather than as waiting (design D7, review r12).
+   */
   async _flushOutbox(nodeId) {
-    const pending = this.outbox.pendingFor(nodeId);
+    const pending = this.outbox.pendingFor(nodeId).filter((i) => !i.stuck);
     if (!pending.length) return;
     const sent = [];
     for (const item of pending) {
       let out;
       try { out = this.emitRecord({ categories: item.categories, to: nodeId, parents: item.parents || [], payload: item.payload }); }
-      catch (e) { this._log(`outbox flush failed for #${item.seq}: ${e && e.message}`); break; }
-      // emitRecord() holds an undelivered send again; the copy it just made is dropped with the original.
-      if (out.outcome !== 'sent') {
-        if (out.held && out.held.seq) this.outbox.drop([out.held.seq]);
-        break;
-      }
-      sent.push(item.seq);
+      catch (e) { this.outbox.markStuck(item.seq, `the SDK refused it: ${String(e && e.message).slice(0, 160)}`); break; }
+      if (out.outcome === 'sent') { sent.push(item.seq); continue; }
+      // An undelivered send held itself again; that copy goes, and the original stays held.
+      if (out.held && out.held.seq) this.outbox.drop([out.held.seq]);
+      if (out.outcome === 'remix-refused') this.outbox.markStuck(item.seq, 'this SDK refuses a record that cites a peer\'s (MMP §15.7, before spec draft #35) until this node publishes an observation of its own');
+      break;
     }
     if (sent.length) {
       const left = this.outbox.drop(sent);
       this._log(`flushed ${sent.length} held CMB(s) to ${nodeId}, ${left} still held`);
       this.emit('outbox-flushed', { nodeId, sent: sent.length, left });
+    }
+  }
+
+  /** Try again what is stuck for a peer with a session now (after this node published something new). */
+  retryStuck() {
+    for (const p of this.node.peers()) {
+      const stuck = this.outbox.pendingFor(p.peerId).filter((i) => i.stuck);
+      if (!stuck.length) continue;
+      for (const i of stuck) this.outbox.clearStuck(i.seq);
+      this._flushOutbox(p.peerId).catch(() => {});
     }
   }
 
@@ -303,10 +381,7 @@ class NodeHost extends EventEmitter {
 
   // ── Rooms ──────────────────────────────────────────────────
 
-  /**
-   * Move this node to another room: stop it, build it again with the same identity, start it. A
-   * failure puts the previous room back. Returns { ok, error?, restored? }.
-   */
+  /** Move this node to another room with the same identity. A failure puts the previous room back. */
   async rebuild(next) {
     const prev = this._cfg;
     const old = this.node;
@@ -315,7 +390,6 @@ class NodeHost extends EventEmitter {
       let n;
       try { n = this._build({ ...cfg, nodeId: prev.nodeId, create: false }); }
       catch (e) {
-        // Our own stopped node can hold the lock for a moment: wait once, then retry.
         if (!e || e.code !== 'EIDENTITYLOCK') throw e;
         await new Promise((r) => setTimeout(r, 500));
         n = this._build({ ...cfg, nodeId: prev.nodeId, create: false });
@@ -325,19 +399,13 @@ class NodeHost extends EventEmitter {
       return n;
     };
     try {
-      const n = await attempt(next);
-      this.node = n;
+      this.node = await attempt(next);
       this._cfg = { ...next, nodeId: prev.nodeId, create: false };
       return { ok: true };
     } catch (e) {
       const error = e && e.message ? e.message : String(e);
-      try {
-        this.node = await attempt(prev);
-        return { ok: false, error, restored: true };
-      } catch (e2) {
-        this.node = null;
-        return { ok: false, error, restored: false, restoreError: e2 && e2.message ? e2.message : String(e2) };
-      }
+      try { this.node = await attempt(prev); return { ok: false, error, restored: true }; }
+      catch (e2) { this.node = null; return { ok: false, error, restored: false, restoreError: e2 && e2.message ? e2.message : String(e2) }; }
     }
   }
 
@@ -346,4 +414,4 @@ class NodeHost extends EventEmitter {
   awaitRelayOutcome(ms) { return typeof this.node.awaitRelayOutcome === 'function' ? this.node.awaitRelayOutcome(ms) : Promise.resolve(null); }
 }
 
-module.exports = { NodeHost, createLocalFeed };
+module.exports = { NodeHost, createLocalFeed, signedCategories };

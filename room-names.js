@@ -9,8 +9,8 @@
  * sym 0.14's (design D9): they carry the issuer's nodeId and key, which an acceptor pins.
  */
 
-const crypto = require('crypto');
 const sdk = require('@sym-bot/sym');
+const { fingerprint } = require('./key-display.js');
 
 const { isValidRoom, roomServiceType, serviceTypeToRoom, KEBAB_CASE_RE } = sdk.rooms;
 
@@ -51,10 +51,9 @@ function parseInviteURL(url) {
   return { ...p, serviceType: roomServiceType(p.room) };
 }
 
-/** A short fingerprint of an identity key, for lines a person compares. */
+/** An identity key's fingerprint, the same one every line identifies a signer by (key-display.js). */
 function keyFingerprint(key) {
-  if (typeof key !== 'string' || !key) return '?';
-  return crypto.createHash('sha256').update(key).digest('hex').slice(0, 16);
+  return fingerprint(key) || '?';
 }
 
 module.exports = { isCanonicalRoom, roomRefusalReason, parseInviteURL, keyFingerprint, roomServiceType, serviceTypeToRoom };
