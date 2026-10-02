@@ -30,4 +30,18 @@ assert.match(readme, /Peer messages are \*\*external input\*\*/);
 assert.doesNotMatch(readme, /best tool|best way/i);
 assert.doesNotMatch(readme, /Claude Code sessions talking to each other in real time\./);
 
+// The product name is never "xMesh" (user, 2026-10-02: "don't use any xMesh, use xmesh in code, and XMesh in
+// sentence and XMESH for brand or product name"): not in a doc, nor in the tool descriptions the server gives
+// agents. Lowercase xmesh is the code spelling (package, CLI, room names) and is not checked by text.
+const root = path.join(__dirname, '..');
+const named = [
+  ...fs.readdirSync(root).filter((f) => f.endsWith('.md')),
+  ...fs.readdirSync(path.join(root, 'docs')).filter((f) => f.endsWith('.md')).map((f) => path.join('docs', f)),
+  'server.js', 'package.json', '.claude-plugin/plugin.json',
+].filter((f) => fs.existsSync(path.join(root, f)));
+assert.ok(named.length >= 8, `scanned ${named.length} files`);
+for (const f of named) {
+  assert.doesNotMatch(fs.readFileSync(path.join(root, f), 'utf8'), /\bxMesh\b/, `${f} spells the product name xMesh`);
+}
+
 console.log('README positioning contract: ok');

@@ -395,7 +395,7 @@ non-canonical name is now told which room it actually resolves to.
   copies of the room grammar (server and `bin/install.js` — the persistence path) accept a
   double hyphen as a segment separator, in lockstep with sym 0.12.3; the validator's error
   message and tool descriptions now describe the grammar they enforce. A user can invite,
-  join AND persist an xMesh tenant-scoped room.
+  join AND persist an XMesh tenant-scoped room.
 
 
 ## 0.7.2 (2026-08-10)
