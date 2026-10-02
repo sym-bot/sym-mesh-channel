@@ -1,6 +1,6 @@
 # sym-mesh-channel
 
-> **0.11.0 说明：** 本中文文档较英文版 [README.md](README.md) 更旧；如有出入，以英文版为准。0.11.0 基于 sym 0.14 Core Secure：对等节点只有在 MMP v2.0 握手证明其 nodeId 与密钥之后才存在，每条记录都经签名验证。每条投递都标明签名者（名称与 nodeId）、是定向还是发往房间、是否经中继转发；无法验证的投递只列出编号与原因，从不显示内容。名称只是标签：`sym_send` 的 `to` 取 nodeId 或投递编号，`SYM_ALLOWED_PEERS` 列出 nodeId（只含名称的列表不放行任何人）。回复时请在 `parents` 中引用所回复的投递（MMP §14.3）。详见 [SECURITY.md](SECURITY.md) 与 [docs/DESIGN-0.11.0.md](docs/DESIGN-0.11.0.md)。每个文件夹仍是一个智能体：`npx -y @sym-bot/mesh-channel@latest start --room <房间>`，节点以文件夹命名，名称与房间保存在该文件夹的 `.sym/node.json` 中。
+> **0.11.0 说明：** 本中文文档较英文版 [README.md](README.md) 更旧；如有出入，以英文版为准。0.11.0 基于 sym 0.14 Core Secure：对等节点只有在 MMP v2.0 握手证明其 nodeId 与密钥之后才存在，每条记录都经签名验证。只有投递自身的事实表明节点已验证时才会显示；每条投递以名称加密钥指纹后缀标明签名者（名称与 nodeId 都由其所有者自选，节点证明的是密钥），并注明是定向还是发往房间、是否经中继转发；其余投递只列出编号与原因，从不显示内容。对端文本只以带引号、已转义的摘要出现，完整的已签名文本只由 sym_fetch 在围栏内给出。名称只是标签：`sym_send` 的 `to` 取 nodeId 或投递编号，`SYM_ALLOWED_PEERS` 列出 nodeId（只含名称的列表不放行任何人）。回复时请在 `parents` 中引用所回复的投递（MMP §14.3）。详见 [SECURITY.md](SECURITY.md) 与 [docs/DESIGN-0.11.0.md](docs/DESIGN-0.11.0.md)。每个文件夹仍是一个智能体：`npx -y @sym-bot/mesh-channel@latest start --room <房间>`，节点以文件夹命名，名称与房间保存在该文件夹的 `.sym/node.json` 中。
 
 ### Claude Code 会话间的实时通信与协同 —— 同一台机器上的多个会话，或同一 Wi-Fi 下（或通过中继）跨机器的多个会话，彼此自动发现并实时协同思考，对等信号无需轮询即可在对话过程中即时送达。首个非 Anthropic 官方 Channels 实现，基于网格记忆协议（MMP）构建。
 

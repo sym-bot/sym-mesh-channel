@@ -23,15 +23,23 @@ signal reaches Claude's conversation context.
 **Trust on first proven use.** With no invite, anchor or grant, a peer you have never met is bound
 to the key its first session proves. Join with an invite from someone you trust to remove that risk.
 
-**What the channel adds (design D2, D6).**
+**What the channel adds (design D2, D3, D8).**
 
-- A delivery reaches the session only with the verification facts the node gave for it (signer
-  nodeId and key source, directed or room-bound, relayed or direct). A delivery without them — one
-  that arrived on a Legacy Import session, one received before this node ran Core Secure, or one with
-  no verification — is listed by id and reason and never shown, on every surface.
+- **Provenance travels with the delivery.** A delivery is shown as verified only when its own entry
+  says so: marked verified, on a Core Secure session, with facts whose author nodeId and key match the
+  entry's author and whose delivering session matches the one that delivered it. Anything else — a
+  Legacy Import record, an entry with no Core Secure provenance, facts that do not match — is listed
+  by id and reason and never shown, on every surface. The channel keeps no second store of facts.
+- **A signer is identified by its key, never by a truncated label or nodeId.** A label is chosen by
+  its sender, and so is a nodeId (a UUID v7 a node picks, not one derived from its key): anyone can
+  mint a nodeId whose last characters equal another node's. A line shows the signer's label and the
+  shortest suffix of its key fingerprint (SHA-256 of the public key) that is unique among the key
+  bindings this node knows, at least 8 hex characters. When two known keys use the same label, the
+  line says so ("alice (2 keys)") and shows the longer suffix that tells them apart; when one key is
+  seen under two nodeIds, it says that ("one key, 2 nodeIds"). `sym_fetch` shows the full nodeId and
+  the full fingerprint.
 - Names are labels. `to`, the allowlist, the own-record check and the outbox key on nodeIds; the
-  push rate counts per delivering session. A line prints the signer's label beside the last 8
-  characters of its nodeId, so two nodes that share a label are told apart.
+  push rate counts per proven sender.
 
 **Known limits (sym design §5).** `relay-auth` is not yet proven, so whoever holds a relay token can
 evict a node from that relay (it then re-handshakes, and the evicting party gets no session). There
@@ -44,14 +52,15 @@ before it enters cognitive state. SVAF computes per-field drift across
 7 semantic dimensions (CAT7: focus, issue, intent, motivation,
 commitment, perspective, mood) and operates in three regimes:
 
-- **Aligned** (drift < threshold): CMB is accepted and stored
-- **Guarded** (drift moderate): only the mood field is delivered (protocol guarantee R5)
-- **Rejected** (drift high): CMB is silently dropped
+- **A room-bound CMB** that SVAF admits (aligned or guarded) is stored and delivered. One it rejects
+  is neither stored nor delivered (§9.2.2); the node records the decision in its own decision log.
+  Its mood alone is still delivered (§9.3), and the channel shows that mood only when the SDK ties it
+  to the verified record and its proven sender.
+- **A directed CMB** (addressed to this node) is always delivered (§9.2.2); SVAF decides only whether
+  it is stored, and a line marks one that was not (`·not-stored`).
 
-This is analogous to a content-aware firewall: it doesn't just check
-who sent the signal — it evaluates whether the signal is semantically
-relevant to the receiver's current context. Low-relevance CMBs are
-gated out so Claude's context window doesn't drown.
+Low-relevance broadcasts are gated out so Claude's context window doesn't drown; a peer that
+addresses this node is always heard.
 
 SVAF field weights are configurable per node (`svafFieldWeights` in
 server.js). The default weights are tuned for engineering-domain
@@ -65,9 +74,13 @@ Claude Code sessions.
 - **No permission relay**: the `claude/channel/permission` capability is
   explicitly NOT declared. Mesh peers cannot approve or deny tool
   executions on this node.
-- **No arbitrary content injection**: incoming CMBs are formatted as
-  structured `[source] focus (mood)` text before being pushed to
-  Claude's context. Raw JSON is never injected.
+- **Peer text is data, never markup** (design D6): a push is one line of the channel's own markup
+  with a quoted, JSON-escaped excerpt of the signed focus (at most 100 characters), and the facts
+  travel as structured notification meta. `sym_receive` escapes the same way. The full signed text
+  (the seven CAT7 texts, and a payload as the signed application data it is) is shown only by
+  `sym_fetch`, between fence markers carrying a random nonce that peer text cannot close.
+- **Only signed parts are shown**: a category key outside CAT7, a mood's valence and arousal, and
+  the SDK's rendered content string are never shown; none is covered by the record's signature.
 - **Own-record filtering**: a record signed by this node's own nodeId and relayed back is counted,
   never pushed (prevents feedback loops).
 - **No peer text at instruction level**: the MCP instructions say who this node is and how the tools
@@ -146,13 +159,16 @@ With `SYM_INTERIOR_SOCKET` set, the channel is a node's mind (sym design D8, D9.
 and no store, and submits drafts the node checks (audience, size, rate, declared kinds, parents in
 its store) and signs as itself.
 
-- The capability is a bearer token for one mission. Prefer `SYM_INTERIOR_CAPABILITY_FILE` (mode
-  0600; the channel warns when it is readable by others) over `SYM_INTERIOR_CAPABILITY`, since a
-  process's environment is readable by its user.
-- The socket is the node's (0600). When the host's stdin closes, the channel ends the mind, which
-  revokes the capability.
-- sym 0.14's interior serves no read side, so in interior mode the mind cannot read the node's
-  deliveries; `sym_receive` says so.
+- The capability is a bearer token for one mission. Prefer `SYM_INTERIOR_CAPABILITY_FILE`: the file
+  must be a regular file owned by this user and readable by no one else, or it is refused. A
+  capability given in `SYM_INTERIOR_CAPABILITY` is removed from the server's environment once read,
+  so nothing the server starts inherits it.
+- The capability is bound to the one connection the channel opens. When that connection closes,
+  the mind is detached and every tool says so; the channel never presents the capability again.
+  When the host's stdin closes, the channel ends the mind, which revokes the capability.
+- Deliveries the node serves through its interior are gated exactly as in node mode: shown as
+  verified only when their own facts make them so. A node that does not serve its deliveries is
+  reported as such, never as an empty inbox.
 
 ## Token Handling
 

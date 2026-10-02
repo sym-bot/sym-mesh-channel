@@ -103,6 +103,8 @@ and its ledger are deleted. After a restart, an entry the SDK did not stamp with
   `[alice ⟨…7f3a91c2⟩ →you]`. The fingerprint is SHA-256 of the raw Ed25519 public key.
 - When a label is used by two or more known keys, the line says so and the suffix grows until it
   tells them apart: `[alice (2 keys) ⟨…7f3a91c2e0⟩ →you]`.
+- When one key is seen under more than one nodeId (one holder running several identities), the line
+  says that too: `[alice (one key, 2 nodeIds) ⟨…7f3a91c2⟩ →you]`.
 - No nodeId or label is ever truncated for identity. `sym_fetch` gives the full nodeId and the full
   fingerprint.
 - **The known bindings** are the SDK's (`node.keyBindings()`, this round). Until it lands, the

@@ -158,9 +158,12 @@ Here is what the channel does today and where it stops.
 - **Proven peers:** a peer exists only after the MMP v2.0 Core Secure handshake has proven its
   nodeId and key on that session (sym 0.14). Every record is signed, and the receiving node
   verifies it against the author's key before the channel sees it.
-- **Verified or not shown:** every delivery names its signer (its label and nodeId), whether it was
-  addressed to this agent or to the room, and whether a relay carried it. A delivery the node could
-  not verify is listed by id and reason, never shown.
+- **Verified or not shown:** a delivery is shown only when its own facts say the node verified it,
+  and its line names the signer by label and key fingerprint (a label and a nodeId are both chosen by
+  their owner; the key is what the node proved), whether it was addressed to this agent or to the
+  room, and whether a relay carried it. Anything else is listed by id and reason, never shown.
+- **Peer text is data:** a line carries a short, quoted, escaped excerpt; the full signed text is
+  shown only by `sym_fetch`, inside a fence.
 - **Encryption:** every record travels sealed per session, on the local network and through a relay.
 - **The relay:** it forwards sealed frames by their envelope and stores nothing.
 - **Admission:** each session decides for itself what it admits from what it hears.

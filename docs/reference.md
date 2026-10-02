@@ -119,7 +119,7 @@ Fourteen MCP tools exposed to Claude Code, namespaced under `mcp__claude-sym-mes
 | `sym_fetch` | A delivery in full by id: the whole verification account and the body, in parts when long. |
 | `sym_recall` | Search this node's memory (its own records, and peers' records verified when admitted). |
 | `sym_push_confirm` | State, first-hand, that this server's `<channel>` pushes reach you, with the code from a push check. |
-| `sym_peers` | Peers with a proven session: label, nodeId, key source, sessions; and the outbox. |
+| `sym_peers` | Peers with a proven session: label and key fingerprint, nodeId, key source, sessions; and the outbox, stuck items included. |
 | `sym_status` | Node identity (nodeId, key fingerprint), room, relay state, Core Secure sessions and key conflicts, memory, push statement. |
 | `sym_room_info` | Report the mesh room this node is in, with service type and peer roster scoped to the room. |
 | `sym_invite_create` | Generate an invite URL for a named room, naming this node as its issuer. LAN-only or cross-network flavour. |
@@ -130,10 +130,14 @@ Fourteen MCP tools exposed to Claude Code, namespaced under `mcp__claude-sym-mes
 
 With the Channels flag enabled, real-time push is bidirectional: peer events arrive in Claude's context without any tool call, while the session is mid-turn. Without the flag, the same tools are available on demand — you just don't get the async push surface.
 
-**What a delivery line says.** `[alice·3f9a2b1c →you] review the migration [in0042] key cmb-…` — the
-signer's own label and the last 8 characters of its nodeId, `→you` for a CMB addressed to this node
-or `→room` for one bound to the room (admitted by this node's SVAF), `via label·…` when a relay
-session carried it, the delivery id and the CMB key. To answer it with lineage:
+**What a delivery line says.** `[alice ⟨…7f3a91c2⟩ →you] "review the migration" [in0042] key cmb-…` —
+the signer's own label and the shortest suffix of its key fingerprint that is unique among the keys
+this node knows (at least 8 hex; `alice (2 keys)` when two known keys use the label), `→you` for a
+CMB addressed to this node or `→room` for one bound to the room (admitted by this node's SVAF),
+`via label ⟨…⟩` when a relay session carried it, a quoted and escaped excerpt of the signed focus, the
+delivery id and the CMB key. A push carries the same line, and the facts as structured meta.
+`sym_fetch` gives the full nodeId and fingerprint and the signed text, fenced. A delivery whose own
+facts do not make it verified is listed by id and reason only. To answer it with lineage:
 `sym_send {"to": "in0042", "parents": ["in0042"], "focus": "…"}`.
 
 **Push, stated first-hand.** The server cannot see whether its notifications reach the model, so it
@@ -355,7 +359,7 @@ Clear-eyed about what's not there yet:
 - **First contact is trust on first proven use.** A peer you have never met is bound to the key its first session proves; an invite pins the issuer's key out of band. See [SECURITY.md](../SECURITY.md#layer-1-transport-and-peer-identity-mmp-v20-core-secure-sym-014).
 - **0.13 peers are not heard.** sym 0.14 speaks only Core Secure; a 0.13 node is reached only through a Legacy Import route on the sym side, and what it delivers is withheld here as unverified.
 - **Messages and moods are kept in memory.** They are not in the SDK's durable inbox, so a restart loses those that were not read.
-- **A cited reply can be refused.** sym applies MMP §15.7's remix guard to every record with a peer parent, so a reply that cites a peer's record needs an observation of your own since your last one. The answer says so.
+- **A cited reply can be refused on an SDK before spec draft #35**, which applies MMP §15.7's remix guard to every record with a peer parent. The answer says so and keeps the lineage: publish an observation of your own, then send again with the same parents. With #35 a cited reply is never gated.
 
 ## Troubleshooting
 
@@ -464,8 +468,13 @@ peer's session returns. `sym_peers` lists anything still waiting.
 
 - **Held is not delivered.** The queue is on your machine; the recipient cannot see it.
   If your node does not come back, the message is lost.
-- **Only nodeIds you have had a proven session with** can be held for. An unknown nodeId is
-  refused, so a typo creates nothing, and a name is never a route.
+- **Only nodeIds you have had a Core Secure session with** can be held for: a `peer-joined` counts
+  only when `sym_peers` shows that peer's session as a proven Core Secure one, never a Legacy Import
+  session. An unknown nodeId is refused, so a typo creates nothing, and a name is never a route.
+- **A held reply keeps its lineage.** If the SDK refuses to send one when the peer returns (an SDK
+  before spec draft #35 gates a record that cites a peer's), it is marked STUCK with the reason in
+  `sym_peers`, not reported as waiting; it is tried again after you publish an observation of your
+  own, or `sym_outbox_discard` drops it.
 - **The sender must return** to flush — holding does not help when the sender is the
   intermittent one.
 - A 0.10 item held for a name is converted to its nodeId when the old roster recorded one;
@@ -479,7 +488,7 @@ checks and signs as itself (XMesh design C2, sym design D9.3). The session has n
 
 ```bash
 SYM_INTERIOR_SOCKET=/path/to/node/interior.sock \
-SYM_INTERIOR_CAPABILITY_FILE=/path/to/capability   # 0600; or SYM_INTERIOR_CAPABILITY
+SYM_INTERIOR_CAPABILITY_FILE=/path/to/capability   # yours, 0600, or it is refused; or SYM_INTERIOR_CAPABILITY
 SYM_INTERIOR_KIND=observe                           # the default submission kind
 ```
 
@@ -487,9 +496,12 @@ SYM_INTERIOR_KIND=observe                           # the default submission kin
   outside its allowlist, a parent the node does not hold, the rate) is said in plain words.
 - `sym_peers`, `sym_join_room`, the invite tools and the outbox are not available: the node owns
   its room and its peers.
-- sym 0.14's interior socket serves submit and end only, so the mind cannot yet read the node's
-  deliveries; `sym_receive` says so. The read requests the channel will use are in
-  [DESIGN-0.11.0.md §6](DESIGN-0.11.0.md).
+- The mind reads the node's deliveries through the interior when the node serves them
+  ([DESIGN-0.11.0.md §6](DESIGN-0.11.0.md)), gated exactly as in node mode. A node that does not
+  serve them (sym at 341dafb serves submit and end only) is reported as such; a request the node
+  refuses is reported as a refusal, not as unsupported.
+- The capability is bound to the one connection the channel opens: when that connection closes,
+  this mind is detached and says so, and the channel never reconnects with it.
 - When the host's stdin closes, the channel ends the mind, which revokes its capability.
   `SYM_INTERIOR_END_ON_EXIT=0` leaves it running.
 
