@@ -30,8 +30,9 @@ assert.match(readme, /Peer messages are \*\*external input\*\*/);
 assert.doesNotMatch(readme, /best tool|best way/i);
 assert.doesNotMatch(readme, /Claude Code sessions talking to each other in real time\./);
 
-// The product name is xmesh, all lowercase, in every doc and in the tool descriptions the server gives agents
-// (founder, 2026-10-02: "all XMesh letter must be lowercase. No any camel case"). XMESH_* are env-var names.
+// The product name is never "xMesh" (user, 2026-10-02: "don't use any xMesh, use xmesh in code, and XMesh in
+// sentence and XMESH for brand or product name"): not in a doc, nor in the tool descriptions the server gives
+// agents. Lowercase xmesh is the code spelling (package, CLI, room names) and is not checked by text.
 const root = path.join(__dirname, '..');
 const named = [
   ...fs.readdirSync(root).filter((f) => f.endsWith('.md')),
@@ -40,8 +41,7 @@ const named = [
 ].filter((f) => fs.existsSync(path.join(root, f)));
 assert.ok(named.length >= 8, `scanned ${named.length} files`);
 for (const f of named) {
-  const text = fs.readFileSync(path.join(root, f), 'utf8').replace(/XMESH_[A-Z0-9_]*/g, '');
-  assert.doesNotMatch(text, /\bXMesh\b|\bxMesh\b|\bXmesh\b|\bXMESH\b/, `${f} spells the product name other than xmesh`);
+  assert.doesNotMatch(fs.readFileSync(path.join(root, f), 'utf8'), /\bxMesh\b/, `${f} spells the product name xMesh`);
 }
 
 console.log('README positioning contract: ok');
