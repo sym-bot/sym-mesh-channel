@@ -1,5 +1,134 @@
 # Changelog
 
+## 0.11.0
+
+Requires `@sym-bot/sym` `^0.14.0`, MMP v2.0 Core Secure, and Node.js 20 or later. A peer is now a
+proven session, and every record is signed and verified before the channel sees it. The channel is
+rebuilt around that: it shows what the node verified, and nothing else. Design:
+[docs/DESIGN-0.11.0.md](docs/DESIGN-0.11.0.md). This release supersedes the unreleased 0.10.2 branch.
+
+### Changed — every delivery says who signed it
+
+- A delivery line names its signer (its label and the last 8 characters of its nodeId), whether it
+  was directed to you (`→you`) or bound to the room (`→room`), the relay session that carried it
+  (`via …`), its id and its CMB key. `sym_fetch` gives the whole account: the signer's full nodeId
+  and where its key came from (an invite, a proven session, a grant), the assertion, the room, the
+  record's own lineage, and whether it was stored.
+- The facts come from sym's `verified-record` hook, joined to the node's own admission by assertion
+  id, and are kept beside the node's durable inbox, so a restarted server still says who signed what
+  waits there.
+- **A delivery the node could not verify is never shown.** It is listed by id and reason: it arrived
+  on a Legacy Import session, it was received before this node ran Core Secure (a 0.13 inbox entry),
+  or no verification was given for it. `sym_recall` shows this node's own records and peers' records
+  that were verified when admitted, and counts the rest.
+- Moods from records SVAF rejected (MMP §9.3) now reach the session, attributed to their signer when
+  the node's events tie them to one verified record, and labelled unattributed otherwise.
+
+### Changed — lineage at the emit surface
+
+- `sym_send` and `sym_publish` take `parents`: CMB keys, or delivery ids that the server resolves to
+  their keys. MMP §14.3: a response to mesh signals carries its lineage. The instructions say so.
+- sym applies §15.7's remix guard to a record with a peer parent: a remix needs an observation of
+  your own since your last one. A refused reply says so and names the two ways forward.
+
+### Changed — names are labels, never routes
+
+- **`to` takes a nodeId, or a delivery id (that delivery's verified signer).** A name is refused,
+  with the nodeIds of connected peers that use that label. `sym_peers` lists every peer's nodeId.
+- **`SYM_ALLOWED_PEERS` takes nodeIds**, judged against the verified signer. An entry that is not a
+  nodeId is ignored and reported. A list with no nodeId in it allows nothing, so a 0.10 list of
+  names does not silently allow everyone after the upgrade.
+- The outbox and its known-peer roster are keyed by nodeId, and a nodeId becomes known only through
+  a proven session. A 0.10 item held for a name is converted through the old roster's recorded id;
+  one that cannot be is listed under its label for `sym_outbox_discard`.
+- The push rate counts per delivering session; a record signed by this node itself is counted, not
+  shown.
+
+### Changed — push is stated by the session, not guessed
+
+- The server sends one push check carrying a code. A session that received it calls
+  `sym_push_confirm {code}`; from then on `sym_receive` names a delivery it already pushed instead
+  of repeating it, and the unread count leaves those out. `sym_push_confirm {}` sends a new check;
+  `{reaching: false}` states that pushes do not reach the session. Until a confirmation, every
+  delivery is listed, pushed ones tagged `·pushed`.
+- The server no longer reads Claude Code's launch line or the process tree, and `sym_status` no
+  longer says "probably". 0.10.2's `SYM_CHANNEL_PUSH` and `SYM_CHANNEL_MCP_NAME` do not exist.
+
+### Fixed — the channel adds nothing to what the agent wrote
+
+- **No re-send salt.** 0.10 re-sent identical categories with `[re-sent <time>]` appended to the
+  focus, signed in the agent's name. Identical cognition is one content address (§8.8.2): the answer
+  is now "Already in memory", which is not an error.
+- **Only the categories given are sent.** Missing categories are no longer filled with `directive`,
+  `observation`, `none` or the node's own name, and a mood is no longer given invented zeros. An
+  empty or blank `focus` is refused.
+- **"Not sent: …"** is the tool's own answer when sym refuses to build or sign a record (`ECMBSIZE`,
+  `ESIGN`, a malformed record), with nothing sent.
+- A payload rides inside the signed record, as its application section (§8.8.3), and is shown as
+  the signed application data.
+
+### Fixed — no peer text at instruction level
+
+- The startup instructions carried the store's newest records, peers' words included, under "act
+  accordingly". They now say who this node is, how the tools work and how many records memory holds;
+  `sym_recall ""` returns the records as a tool result, through the content policy.
+
+### Added — interior mode
+
+- With `SYM_INTERIOR_SOCKET` and a capability (`SYM_INTERIOR_CAPABILITY_FILE`, or
+  `SYM_INTERIOR_CAPABILITY`), the server attaches as an existing node's mind (XMesh cognitive nodes,
+  sym D9.3). It starts no node and has no mesh identity: `sym_send` and `sym_publish` submit drafts
+  the node checks and signs as itself (`kind`, or `SYM_INTERIOR_KIND`), and refusals are said in
+  plain words. When the host's stdin closes, the mind is ended and its capability revoked.
+- sym 0.14's interior socket serves submit and end only, so the mind cannot yet read the node's
+  deliveries; `sym_receive` says so plainly. The read requests the server already speaks are in the
+  design (§6).
+
+### Changed — identity and invites
+
+- **Invites name their issuer.** `sym_invite_create` builds the URL with sym's `inviteURL`, which
+  carries this node's nodeId and key. `sym_join_room {invite}` joins the invite's room and relay and
+  pins the issuer's key first, so the first session in the new room must prove it. A key conflict is
+  reported, never overridden. `sym_invite_info` shows the issuer's nodeId and key fingerprint.
+- **A pinned identity is never re-minted.** `node_id` in `.sym/node.json`, or `SYM_NODE_ID`, loads the
+  folder's agent with `create: false`; one that is missing or tombstoned leaves the server running
+  without a node, saying why on every tool. `sym_status` prints the line that pins it.
+- `sym_status` reports the node's key fingerprint, its Core Secure sessions and any key conflicts.
+- `SYM_LAN=off` runs a relay-only node (no Bonjour or loopback discovery).
+
+### Changed — the SDK boundary
+
+- The channel uses sym 0.14's public host API only: no SDK underscore field, no `lib/` deep import,
+  no legacy `message` frame handler, no attribution from the store's `<receiver>+<deliverer>` string.
+  The room beacon reads its port from `status()`.
+- Tool calls run one at a time, in arrival order (a `sym_fetch` sent with a `sym_receive` cannot run
+  first). A call that never settles holds the queue for at most 60 s. `sym_receive` waits at most 2 s
+  for a push still being written.
+
+### Upgrade notes
+
+- Set `SYM_ALLOWED_PEERS` to nodeIds; a list of names now allows nothing.
+- Address `to` by nodeId (from `sym_peers`) or by a delivery id.
+- Deliveries from authors this node never proved, and that no invite or grant vouches, no longer
+  arrive (sym D4, MMP §18.3.1). A 0.13 peer is heard only through a Legacy Import route on the sym
+  side, and what it delivers is withheld here as unverified.
+- Messages and moods are kept in the server's memory, not the SDK's durable inbox; a restart loses
+  those that were not read.
+
+### Docs
+
+- README, SECURITY.md, docs/reference.md and the Chinese README's security statements describe
+  proven sessions, verified-or-not-shown deliveries, nodeId routing and the allowlist, the push
+  check, interior mode and pinned identities.
+
+### Tests
+
+- Every test file runs in a sandboxed home and state root (`test/run.js`; `test/_harness.js` refuses
+  otherwise). New: two servers meeting through a loopback relay by the real Core Secure handshake;
+  interior mode against a real sym 0.14 node and against a stub of the proposed read side; the node
+  host in process; the facts ledger; the push statement; the emit outcomes; the SDK-boundary scan.
+- The release gate refuses a `file:` dependency, runs sandboxed, and checks the outbox by nodeId.
+
 ## 0.10.1
 
 Requires `@sym-bot/sym` 0.13.13, which fixes the Windows identity lock: a crashed session's lock is no

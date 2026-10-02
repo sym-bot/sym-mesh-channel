@@ -109,24 +109,37 @@ Also listed in the [Anthropic community directory](https://github.com/anthropics
 
 ## What you get
 
-Eleven MCP tools exposed to Claude Code, namespaced under `mcp__claude-sym-mesh__`:
+Fourteen MCP tools exposed to Claude Code, namespaced under `mcp__claude-sym-mesh__`:
 
 | Tool | What it does |
 |---|---|
-| `sym_send` | Send a CAT7 CMB to a specific peer (point-to-point), or to all if no recipient is given. Arrives in receivers' contexts as a `<channel>` notification. |
-| `sym_publish` | Publish a structured CAT7 CMB — a projection of your state — to your whole room (publish-subscribe): focus, issue, intent, motivation, commitment, perspective, mood. SVAF-gated on the receiving side. |
-| `sym_receive` | Surface CMBs the mesh delivered to you in real-time when the `<channel>` push was gated — a live delivery feed, not a store query. |
-| `sym_recall` | Search mesh memory for past cognitive memory blocks. |
-| `sym_fetch` | Fetch the full content of a single CMB by its compact channel-header ID. |
-| `sym_peers` | List discovered peers (via bonjour or relay). |
-| `sym_status` | Node identity, relay state, peer count, memory count, current mesh room. |
+| `sym_send` | Send a CAT7 CMB to one peer (`to`: its nodeId, or a delivery id meaning that delivery's verified signer), or to the room if no recipient is given. `parents` cites what it answers (MMP §14.3). |
+| `sym_publish` | Publish a structured CAT7 CMB — a projection of your state — to your whole room: focus, issue, intent, motivation, commitment, perspective, mood, and optional `parents`. SVAF-gated on the receiving side. |
+| `sym_receive` | The deliveries since your last call, each with its verified signer, audience, relay, id and CMB key — a live delivery feed, not a store query. |
+| `sym_fetch` | A delivery in full by id: the whole verification account and the body, in parts when long. |
+| `sym_recall` | Search this node's memory (its own records, and peers' records verified when admitted). |
+| `sym_push_confirm` | State, first-hand, that this server's `<channel>` pushes reach you, with the code from a push check. |
+| `sym_peers` | Peers with a proven session: label, nodeId, key source, sessions; and the outbox. |
+| `sym_status` | Node identity (nodeId, key fingerprint), room, relay state, Core Secure sessions and key conflicts, memory, push statement. |
 | `sym_room_info` | Report the mesh room this node is in, with service type and peer roster scoped to the room. |
-| `sym_invite_create` | Generate a shareable invite URL for a named room. LAN-only or cross-network flavour. |
-| `sym_invite_info` | Parse a mesh invite URL and return a ready-to-use `sym_join_room` call. |
-| `sym_join_room` | **Hot-swap** this node into a different mesh room at runtime — no Claude Code restart. |
+| `sym_invite_create` | Generate an invite URL for a named room, naming this node as its issuer. LAN-only or cross-network flavour. |
+| `sym_invite_info` | Parse an invite URL: room, relay, and the issuer's nodeId and key fingerprint. |
+| `sym_join_room` | **Hot-swap** this node into a different mesh room at runtime, same identity; with `invite`, pin the issuer's key. |
 | `sym_rooms_discover` | List SYM-mesh rooms currently advertising on the local network via Bonjour / mDNS. |
+| `sym_outbox_discard` | Discard what is held for a peer that is not coming back. |
 
 With the Channels flag enabled, real-time push is bidirectional: peer events arrive in Claude's context without any tool call, while the session is mid-turn. Without the flag, the same tools are available on demand — you just don't get the async push surface.
+
+**What a delivery line says.** `[alice·3f9a2b1c →you] review the migration [in0042] key cmb-…` — the
+signer's own label and the last 8 characters of its nodeId, `→you` for a CMB addressed to this node
+or `→room` for one bound to the room (admitted by this node's SVAF), `via label·…` when a relay
+session carried it, the delivery id and the CMB key. To answer it with lineage:
+`sym_send {"to": "in0042", "parents": ["in0042"], "focus": "…"}`.
+
+**Push, stated first-hand.** The server cannot see whether its notifications reach the model, so it
+sends one push check with a code. A session that received it calls `sym_push_confirm {"code": "…"}`;
+from then on `sym_receive` names a delivery it already pushed instead of repeating it. Until then,
+every delivery is listed.
 
 ## Team mesh rooms
 
@@ -251,7 +264,7 @@ The plugin composes two open specs:
 
 **What happens on each message.** When a peer broadcasts a cognitive memory block (CMB), the local SymNode evaluates it via SVAF — Symbolic-Vector Attention Fusion, a receiver-side relevance gate that rejects low-signal messages before they reach Claude's context. If accepted, the MCP server fires a `notifications/claude/channel` notification to Claude Code, which surfaces it as a `<channel>` block in the conversation. Claude sees it, can react, and can broadcast back via `sym_send` or `sym_publish`. No polling. No tool calls. The mesh thinks together.
 
-**Identity and transport.** Each peer has its own Ed25519 keypair stored at `~/.sym/nodes/<name>/identity.json`. Node IDs are UUID v7 + Ed25519 signatures, gossiped through the relay's directory or via Bonjour TXT records. Full architecture in MMP §4–§6.
+**Identity and transport.** Each peer has its own Ed25519 keypair stored at `~/.sym/nodes/by-id/<nodeId>/identity.json` (sym 0.14; the name is an index). A peer exists only after the MMP v2.0 Core Secure handshake has proven its nodeId and key on a session, and every record is signed and verified before the channel sees it. Full architecture in MMP §4–§6 and §18.
 
 ## Advanced: per-project node identity
 
@@ -262,9 +275,14 @@ Without `start`, the plugin names each session `claude-<repo>-<session>`, which 
 ```json
 {
   "node_name": "cto",
-  "room": "my-team"
+  "room": "my-team",
+  "node_id": "01a0fd15-52ca-726c-9ce1-5767a1379249"
 }
 ```
+
+`node_id` is optional. With it, the folder's identity is loaded without minting: if it is not on
+this host, the node does not start and every tool says why, instead of quietly becoming a new agent
+with an empty memory. `sym_status` prints the line to add.
 
 Both the plugin's node and the `claude-sym-mesh` server read it on launch whenever Claude Code runs from that directory: the node takes that name and joins that room.
 
@@ -310,9 +328,11 @@ A peer message is external input. Treat it that way.
 - A room name or relay token is not a complete enterprise trust boundary.
 - Keep human approval for consequential actions.
 
-**Optional peer allowlist.** Set `SYM_ALLOWED_PEERS=claude-mac,claude-win` to restrict which authenticated peers can push to Claude's context. When empty (default), every authenticated peer remains eligible for the other receiver-side checks.
+**Optional peer allowlist.** Set `SYM_ALLOWED_PEERS=<nodeId>,<nodeId>` to restrict whose records can reach Claude's context; it is judged against the verified signer. Names are labels, so an entry that is not a nodeId is ignored and reported, and a list with no nodeId in it allows nothing. When empty (default), every peer this node verified remains eligible for the other receiver-side checks.
 
-**Payload and rate limits.** `SYM_MAX_PAYLOAD_BYTES` (default 1048576) is the largest payload shown; a larger one is withheld and named, and stays in the inbox. A payload within it is read on demand, and `sym_fetch` returns a long message in parts, each naming the `offset` of the next. `SYM_RATE_LIMIT` (default 30) is how many deliveries from one sender per minute are pushed in real time; the rest wait in the inbox for `sym_receive` (a legacy direct message, which has no inbox entry, is dropped and recorded in the audit). On the local network a frame already bounds a payload at 1 MiB; for a relayed delivery `SYM_MAX_PAYLOAD_BYTES` is the only bound.
+**Verified or not shown.** A delivery without the node's verification facts — from a Legacy Import session, received before this node ran Core Secure, or unverified — is listed by id and reason and never shown.
+
+**Payload and rate limits.** `SYM_MAX_PAYLOAD_BYTES` (default 1048576) is the largest payload shown; a larger one is withheld and named, and stays in the inbox. A payload within it is read on demand, and `sym_fetch` returns a long message in parts, each naming the `offset` of the next. `SYM_RATE_LIMIT` (default 30) is how many deliveries from one session per minute are pushed in real time; the rest wait for `sym_receive`. A payload is the record's signed application section, which MMP bounds at 512 KiB.
 
 See [SECURITY.md](../SECURITY.md) for the full threat model.
 
@@ -320,7 +340,7 @@ See [SECURITY.md](../SECURITY.md) for the full threat model.
 
 | | macOS | Linux | Windows |
 |---|---|---|---|
-| Node.js ≥ 18 | ✓ | ✓ | ✓ |
+| Node.js ≥ 20 | ✓ | ✓ | ✓ |
 | Claude Code ≥ 2.1.97 (Channels feature) | ✓ | ✓ | ✓ |
 | Bonjour / mDNS for LAN discovery | built-in | install `avahi-daemon` | built-in (Windows 10+) |
 
@@ -332,8 +352,10 @@ Clear-eyed about what's not there yet:
 - **Corporate networks often block mDNS multicast.** If LAN discovery fails on the same wifi, fall back to a relay.
 - **No offline directory of known rooms.** `sym_rooms_discover` only shows rooms with at least one node currently online. For cross-network relay-backed rooms, invite URLs must be shared out of band.
 - **One mesh identity per process.** Two Claude Code sessions on the same machine with the same node name collide. The second one's server starts without a mesh node, and every mesh tool says which name is held and how to fix it. Use one folder per agent (`start` names the node after the folder), or `--name`.
-- **Peer identity is trust-on-first-use until MMP 2.0 Core Secure ships.** See [SECURITY.md](../SECURITY.md#layer-1-transport-and-peer-identity).
-- **Transport protection is peer- and version-dependent.** Do not assume every peer or metadata path is encrypted. Mixed-version peers may fall back to plaintext, and outer routing metadata remains visible where required for delivery. Review [SECURITY.md](../SECURITY.md) before carrying sensitive material.
+- **First contact is trust on first proven use.** A peer you have never met is bound to the key its first session proves; an invite pins the issuer's key out of band. See [SECURITY.md](../SECURITY.md#layer-1-transport-and-peer-identity-mmp-v20-core-secure-sym-014).
+- **0.13 peers are not heard.** sym 0.14 speaks only Core Secure; a 0.13 node is reached only through a Legacy Import route on the sym side, and what it delivers is withheld here as unverified.
+- **Messages and moods are kept in memory.** They are not in the SDK's durable inbox, so a restart loses those that were not read.
+- **A cited reply can be refused.** sym applies MMP §15.7's remix guard to every record with a peer parent, so a reply that cites a peer's record needs an observation of your own since your last one. The answer says so.
 
 ## Troubleshooting
 
@@ -380,12 +402,12 @@ Some corporate networks block mDNS multicast entirely — try a hotspot or home 
 
 ### `<channel>` notifications never arrive even though peers are connected
 
-The 11 tools work without any flag. The real-time `<channel>` **push** is separate: Claude Code only delivers channel notifications for channels on its **approved-channels allowlist**, and sym-mesh-channel isn't on it yet — so push requires the development-channels flag matching your install path:
+The tools work without any flag. The real-time `<channel>` **push** is separate: Claude Code only delivers channel notifications for channels on its **approved-channels allowlist**, and sym-mesh-channel isn't on it yet — so push requires the development-channels flag matching your install path:
 
 - plugin install: `--dangerously-load-development-channels plugin:sym-mesh-channel@sym-bot` (or `@claude-community` if you installed from the Anthropic community directory — the handle must match your install source)
 - npm install: `--dangerously-load-development-channels server:claude-sym-mesh`
 
-This is an Anthropic-side gate, not a bug here — once the channel is allowlisted the flag is no longer needed. Tracked in [anthropics/claude-plugins-official#1512](https://github.com/anthropics/claude-plugins-official/issues/1512).
+The server cannot tell whether a push reached you, and does not guess. Call `sym_push_confirm {}` to have a push check sent: if the notification arrives, confirm with its code; if it does not, push is not reaching this session, and `sym_receive` is how you read deliveries. This is an Anthropic-side gate, not a bug here. Tracked in [anthropics/claude-plugins-official#1512](https://github.com/anthropics/claude-plugins-official/issues/1512).
 
 ### `sym_status` says "Relay: connected" when you didn't configure one
 
@@ -393,9 +415,9 @@ Your shell profile (`~/.zshrc`, `~/.bashrc`) exports `SYM_RELAY_URL`. Claude Cod
 
 ### Multiple Claude Code sessions on the same machine want to share an identity
 
-Don't. Each agent should have a distinct node name; `start` gives each folder its own. The SymNode takes an exclusive lockfile on its identity (`~/.sym/nodes/<name>/lock.pid`) and refuses a second process with the same name. That second server starts without a node, and every mesh tool answers `MESH NODE NOT RUNNING: node identity '<name>' … is already held by a live process (PID n)`. Close the other session, or give this one its own name with `--name`, `node_name` in `.sym/node.json`, or `SYM_NODE_NAME`.
+Don't. Each agent should have a distinct node name; `start` gives each folder its own. The SymNode takes an exclusive lock on its identity (in `~/.sym/nodes/by-id/<nodeId>/`) and refuses a second process with the same identity. That second server starts without a node, and every mesh tool answers `MESH NODE NOT RUNNING: node identity '<name>' … is already held by a live process (PID n)`. Close the other session, or give this one its own name with `--name`, `node_name` in `.sym/node.json`, or `SYM_NODE_NAME`.
 
-On **Windows** the lock can't yet tell a live holder from a crashed session whose PID has been reused by another program. If no process with that PID is this agent, delete `~/.sym/nodes/<name>/lock.pid` and restart.
+On **Windows**, if no process with that PID is this agent, delete the lock file the message names and restart.
 
 ### Two mesh nodes in one session (a `MESH NODE ADVISORY` at startup)
 
@@ -437,15 +459,39 @@ Apache 2.0. Built and owned by **[SYM.BOT](https://sym.bot)**, the trading name 
 
 ## Offline peers: held mail
 
-A directed send to a peer that is not connected is **held in your outbox** (0.7.0+) and
-delivered when that peer returns. `sym_peers` lists anything still waiting.
+A directed send to a peer that has no session now is **held in your outbox** and sent when that
+peer's session returns. `sym_peers` lists anything still waiting.
 
 - **Held is not delivered.** The queue is on your machine; the recipient cannot see it.
   If your node does not come back, the message is lost.
-- **Only peers you have seen** can be held for. Unknown names are refused, so a typo
-  creates nothing.
+- **Only nodeIds you have had a proven session with** can be held for. An unknown nodeId is
+  refused, so a typo creates nothing, and a name is never a route.
 - **The sender must return** to flush — holding does not help when the sender is the
   intermittent one.
+- A 0.10 item held for a name is converted to its nodeId when the old roster recorded one;
+  otherwise `sym_peers` lists it under its label, and `sym_outbox_discard {peer: "<label>"}` clears it.
+
+## Interior mode: a node's mind
+
+An XMesh cognitive node (or any sym 0.14 node) can run a Claude session as its **mind**: the node
+keeps its key, its store and its learned admission profile, and the session submits drafts the node
+checks and signs as itself (XMesh design C2, sym design D9.3). The session has no mesh identity.
+
+```bash
+SYM_INTERIOR_SOCKET=/path/to/node/interior.sock \
+SYM_INTERIOR_CAPABILITY_FILE=/path/to/capability   # 0600; or SYM_INTERIOR_CAPABILITY
+SYM_INTERIOR_KIND=observe                           # the default submission kind
+```
+
+- `sym_send` and `sym_publish` submit; a refusal (a kind the mission did not declare, a recipient
+  outside its allowlist, a parent the node does not hold, the rate) is said in plain words.
+- `sym_peers`, `sym_join_room`, the invite tools and the outbox are not available: the node owns
+  its room and its peers.
+- sym 0.14's interior socket serves submit and end only, so the mind cannot yet read the node's
+  deliveries; `sym_receive` says so. The read requests the channel will use are in
+  [DESIGN-0.11.0.md §6](DESIGN-0.11.0.md).
+- When the host's stdin closes, the channel ends the mind, which revokes its capability.
+  `SYM_INTERIOR_END_ON_EXIT=0` leaves it running.
 
 ## Codex setup (full)
 

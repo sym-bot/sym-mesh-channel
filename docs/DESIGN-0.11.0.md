@@ -325,6 +325,18 @@ push still being written, so its credit is settled first.
    a file. A per-mind socket (or a socket path the node creates per mind, 0600) would bind the
    capability to the connection instead.
 
+7. **No accessor for a node's own public key.** `sym_status` shows this node's key fingerprint; the
+   only public way to read the key is the issuer of an invite of its own (`inviteURL`), and
+   `identity.loadIdentity` would load the private key as well. The need: `node.status().identity =
+   { nodeId, publicKey }`, or `node.publicKey`.
+
+**A defect found in the 0.14 candidate (28c0fdb).** After `acceptInvite` pins an issuer's key
+(`pinned`), the first session that proves the same key changes the binding's source to `proven`.
+sym's design D3 says a binding presented the same key again keeps it and records the stronger
+source, and `pinned` outranks `proven`. The security property holds (the session must prove the
+pinned key, and a different key is a conflict), but `sym_peers` reports the weaker source. Reported
+to the sym implementer; the channel's test accepts either source and asserts no conflict.
+
 ## 7. Tests
 
 Every test runs with HOME, USERPROFILE and SYM_STATE_DIR in a temp dir; `test/run.js` sets them

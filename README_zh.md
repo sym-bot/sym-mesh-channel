@@ -1,6 +1,6 @@
 # sym-mesh-channel
 
-> **0.10.0 说明：** 本中文文档较英文版 [README.md](README.md) 更旧；如有出入，以英文版为准。0.10.0 起，`npx -y @sym-bot/mesh-channel@latest start --room <房间>` 会让每个文件夹成为一个智能体：节点以文件夹命名（如 `claude-agent-1`，可用 `--name` 指定），名称与房间保存在该文件夹的 `.sym/node.json` 中，并在该文件夹的 `.claude/settings.local.json` 中关闭 Claude 插件，使每个会话只运行一个网格节点。在连接阶段，对等身份目前尚未经过证明：MMP 2.0 Core Secure 握手已在引擎中实现但尚未启用，详见 [SECURITY.md](SECURITY.md)。
+> **0.11.0 说明：** 本中文文档较英文版 [README.md](README.md) 更旧；如有出入，以英文版为准。0.11.0 基于 sym 0.14 Core Secure：对等节点只有在 MMP v2.0 握手证明其 nodeId 与密钥之后才存在，每条记录都经签名验证。每条投递都标明签名者（名称与 nodeId）、是定向还是发往房间、是否经中继转发；无法验证的投递只列出编号与原因，从不显示内容。名称只是标签：`sym_send` 的 `to` 取 nodeId 或投递编号，`SYM_ALLOWED_PEERS` 列出 nodeId（只含名称的列表不放行任何人）。回复时请在 `parents` 中引用所回复的投递（MMP §14.3）。详见 [SECURITY.md](SECURITY.md) 与 [docs/DESIGN-0.11.0.md](docs/DESIGN-0.11.0.md)。每个文件夹仍是一个智能体：`npx -y @sym-bot/mesh-channel@latest start --room <房间>`，节点以文件夹命名，名称与房间保存在该文件夹的 `.sym/node.json` 中。
 
 ### Claude Code 会话间的实时通信与协同 —— 同一台机器上的多个会话，或同一 Wi-Fi 下（或通过中继）跨机器的多个会话，彼此自动发现并实时协同思考，对等信号无需轮询即可在对话过程中即时送达。首个非 Anthropic 官方 Channels 实现，基于网格记忆协议（MMP）构建。
 
@@ -337,11 +337,11 @@ cd sym-relay && npm install && npm start
 
 | 层级 | 机制 | 作用 |
 |------|------|------|
-| 🔐 传输层 | 局域网：每个节点有自己的 Ed25519 身份，但目前以首次使用即信任的方式接受（MMP 2.0 Core Secure 握手尚未启用）；跨网络：中继令牌 | 白名单、自名检查与速率限制均以送达连接为准，而非消息声称的名称 |
+| 🔐 传输层 | 每个会话都经 MMP v2.0 Core Secure 握手证明 nodeId 与 Ed25519 密钥；首次接触时信任首次证明的密钥，邀请可预先固定签发者的密钥；跨网络另需中继令牌 | 白名单与自身记录检查以经验证的签名者 nodeId 为准，速率限制以送达会话为准；名称只是标签 |
 | 🧠 协议层 | SVAF 逐字段内容门控：7 维语义评估，低相关性信号提前拦截 | 防止无关信息污染认知状态 |
 | 🛡️ 应用层 | 仅文本注入上下文，无代码执行，无权限中继（`claude/channel/permission` 显式未声明） | 最小权限原则 |
 
-🔹 **可选对等节点白名单**：设置 `SYM_ALLOWED_PEERS=claude-mac,claude-win` 限制可推送至 Claude 上下文的认证节点；留空（默认）则接受所有认证节点。
+🔹 **可选对等节点白名单**：设置 `SYM_ALLOWED_PEERS=<nodeId>,<nodeId>` 限制哪些签名者的记录可进入 Claude 上下文（以经验证的签名者为准）。不是 nodeId 的条目会被忽略并提示；只含名称的列表不放行任何人。留空（默认）则接受本节点验证过的所有节点。`sym_peers` 列出每个节点的 nodeId。
 
 完整威胁模型详见 [SECURITY.md](./SECURITY.md)
 
@@ -373,8 +373,8 @@ cd sym-relay && npm install && npm start
 - 🔸 **单进程单身份**  
   同一机器上两个 Claude Code 会话若使用相同节点名称将冲突：第二个会话的服务器会在没有网格节点的情况下启动，并在每个网格工具中说明哪个名称被占用及如何解决 → 每个智能体使用一个文件夹（`start` 以文件夹命名节点），或使用 `--name`
 
-- 🔸 **端到端加密为点对点，非全局**  
-  双方握手时若均通告 E2E 公钥，则通过 Curve25519 密钥协商 + AES-256-GCM 加密 CMB 字段内容；不支持 E2E 的节点回退至明文（保障向后兼容）。外层帧元数据（发送方 ID、时间戳、溯源信息）保持明文，以供中继转发与 SVAF 评估。
+- 🔸 **每个会话单独加密**  
+  每条记录都按会话密封传输（`cmb-encrypted`，MMP §18.2），会话密钥由每次握手的临时密钥派生；在局域网与中继上一律加密，不存在明文回退。中继只按信封转发密封帧，不保存任何内容。
 
 ---
 
