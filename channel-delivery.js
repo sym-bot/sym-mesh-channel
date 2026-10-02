@@ -1,229 +1,157 @@
 'use strict';
 
-// Channel-side delivery bookkeeping: who sent a delivery, which inbox item a push is, what the
-// session has already read, and what a send actually did. Pure functions over the SDK's public
-// surface, so they work on @sym-bot/sym 0.13.8 and use the 0.13.12 interface when it is there
-// (entry.author, entry.inboxId, node.inboxAck, remember().delivery on every directed send).
-
-/**
- * The peer that handed us a delivery: the name this node's own connection knows it by. This, not
- * the author a record names, is what the allowlist, the own-name check and the push rate key on.
- * Anyone can write any createdBy into a record, so a record claiming to be from an allowlisted
- * peer must not be let in on that claim (review F1). 0.13.12 names it in `author.via`; before that,
- * an SVAF-admitted entry's `source` is the SDK's store-local `<receiver>+<deliverer>` key, which
- * printed as "claude-sym-agent-a+claude-sym-agent-b" on agent-a's own screen — the part after our
- * own name is the deliverer.
- */
+// channel-delivery.js — what an emit asked for, and what the node says it did (design D3, D4).
 //
-// The order is by how much of it the sending peer can write (delta review F2): 0.13.12's author.via
-// comes from our connection; an entry's peerId, resolved through peers(), is the connection too; the
-// `source` string is last, because the engine builds it from the wire frame's own `source` field when
-// a frame carries one, which a hostile peer can set to any name.
-function delivererOf(item, selfName, peers) {
-  const via = item && item.author && item.author.via;
-  if (via && typeof via.name === 'string' && via.name) return via.name;
-  if (item && item.peerId && Array.isArray(peers)) {
-    const p = peers.find((x) => x && x.peerId === item.peerId);
-    if (p && typeof p.name === 'string' && p.name) return p.name;
+// THE SALT IS GONE (audit C-6.1). 0.10 re-sent identical categories with "[re-sent <time>]"
+// appended to the focus when the store already held them: focus text the agent never wrote,
+// signed in its name. Content-addressed dedup (§8.8.2: identical CAT7 cognition collapses to one
+// key) is not an error to route around. The answer says what happened, and the agent decides
+// whether it has something new to say.
+//
+// The node's own account decides every answer: remember()'s return, its `delivery` report, and the
+// metric events it emits during the call. Nothing is inferred from peers() or from a local set.
+
+const { isNodeId } = require('./identity.js');
+
+const CMB_KEY_RE = /^cmb-[0-9a-f]{64}$/;
+const DELIVERY_ID_RE = /^(in\d{4,}|m\d{3,})$/;
+const CAT7_TEXT = ['focus', 'issue', 'intent', 'motivation', 'commitment', 'perspective'];
+const MAX_PARENTS = 16;
+
+/**
+ * The CAT7 categories exactly as the caller gave them. A category left out is left out, and the SDK
+ * records it as `neutral`, the canonical empty value (§14.3.2). 0.10 invented 'directive',
+ * 'observation', 'none' and the node's own name for missing categories, and receivers weighed those
+ * words in SVAF; a mood's valence and arousal invented as 0 claimed a measured neutral.
+ */
+function givenCategories(args) {
+  const out = {};
+  for (const f of CAT7_TEXT) {
+    if (typeof args[f] === 'string' && args[f]) out[f] = args[f];
   }
-  const raw = String((item && (item.source ?? item.from)) || '');
-  const prefix = `${selfName}+`;
-  return raw.startsWith(prefix) ? raw.slice(prefix.length) : raw;
+  if (args.mood && typeof args.mood === 'object' && !Array.isArray(args.mood)) {
+    const m = {};
+    if (typeof args.mood.text === 'string' && args.mood.text) m.text = args.mood.text;
+    for (const k of ['valence', 'arousal']) if (typeof args.mood[k] === 'number' && Number.isFinite(args.mood[k])) m[k] = args.mood[k];
+    if (m.text) out.mood = m;
+  } else if (typeof args.mood === 'string' && args.mood) out.mood = { text: args.mood };
+  return out;
 }
 
 /**
- * The deliverer and display label for a STORED record (sym_recall), which carries the store-local
- * `<receiver>+<deliverer>` source and the record's createdBy. On engines before 0.13.12 an admitted
- * record's createdBy was rewritten to the receiver, i.e. our own name, so that claim is not shown.
+ * `parents` as the node takes them: CMB keys. A delivery id (in0042, m007) is resolved to its key by
+ * `resolve(id)` → key | null. Returns { keys } or { error } — an unresolvable parent is refused before
+ * anything is minted, so lineage is never silently dropped.
  */
-function recallSender(r, selfName) {
-  // A stored record that carries 0.13.12's author fields is named exactly as the push names it.
-  if (r && r.author) return { from: delivererOf(r, selfName) || 'unknown', label: senderLabel(r, selfName) || 'unknown' };
-  const from = delivererOf({ source: r && r.source }, selfName) || 'unknown';
-  const claimed = r && r.cmb && typeof r.cmb.createdBy === 'string' ? r.cmb.createdBy : '';
-  const label = claimed && claimed !== from && claimed !== selfName ? `${claimed} via ${from}` : from;
-  return { from, label };
+function resolveParents(raw, resolve) {
+  if (raw === undefined || raw === null) return { keys: [] };
+  const list = typeof raw === 'string' ? [raw] : raw;
+  if (!Array.isArray(list)) return { error: 'parents must be a list of CMB keys or delivery ids, e.g. ["in0042"] or ["cmb-…"]' };
+  if (list.length > MAX_PARENTS) return { error: `parents takes at most ${MAX_PARENTS} entries; got ${list.length}` };
+  const keys = [];
+  for (const p of list) {
+    const s = typeof p === 'string' ? p.trim() : '';
+    if (CMB_KEY_RE.test(s)) { if (!keys.includes(s)) keys.push(s); continue; }
+    if (DELIVERY_ID_RE.test(s)) {
+      const k = resolve(s);
+      if (!k) return { error: `parent ${s} is not a delivery this server can resolve to a CMB key (unknown, expired, or withheld). Pass its key instead (sym_fetch ${s} shows it), or leave it out.` };
+      if (!keys.includes(k)) keys.push(k);
+      continue;
+    }
+    return { error: `parent ${JSON.stringify(String(p).slice(0, 80))} is neither a CMB key (cmb- and 64 hex) nor a delivery id (in0042, m007)` };
+  }
+  return { keys };
 }
 
 /**
- * The name to print for a delivery's sender. The record's author (0.13.12 `author.name`, still an
- * unverified label until the Core Secure handshake lands) and, when it is a different node, the
- * peer that delivered it — so a relayed or forged attribution is visible on the line itself.
+ * `to` as the node routes it: a nodeId. A delivery id stands for that delivery's VERIFIED signer
+ * (`signerOf(id)` → nodeId | null). A name is never a route (design D6): it is refused, and the
+ * caller is shown the nodeIds that use that label so it can choose by identity.
+ * Returns { nodeId } or { error, labelMatches? }.
  */
-function senderLabel(item, selfName, peers) {
-  const deliverer = delivererOf(item, selfName, peers);
-  const author = item && item.author && typeof item.author.name === 'string' ? item.author.name : '';
-  // Neither half may carry the marker itself, or "a via b" could be forged inside one name (F4).
-  const plain = (x) => String(x).replace(/ via /gi, ' via_');
-  return author && author !== deliverer ? `${plain(author)} via ${plain(deliverer)}` : deliverer;
+function resolveTo(raw, { signerOf, peersLabelled } = {}) {
+  const s = typeof raw === 'string' ? raw.trim() : '';
+  if (!s) return { error: 'to is empty' };
+  if (isNodeId(s)) return { nodeId: s.toLowerCase() };
+  if (DELIVERY_ID_RE.test(s)) {
+    const id = signerOf ? signerOf(s) : null;
+    if (!id) return { error: `${s} is not a delivery whose signer this server verified (unknown, expired, or withheld), so it names no one to send to.` };
+    return { nodeId: id, via: s };
+  }
+  const matches = peersLabelled ? peersLabelled(s) : [];
+  const hint = matches.length
+    ? ` Connected peers that use the label ${JSON.stringify(s)}: ${matches.map((p) => p.nodeId).join(', ')}. A label is the sender's own choice and two nodes can share one; pass the nodeId you mean.`
+    : ' sym_peers lists each connected peer\'s nodeId.';
+  return { error: `to takes a nodeId or a delivery id (in0042), never a name: names are labels, not routes (MMP §8.8.4).${hint}`, labelMatches: matches };
 }
 
 /**
- * The inbox id of the delivery a cmb-accepted entry describes, so the push and sym_receive name
- * one message with one id. 0.13.12 stamps the id on the entry, and this package requires it. The
- * fallback is best effort for older engines only: their inbox listener runs first and synchronously
- * per delivery, so the newest item is this delivery's, built from the same entry.content compared
- * here; anything else falls back to an mNNN id rather than guessing.
+ * What one remember() did, from the node's own account (design D4).
+ *   entry   — remember()'s return
+ *   metrics — the metric types the node emitted during the call
+ *   directed — whether the call had `to`
  */
-function inboxIdFor(n, entry) {
-  if (entry && typeof entry.inboxId === 'string' && entry.inboxId) return entry.inboxId;
-  try {
-    const s = n.inboxStatus();
-    const id = `in${String(s.seq).padStart(4, '0')}`;
-    const m = n.inboxGet(id);
-    if (m && m.content === (entry.content || '') && !!m.directed === !!entry.directed) return id;
-  } catch { /* no inbox on this engine — the caller falls back to its own store */ }
-  return null;
-}
-
-/**
- * What the session has read in full with sym_fetch. A pushed id that was fetched used to come back
- * from sym_receive under a second id and keep the unread footer lit, because the drain cursor only
- * moves in seq order. The engine's inboxAck (0.13.12) persists this; on older engines the same
- * state lives here for the life of the process. A push alone never marks anything read: when
- * channels are not enabled for this server, the push goes nowhere and the inbox is all there is.
- */
-function createReadTracker() {
-  const read = new Map();     // inbox id → seq, for everything read in full
-  const engineAcked = new Set();   // the subset the engine accepted an inboxAck for
-  return {
-    markRead(n, id) {
-      let acked = false;
-      try { if (typeof n.inboxAck === 'function') { n.inboxAck(id); acked = true; } } catch { /* engine refused — keep local state */ }
-      try {
-        const m = n.inboxGet(id);
-        if (m) read.set(id, m.seq);
-      } catch { /* no inbox on this engine */ }
-      if (acked) engineAcked.add(id);
-    },
-    isRead(m) {
-      return !!m && (m.acked === true || read.has(m.id));
-    },
-    /** inboxStatus() with fetched-but-undrained items taken out of the unread count — except the
-     *  ones the engine accepted an ack for, which its own count already leaves out. */
-    adjust(n, s) {
-      if (!s) return s;
-      let fetched = 0;
-      for (const [id, seq] of read) if (seq > s.cursor && !engineAcked.has(id)) fetched++;
-      return fetched ? { ...s, undrained: Math.max(0, s.undrained - fetched) } : s;
-    },
-  };
-}
-
-/**
- * What one remember() did on the wire, from the engine's own account of it. The channel used to
- * assume a directed send reached its target because the target was in peers() — a peer whose
- * socket had already closed stays listed, so a send to a session that had just restarted came back
- * "Sent" and arrived nowhere.
- *
- *   'sent'        a frame was handed to at least one transport (no receipt exists in MMP, so this
- *                 is dispatch, not delivery)
- *   'undelivered' a directed send that reached no transport
- *   'no-peers'    a broadcast with nobody connected
- *   'collapsed'   the engine recognised its own latest record and sent nothing (0.13.8 only;
- *                 0.13.12 dispatches the stored record instead)
- *   'unknown'     an engine that reports nothing; the caller keeps its older inference
- */
-function sendOutcome(entry) {
-  if (!entry) return 'unknown';
+function emitOutcome(entry, metrics, directed) {
+  const m = new Set(metrics || []);
+  if (!entry) {
+    if (m.has('remix-rejected')) return { outcome: 'remix-refused' };
+    return { outcome: 'already-in-memory' };
+  }
+  const key = entry.key || entry.cmb?.metadata?.key || null;
+  const assertionId = entry.cmb?.metadata?.assertionId || null;
   const d = entry.delivery;
-  if (d && typeof d.dispatched === 'number') {
-    if (d.dispatched > 0) return 'sent';
-    return d.directed ? 'undelivered' : 'no-peers';
+  if (directed) {
+    if (d && d.undelivered) return { outcome: 'undelivered', key, assertionId, reason: d.reason || null };
+    return { outcome: 'sent', key, assertionId, dispatched: d ? d.dispatched : null, duplicate: entry.duplicate === true || entry.collapsed === true };
   }
-  if (entry.collapsed) return 'collapsed';
-  return 'unknown';
+  if (entry.collapsed) return { outcome: 'already-said', key };
+  if (d && typeof d.dispatched === 'number') {
+    return d.dispatched > 0 ? { outcome: 'published', key, assertionId, dispatched: d.dispatched } : { outcome: 'no-peers', key, assertionId };
+  }
+  return { outcome: 'published', key, assertionId, dispatched: null };
+}
+
+const NOT_SENT_SAID = {
+  'not-connected': 'the recipient has no session with this node',
+  'too-large': 'its frame is over the transport\'s size bound',
+  'write-failed': 'the write to the session failed',
+  'send-failed': 'the send failed',
+  unsealable: 'it is not a signed v2.0 record',
+  'queue-full': 'the relay send queue is full',
+};
+
+// The SDK's refusals to build or sign a record (sym 0.14): ECMBSIZE (a category, the record or its
+// frame over a bound), ESIGN (the key could not sign), and the plain errors remember() and createCMB
+// throw before anything is stored or sent. Matched by code, then by message for the plain ones.
+const MINT_REFUSAL = /^(?:createCMB\b|CMB requires categories|remember\(\) requires|mmp-sig-v2(?:\.0)?: |mmp-app-v1: )/;
+const SENDING_TOOLS = new Set(['sym_send', 'sym_publish']);
+
+/**
+ * "Not sent: …" as the tool's own answer, when the error a sending tool threw is the SDK refusing the
+ * record; otherwise null, and the caller rethrows. Any other error is not a refusal, and "nothing
+ * left this node" would be a claim about the wire it cannot make.
+ */
+function notSentAnswer(tool, e) {
+  if (!SENDING_TOOLS.has(tool) || !(e instanceof Error)) return null;
+  const coded = e.code === 'ECMBSIZE' || e.code === 'ESIGN';
+  if (!coded && !(Object.getPrototypeOf(e) === Error.prototype && MINT_REFUSAL.test(String(e.message)))) return null;
+  return { content: [{ type: 'text', text: `Not sent: ${e.message}. Nothing left this node.` }], isError: true };
 }
 
 /**
- * A warning for a directed send to a peer we have not heard from lately. Peers ping every 10 s when
- * idle (MMP §5.4), so silence past STALE_AFTER_MS means the transport is probably gone even though
- * the peer is still listed — the state a restarted session leaves behind until its 120 s timeout.
+ * A warning for a directed send to a peer this node has not heard from lately. Peers ping every 10 s
+ * when idle (MMP §5.4), so silence past STALE_AFTER_MS means the session is probably gone even though
+ * the peer is still listed.
  */
 const STALE_AFTER_MS = 30000;
 function staleNote(peer, now = Date.now()) {
   if (!peer || !peer.lastSeen) return '';
   const age = now - peer.lastSeen;
   if (age <= STALE_AFTER_MS) return '';
-  return ` Warning: nothing has arrived from ${peer.name || 'this peer'} for ${Math.round(age / 1000)}s, so its connection may already be gone; MMP has no delivery receipt to confirm arrival.`;
-}
-
-// ── Send-path delivery integrity (E8 variant c) ──────────────────────────────
-// SymNode.remember() dedups on the content hash of the CAT7 categories, returning null when
-// identical categories are already in the LOCAL store. A local-store hit is NOT proof of delivery:
-// a CMB stored while this node had no connected peer, or on a prior send before a reconnect, would
-// block its own identical re-send forever (root-caused 2026-07-18). So we record which CMB keys
-// were actually dispatched to a connected destination: a dedup against a NEVER-DISPATCHED key is
-// re-issued (disambiguated with a salt), while a dedup against an already-dispatched key stays
-// suppressed — no flood regression. The set is channel-internal, so it uses its own stable
-// content hash, not the store's key.
-const crypto = require('crypto');
-
-function cmbContentKey(categories) {
-  return crypto.createHash('sha256').update(JSON.stringify(categories)).digest('hex').slice(0, 32);
-}
-// Directed deliveries are tagged per (contentKey, target) so identical content can still be
-// delivered to a different peer; broadcasts are tagged by content key only.
-function deliveryTag(categories, targetPeerId) {
-  return targetPeerId ? `${cmbContentKey(categories)}|${targetPeerId}` : cmbContentKey(categories);
-}
-function connectedPeerCount(n) {
-  try { const s = n.status && n.status(); return (s && s.peerCount) || (n.peers && n.peers().length) || 0; }
-  catch { return 0; }
-}
-
-/**
- * An explicit operator send (sym_send / sym_publish / an outbox flush). Returns
- * { text, isError?, undelivered?, entry? }. okSummary(entry, sent) builds the happy-path text so
- * each caller keeps its verb; `now` is injectable for deterministic tests.
- *
- * The engine's own account of the send (remember().delivery) decides whether anything left this
- * node. Only an engine that gives no account falls back to inference — the inference this replaced
- * called every directed send connected "by construction", which is how a send to a session that had
- * just restarted came back "Sent" and was never seen again.
- */
-function explicitSend(n, delivered, categories, sendOpts, okSummary, now) {
-  const stamp = now || (() => new Date().toISOString());
-  const targetPeerId = sendOpts.to || null;
-  const tag = (cats) => deliveryTag(cats, targetPeerId);
-
-  // One remember(), classified. Returns a result, or null when the store deduped it.
-  const attempt = (cats) => {
-    const entry = n.remember(cats, sendOpts);
-    const outcome = sendOutcome(entry);
-    if (!entry || outcome === 'collapsed') return null;
-    const sent = outcome === 'unknown'
-      ? (targetPeerId ? true : connectedPeerCount(n) > 0)   // an engine with no delivery report
-      : outcome === 'sent';
-    if (sent) delivered.add(tag(cats));
-    if (outcome === 'undelivered') {
-      return {
-        text: `NOT DELIVERED — the target is not connected, so no frame left this node (CMB ${entry.key} is stored locally only).`,
-        undelivered: true,
-        entry,
-      };
-    }
-    return { entry, sent };
-  };
-
-  const first = attempt(categories);
-  if (first) return first.undelivered ? first : { text: okSummary(first.entry, first.sent), entry: first.entry };
-  if (delivered.has(tag(categories))) {
-    return { text: `Duplicate — an identical CMB was already dispatched${targetPeerId ? '' : ' to the room'}, so it was not re-sent. Dispatch is not a delivery receipt; change the content to send it again.`, duplicate: true };
-  }
-  const salted = Object.assign({}, categories, { focus: `${categories.focus} [re-sent ${stamp()}]` });
-  const retry = attempt(salted);
-  if (!retry) {
-    return { text: 'Send failed: the prior copy was undelivered and the disambiguated re-send did not store (persist error). Nothing broadcast.', isError: true };
-  }
-  if (retry.undelivered) return retry;
-  // Credit the original content too: the salted copy stands for it, so the next identical send is a
-  // duplicate, not another salted re-send (each with a new timestamp, so unbounded) (re-review F2).
-  if (retry.sent) delivered.add(tag(categories));
-  return { text: `Re-sent CMB ${retry.entry.key}${targetPeerId ? '' : ' to the room'} — a prior identical copy was in the local store but had never been delivered; content-addressed dedup would otherwise have silently suppressed this send.`, entry: retry.entry };
+  return ` Warning: nothing has arrived from this peer for ${Math.round(age / 1000)}s, so its session may already be gone; MMP has no delivery receipt to confirm arrival.`;
 }
 
 module.exports = {
-  delivererOf, senderLabel, recallSender, inboxIdFor, createReadTracker, sendOutcome, staleNote, STALE_AFTER_MS,
-  cmbContentKey, deliveryTag, connectedPeerCount, explicitSend,
+  givenCategories, resolveParents, resolveTo, emitOutcome, notSentAnswer, staleNote,
+  NOT_SENT_SAID, CMB_KEY_RE, DELIVERY_ID_RE, STALE_AFTER_MS, MAX_PARENTS,
 };

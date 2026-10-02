@@ -1,22 +1,16 @@
 #!/usr/bin/env node
 'use strict';
 
-// Subcommand dispatch: CLI subcommands run the installer/launcher, not the
-// MCP server. (When Claude Code spawns the server there is no subcommand, so
-// argv[2] is undefined and this falls through to the MCP server below.)
+// Subcommand dispatch: CLI subcommands run the installer/launcher, not the MCP server. (When
+// Claude Code spawns the server there is no subcommand, so this falls through.)
 if (['init', 'doctor', 'start'].includes(process.argv[2])) {
   require('./bin/install.js');
   return;
 }
 
-// ── stdout discipline (v0.3.9) ──────────────────────────────────────────────
-// MCP frames JSON-RPC on stdout. Any non-JSON write there — ours or, far more
-// often, a dependency's load banner (e.g. "[encoder] Semantic encoder ready"
-// from the semantic model) — corrupts the stream and makes Claude Code drop the
-// connection (-32000) or log "Ignoring non-JSON line on stdout". Guard it: lines
-// that look like JSON-RPC (start with '{') pass through to the real stdout;
-// everything else is redirected to stderr. Installed before any require so it
-// catches dependency output at load time.
+// ── stdout discipline ───────────────────────────────────────────────────────
+// MCP frames JSON-RPC on stdout. Any non-JSON write there — ours or a dependency's load banner —
+// corrupts the stream. Lines that look like JSON-RPC pass; everything else goes to stderr.
 const __realStdoutWrite = process.stdout.write.bind(process.stdout);
 process.stdout.write = function (chunk, ...rest) {
   try {
@@ -29,199 +23,60 @@ process.stdout.write = function (chunk, ...rest) {
 };
 
 /**
- * sym-mesh-channel — MCP server that makes Claude Code a peer node on the SYM mesh.
+ * sym-mesh-channel 0.11 — the MCP server through which a Claude Code session joins the SYM mesh,
+ * on sym 0.14 Core Secure (docs/DESIGN-0.11.0.md).
  *
- * Architecture (MMP Section 13.9: Local Event Interface):
- *   SymNode (own identity, own SVAF field weights) → relay → mesh
- *   MCP channel notifications → Claude Code (real-time push)
- *   MCP tools → SymNode methods (send, publish, recall)
+ * Two modes, never both (design §2.5):
+ *   NODE MODE (default)  — this session is the agent, and the agent is its own SymNode (node-host.js).
+ *   INTERIOR MODE        — SYM_INTERIOR_SOCKET is set: this session is an existing node's mind, with
+ *                          no mesh identity; it submits drafts the node signs (interior-host.js).
  *
- * This is a PEER NODE, not a client of the daemon. It has its own identity,
- * its own relay connection, and its own SVAF evaluation with engineering-domain
- * field weights. Per MMP Section 3: every participant is a peer.
+ * The channel shows what the node verified, and nothing else (design D2): every delivery names its
+ * signer, its audience and its relay, and one with no verification is named by id and reason only.
  *
  * Copyright (c) 2026 SYM.BOT. Apache 2.0 License.
  */
 
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const crypto = require('crypto');
 const { Server } = require('@modelcontextprotocol/sdk/server/index.js');
 const { StdioServerTransport } = require('@modelcontextprotocol/sdk/server/stdio.js');
-const {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-} = require('@modelcontextprotocol/sdk/types.js');
-const { SymNode } = require('@sym-bot/sym');
-const { scanClassifierRisk, quarantineHeader } = require('./classifier-risk.js');
-const { hiddenFieldsTag } = require('./surface-truth.js');
+const { CallToolRequestSchema, ListToolsRequestSchema } = require('@modelcontextprotocol/sdk/types.js');
+const sdk = require('@sym-bot/sym');
 const deliveryPolicy = require('./delivery-policy.js');
-const { resolveIdentity, nodeNameProblem } = require('./identity.js');
+const cd = require('./channel-delivery.js');
+const { resolveIdentity, nodeNameProblem, isNodeId, shortId } = require('./identity.js');
 const { loadRelay, saveRelay, forgetRelay } = require('./relay-store.js');
-const outbox = require('./outbox.js');
+const { ageDays, MAX_ITEMS: OUTBOX_MAX_ITEMS } = require('./outbox.js');
+const { NodeHost } = require('./node-host.js');
+const { InteriorHost, readCapability } = require('./interior-host.js');
+const push = require('./push-statement.js');
 
-// Room-name grammar and the room->service-type mapping come from the SDK, which
-// is their single source of truth (@sym-bot/sym >= 0.12.3 exports `rooms`).
-//
-// A room name IS the Bonjour service type, so a validator that disagrees with the
-// SDK's by one character means two nodes disagree about whether a room exists.
-// This file and bin/install.js each used to keep their own copy of the regex; both
-// drifted from the SDK, and the install.js copy silently gated the persistence path
-// while this one accepted the same name. A copy cannot drift if there is no copy.
-// The SDK's own `rooms` export is the destination (sym cac00f2), but it is
-// committed and NOT yet published — 0.12.3's tarball carries lib/rooms.js
-// without the top-level re-export. Prefer the export the moment it ships;
-// until then deep-import the same module, which the published tarball does
-// contain and which package.json exposes (no `exports` map). Either path
-// yields the identical regex, so this cannot become a third grammar.
-function sdkRooms() {
-  const sdk = require('@sym-bot/sym');
-  return sdk.rooms || require('@sym-bot/sym/lib/rooms.js');
-}
-const { isValidRoom, roomServiceType, serviceTypeToRoom, KEBAB_CASE_RE } = sdkRooms();
+const PKG_VERSION = (() => { try { return require('./package.json').version; } catch { return '0.0.0'; } })();
 
-/**
- * Whether a room name is canonical: one name per room, one room per name.
- *
- * sym enforces this inside isValidRoom as of
- * lib/rooms.js 2a06ccb, but that is not released — the published 0.12.3 this
- * node resolves still answers true for `sym`, which maps to `_sym._tcp` whose
- * inverse is `default`. Without this, a peer could join a room named `sym`
- * here and sit in the global mesh believing it was somewhere specific.
- *
- * Expressed as the PROPERTY, using the SDK's own mapping in both directions,
- * rather than as a second copy of the grammar. That is what separates it from
- * the drift this branch exists to remove: there is still exactly one grammar
- * and one mapping, and this only asks a question about them. It keeps working
- * unchanged once the SDK enforces it, at which point it is redundant rather
- * than wrong — the same reason sym keeps the round trip inside isOwnableRoom
- * now that isValidRoom covers it.
- */
-function isCanonicalRoom(room) {
-  return isValidRoom(room) && serviceTypeToRoom(roomServiceType(room)) === room;
-}
+// ── Rooms and invites: the SDK's one grammar (room-names.js) ──
+const { isCanonicalRoom, roomRefusalReason, parseInviteURL, keyFingerprint, roomServiceType, serviceTypeToRoom } = require('./room-names.js');
 
-/**
- * Why this room name was refused, in the reader's terms.
- *
- * A refusal that names the wrong reason costs more than no reason at all:
- * `sym` IS kebab-case, so "must be kebab-case" sends whoever reads it to fix
- * something that was never wrong. Same class as a log blaming a config file
- * for a mistyped name.
- */
-function roomRefusalReason(room) {
-  if (typeof room !== 'string' || room === '') return 'a room name cannot be empty';
-
-  // Test the GRAMMAR directly rather than via isValidRoom. From sym 0.13.0
-  // isValidRoom means "grammatical AND canonical", so branching on it sent every
-  // canonicity failure down the grammar path — and told the author of `sym`,
-  // which is impeccable kebab-case, that it was not. That is precisely the
-  // wrong-reason defect this function was written to remove, reintroduced by a
-  // predicate changing meaning underneath it. The two causes are now read from
-  // the two things that actually distinguish them.
-  const grammatical = room === 'default' || KEBAB_CASE_RE.test(room);
-  if (!grammatical) {
-    return 'must be lowercase alphanumerics in segments joined by single or double hyphens '
-      + '(e.g. "backend-team", or "x-review--team-<id>" for a tenant-scoped room), or "default"';
-  }
-
-  const collidesWith = serviceTypeToRoom(roomServiceType(room));
-  if (collidesWith !== room) {
-    return `it resolves to ${roomServiceType(room)}, which is the room "${collidesWith}" — `
-      + `"${room}" is a second name for it, so joining it would put this node in "${collidesWith}" `
-      + 'while reporting otherwise. Room names must be canonical: one name per room';
-  }
-  return 'it is not a room name this build accepts';
-}
-
-// ── Invite URL parsing (shared by sym_invite_info and the internal
-//    validation path for sym_join_room when passed a URL). Exposed as
-//    a module-level function so it's trivially unit-testable and the
-//    same regex doesn't drift between two call sites.
-
-// ONE VOCABULARY: room (LAN) and team (relay). The legacy scheme
-// is removed everywhere rather than carried, to keep one name in front of users. RELEASE
-// ORDER IS LOAD-BEARING: this ships only after the App-side parsers accept sym://room, so the
-// fix precedes the break it would otherwise cause in shipped apps.
-const INVITE_URL_RE = /^([a-z][a-z0-9-]+):\/\/(?:room|team)\/([^/?#]+)(?:\/([^?#]+))?(?:\?(.+))?$/i;
-
-function parseInviteURL(url) {
-  const m = INVITE_URL_RE.exec(url);
-  if (!m) {
-    return {
-      error:
-        `Unrecognised invite URL: ${url}\n\n` +
-        `Expected shapes:\n` +
-        `  sym://room/{name}                        (LAN-only)\n` +
-        `  sym://team/{name}?relay=...&token=...     (cross-network via relay)\n` +
-        `  melotune://room/{id}/{name}               (app-specific room)`,
-    };
-  }
-  const appScheme = m[1].toLowerCase();
-  const rawId = decodeURIComponent(m[2]);
-  const rawName = m[3] ? decodeURIComponent(m[3]) : rawId;
-  const queryStr = m[4] || '';
-  const query = Object.fromEntries(
-    queryStr.split('&').filter(Boolean).map(kv => {
-      const [k, v = ''] = kv.split('=');
-      return [decodeURIComponent(k), decodeURIComponent(v)];
-    })
-  );
-  // For sym:// the path element IS the room name. For app-scoped URLs
-  // (melotune://, melomove://, etc.) the path is the room id and the
-  // room is prefixed with the app name to avoid collisions.
-  const room = appScheme === 'sym' ? rawId : `${appScheme}-${rawId}`;
-  // Derive the service type FROM the room rather than building both in
-  // parallel: two expressions that must agree are two chances to disagree.
-  const serviceType = roomServiceType(room);
-  return {
-    appScheme,
-    room,
-    serviceType,
-    roomId: rawId,
-    roomName: rawName,
-    relayUrl: query.relay || null,
-    relayToken: query.token || null,
-  };
-}
-
-// ── Bonjour discovery of live SYM-related service types.
-//    Runs `dns-sd -B _services._dns-sd._udp local.` (macOS / Windows with
-//    Bonjour) or `avahi-browse -at` (Linux) for 2 seconds, filters to
-//    service types that look SYM-ish, and reports them. Pure observation,
-//    no node state changes.
-
+// ── Bonjour discovery of live SYM rooms (observation only) ───
 async function discoverRooms() {
   const { spawn } = require('child_process');
   const platform = process.platform;
-
-  let cmd, argv;
-  if (platform === 'darwin' || platform === 'win32') {
-    cmd = 'dns-sd';
-    argv = ['-B', '_services._dns-sd._udp', 'local.'];
-  } else {
-    cmd = 'avahi-browse';
-    argv = ['-t', '-a', '-p']; // terminate after cache, all services, parseable
-  }
-
+  const [cmd, argv] = platform === 'darwin' || platform === 'win32'
+    ? ['dns-sd', ['-B', '_services._dns-sd._udp', 'local.']]
+    : ['avahi-browse', ['-t', '-a', '-p']];
   return new Promise((resolve) => {
     let child;
-    try {
-      child = spawn(cmd, argv, { stdio: ['ignore', 'pipe', 'pipe'] });
-    } catch (e) {
-      return resolve({
-        isError: true,
-        text:
-          `Could not run discovery command '${cmd}': ${e?.message || e}\n\n` +
-          (platform === 'linux'
-            ? `On Linux, install avahi-utils: sudo apt install avahi-utils`
-            : `Bonjour should be built-in on macOS and Windows 10+.`),
-      });
+    try { child = spawn(cmd, argv, { stdio: ['ignore', 'pipe', 'pipe'] }); }
+    catch (e) {
+      return resolve({ isError: true, text: `Could not run discovery command '${cmd}': ${e?.message || e}\n\n` +
+        (platform === 'linux' ? 'On Linux, install avahi-utils: sudo apt install avahi-utils' : 'Bonjour should be built-in on macOS and Windows 10+.') });
     }
     const out = [];
     child.stdout.on('data', (chunk) => out.push(chunk));
     child.on('error', (e) => resolve({ isError: true, text: `Discovery command failed: ${e?.message || e}` }));
-
-    const timer = setTimeout(() => {
-      try { child.kill('SIGTERM'); } catch {}
-    }, 2000);
+    const timer = setTimeout(() => { try { child.kill('SIGTERM'); } catch {} }, 2000);
     child.on('close', () => {
       clearTimeout(timer);
       const text = Buffer.concat(out).toString('utf8');
@@ -230,549 +85,252 @@ async function discoverRooms() {
       let m;
       while ((m = typeRe.exec(text)) !== null) {
         const full = `_${m[1]}._tcp`;
-        // Filter to the SYM protocol family: global sym, named rooms, and
-        // app-scoped rooms (melotune-<id>, melomove-<id>, etc). Anything
-        // that looks like generic infra (_services._dns-sd, _tcp, _udp,
-        // printer protocols, etc.) is ignored.
-        if (/^_(sym|[a-z]+-[a-z0-9]+|[a-z]+-team|.*-team)\._tcp$/i.test(full)) {
-          seen.add(full);
-        }
+        if (/^_(sym|[a-z]+-[a-z0-9]+|[a-z]+-team|.*-team)\._tcp$/i.test(full)) seen.add(full);
       }
       if (seen.size === 0) {
-        return resolve({
-          text:
-            `No SYM-mesh rooms visible on the local network right now.\n\n` +
-            `This only shows rooms with at least one node currently online. ` +
-            `Rooms you or teammates have used before are not persisted anywhere ` +
-            `(p2p architecture — no central directory).\n\n` +
-            `Your node is on: ${SERVICE_TYPE} (room "${ROOM}").`,
-        });
+        return resolve({ text: 'No SYM-mesh rooms visible on the local network right now.\n\n' +
+          'This only shows rooms with at least one node currently online; there is no central directory.\n\n' +
+          `Your node is on: ${SERVICE_TYPE} (room "${ROOM}").` });
       }
-      const lines = [];
-      lines.push(`SYM-mesh rooms visible on LAN (${seen.size}):`);
+      const lines = [`SYM-mesh rooms visible on LAN (${seen.size}):`];
       for (const st of Array.from(seen).sort()) {
         const name = st.replace(/^_/, '').replace(/\._tcp$/, '');
-        const isSelf = st === SERVICE_TYPE ? '  (← your current room)' : '';
-        lines.push(`  ${st}   room="${name}"${isSelf}`);
+        lines.push(`  ${st}   room="${name}"${st === SERVICE_TYPE ? '  (← your current room)' : ''}`);
       }
-      lines.push('');
-      lines.push(`To join one, call sym_join_room with room="<name>".`);
+      lines.push('', 'To join one, call sym_join_room with room="<name>".');
       resolve({ text: lines.join('\n') });
     });
   });
 }
 
 // ── Engineering-domain field weights (SVAF α_f) ──────────────
+const CATEGORY_WEIGHTS = { focus: 2.0, issue: 2.0, intent: 1.5, motivation: 1.0, commitment: 1.5, perspective: 0.5, mood: 0.8 };
 
-const CATEGORY_WEIGHTS = {
-  focus: 2.0,       // code, architecture, technical decisions
-  issue: 2.0,       // bugs, blockers, technical debt
-  intent: 1.5,      // what needs building
-  motivation: 1.0,  // why it matters
-  commitment: 1.5,  // deadlines, dependencies
-  perspective: 0.5,  // viewpoint — low for engineering
-  mood: 0.8,        // user fatigue affects code quality
-};
+// ── The folder's identity and room ───────────────────────────
 
-// ── SymNode — full peer on the mesh ──────────────────────────
-
-// Default: hostname-based identity, unique per machine. The old default
-// ('claude-code-mac') caused ghost-peer bugs when another machine ran
-// without SYM_NODE_NAME set — both machines claimed the same name with
-// different nodeIds, creating phantom peers that absorbed messages.
-// Per-session default (v0.3.8): keep co-resident Claude Code sessions from all
-// claiming one shared identity and colliding on the identity lock. Each Claude
-// Code session exposes CLAUDE_CODE_SESSION_ID (stable across `--resume`) and
-// CLAUDE_PROJECT_DIR, so the default becomes `claude-<repo>-<session6>` —
-// unique even for two sessions in the same repo, readable, and stable across
-// resume. Bare-npm use (no session id) keeps the hostname default. Named agents
-// override with SYM_NODE_NAME (e.g. claude-code-mac, melotune-dev).
+// The session default: `claude-<repo>-<session6>` under Claude Code, the hostname otherwise.
 function defaultNodeName() {
   const clean = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^-+|-+$/g, '');
   const sid = clean(process.env.CLAUDE_CODE_SESSION_ID).slice(0, 6);
   if (sid) {
-    const repo = clean(require('path').basename(process.env.CLAUDE_PROJECT_DIR || process.cwd())) || 'session';
+    const repo = clean(path.basename(process.env.CLAUDE_PROJECT_DIR || process.cwd())) || 'session';
     return `claude-${repo}-${sid}`;
   }
-  return `claude-${clean(require('os').hostname())}`;
+  return `claude-${clean(os.hostname())}`;
 }
-// Node-name collision handling is delegated to the engine (see identity.js). The old plugin-side
-// resolver checked liveness with a bare `process.kill(pid, 0)`, which can't distinguish a live
-// holder from a recycled PID, so a stale lock could force a -2/-3 suffix and a fresh identity.
-// Removed; identity resolution now goes through resolveIdentity + the engine's robust check.
-// Per-project identity (v0.3.22): a named role agent (CTO, melotune-dev, …) commits
-// its node name + room to `$CLAUDE_PROJECT_DIR/.sym/node.json`, so the plugin alone
-// carries a stable per-project identity — no parallel MCP registration, and it
-// survives a plugin reinstall because the config lives in the repo, not the plugin.
-// Env (SYM_NODE_NAME/SYM_ROOM) still wins; this only overrides the auto default.
-// Missing/malformed file → {} → auto default; never a hard fail.
+
+// `<project>/.sym/node.json`: node_name, room and (0.11) node_id. A key this server does not read is
+// named, never silently ignored; a malformed file is named on stderr.
 function projectNodeConfig() {
-  const fs = require('fs'), path = require('path');
   const dir = process.env.CLAUDE_PROJECT_DIR || process.cwd();
   const file = path.join(dir, '.sym', 'node.json');
   try {
     const cfg = JSON.parse(fs.readFileSync(file, 'utf8'));
     const clean = (s) => (typeof s === 'string' && s.trim()) ? s.trim() : undefined;
-    // A KEY WE DO NOT READ IS THE SAME FAILURE AS A FILE WE CANNOT READ, and it was silent.
-    // dev-team-5, 2026-09-14, first turn after a session restart: correct identity, fallback room,
-    // one startup advisory and then nothing. Its node.json said `group`, the name this project used
-    // before the rename to `room`, so the file sat there looking obeyed while the node joined
-    // `default` alone. The malformed case above was already given a voice; the WRONG-KEY case had
-    // none, and it is the commoner one because the old name is still in circulation.
-    const known = new Set(['node_name', 'room']);
+    const known = new Set(['node_name', 'room', 'node_id']);
     const unknown = Object.keys(cfg).filter((k) => !known.has(k));
-    const legacyRoom = clean(cfg.group);
-    // A node name becomes a directory under ~/.sym/nodes/, so a planted "../x" in this file must not
-    // reach the engine. Refused names are named here and in the startup advisory, never used.
     let nodeName = clean(cfg.node_name);
     const badNodeName = nodeName && nodeNameProblem(nodeName) ? { value: nodeName, problem: nodeNameProblem(nodeName) } : undefined;
     if (badNodeName) {
       process.stderr.write(`sym-mesh-channel: ${file} node_name ${JSON.stringify(nodeName)} ${badNodeName.problem}; ignoring it.\n`);
       nodeName = undefined;
     }
+    const nodeIdRaw = clean(cfg.node_id);
+    const badNodeId = nodeIdRaw && !isNodeId(nodeIdRaw) ? nodeIdRaw : undefined;
     return {
-      node_name: nodeName,
-      badNodeName,
-      room: clean(cfg.room),
-      file,
-      unknownKeys: unknown,
-      // `group` is not honoured — reading it would make the rename meaningless and hide the same
-      // trap one release later. It is NAMED, with the one-line fix, wherever config is reported.
-      legacyGroup: clean(cfg.room) ? undefined : legacyRoom,
+      node_name: nodeName, badNodeName,
+      node_id: nodeIdRaw && !badNodeId ? nodeIdRaw : undefined, badNodeId,
+      room: clean(cfg.room), file, unknownKeys: unknown,
+      legacyGroup: clean(cfg.room) ? undefined : clean(cfg.group),
     };
   } catch (e) {
-    // Distinguish "no config" from "config I could not read". Collapsing both
-    // to {} is what let a MALFORMED node.json look identical to an absent one:
-    // you land in `default`, silently, with a config file sitting right there
-    // looking obeyed. Absent is normal and stays quiet; unreadable is not.
     if (e && e.code !== 'ENOENT') {
-      process.stderr.write(
-        `sym-mesh-channel: ${file} exists but could not be read (${e.message}). ` +
-        `Ignoring it — this node will NOT use the room or name it declares.\n`,
-      );
+      process.stderr.write(`sym-mesh-channel: ${file} exists but could not be read (${e.message}). Ignoring it — this node will NOT use the room or name it declares.\n`);
     }
     return { file };
   }
 }
-const PROJECT_CFG = projectNodeConfig();
-const { name: NODE_NAME, autoSuffix: NODE_AUTOSUFFIX } = resolveIdentity({
+
+const INTERIOR_SOCKET = (process.env.SYM_INTERIOR_SOCKET || '').trim() || null;
+const MODE = INTERIOR_SOCKET ? 'interior' : 'node';
+const PROJECT_CFG = MODE === 'node' ? projectNodeConfig() : { file: null };
+const IDENTITY = resolveIdentity({
   pinnedName: process.env.SYM_NODE_NAME || PROJECT_CFG.node_name,
+  pinnedNodeId: process.env.SYM_NODE_ID || PROJECT_CFG.node_id,
   defaultName: defaultNodeName(),
 });
+const NODE_NAME = IDENTITY.name;
 
-// ── Mesh room (MMP §5.8) ──────────────────────────────────
-//
-// LAN isolation by Bonjour service type. `_sym._tcp` is the default
-// (backward compatible). A named room `<foo>` maps to service type
-// `_foo._tcp`. Passing a full `_foo._tcp` service type explicitly also
-// works. Nodes in different rooms never discover each other at mDNS.
-// See MeloTune's MoodRoom model for the per-room pattern
-// (`_melotune-{id}._tcp`).
 function resolveServiceType() {
-  const explicit = process.env.SYM_SERVICE_TYPE;
-  if (explicit) return explicit;
-  const room = process.env.SYM_ROOM || PROJECT_CFG.room;
-  return roomServiceType(room);
+  if (process.env.SYM_SERVICE_TYPE) return process.env.SYM_SERVICE_TYPE;
+  return roomServiceType(process.env.SYM_ROOM || PROJECT_CFG.room);
 }
-// Resolve the room AND say where it came from, from one function, so the
-// answer and the explanation can never drift apart.
-//
-// Two harnesses on one machine resolve this differently and that is the whole
-// trap: SYM_ROOM is read by both, but CLAUDE_PROJECT_DIR is set only by Claude
-// Code, so for Codex (or any other harness) the `.sym/node.json` fallback is
-// keyed off process.cwd(). Run it from elsewhere and it silently joins
-// `default` while its sibling sits in the named room. Nothing errors; the two
-// simply stop seeing each other. Naming the SOURCE turns a night of forensics
-// into one line of startup output.
 function resolveRoom(serviceType) {
   if (process.env.SYM_ROOM) return { room: process.env.SYM_ROOM, source: 'SYM_ROOM env' };
   if (PROJECT_CFG.room) return { room: PROJECT_CFG.room, source: PROJECT_CFG.file };
   const fromServiceType = serviceTypeToRoom(serviceType);
-  if (fromServiceType !== 'default') {
-    return { room: fromServiceType, source: 'SYM_SERVICE_TYPE env' };
-  }
+  if (fromServiceType !== 'default') return { room: fromServiceType, source: 'SYM_SERVICE_TYPE env' };
   return { room: 'default', source: 'nothing configured — this is the fallback, not a choice' };
 }
-// Mutable so sym_join_room can hot-swap the node at runtime without a
-// Claude Code restart. Declaring as `let` rather than `const` is the
-// smallest change that makes hot-swap possible.
 let SERVICE_TYPE = resolveServiceType();
 let { room: ROOM, source: ROOM_SOURCE } = resolveRoom(SERVICE_TYPE);
-// Relay credentials: explicit env first, else the credential remembered for this room by an
-// earlier sym_join_room (relay-store.js) — so a relay join survives a Claude Code restart.
-// The source is kept so status can say which one is in force.
+
 function resolveRelay(room) {
-  if (process.env.SYM_RELAY_URL) {
-    return { url: process.env.SYM_RELAY_URL, token: process.env.SYM_RELAY_TOKEN || null, source: 'SYM_RELAY_URL env' };
-  }
+  if (process.env.SYM_RELAY_URL) return { url: process.env.SYM_RELAY_URL, token: process.env.SYM_RELAY_TOKEN || null, source: 'SYM_RELAY_URL env' };
   const saved = loadRelay(room);
   if (saved) return { url: saved.relay_url, token: saved.relay_token, source: `remembered for room '${room}' (${saved.file})` };
   return { url: null, token: null, source: null };
 }
 let { url: RELAY_URL, token: RELAY_TOKEN, source: RELAY_SOURCE } = resolveRelay(ROOM);
 
-// The relay sym_invite_create points a cross-network invite at when the caller names none.
-// It admits any token of HOSTED_RELAY_MIN_TOKEN characters or more into that token's own
-// isolated channel, so a team's invite works without anyone configuring the relay for them.
 const HOSTED_RELAY_URL = process.env.SYM_HOSTED_RELAY_URL || 'wss://sym-relay.onrender.com';
 const HOSTED_RELAY_MIN_TOKEN = 32;
+// SYM_LAN=off: a relay-only node (no Bonjour, no loopback discovery).
+const LAN_OFF = /^(off|0|false|no)$/i.test(String(process.env.SYM_LAN || '').trim());
 
-// One constructor for the startup node and every hot-swap, so they cannot drift apart.
-function buildNode({ serviceType, room, relay, relayToken }) {
-  return new SymNode({
+// One constructor for the startup node and every room move (design D10: a nodeId loads without minting).
+function buildNode({ serviceType, room, relay, relayToken, nodeId, create }) {
+  return new sdk.SymNode({
     name: NODE_NAME,
-    autoSuffix: NODE_AUTOSUFFIX,   // engine handles collision (start-time-verified); off for pinned names
+    ...(nodeId ? { nodeId, create: create === true } : {}),
     cognitiveProfile: 'Engineering node. Code, architecture, debugging, technical decisions.',
     svafFieldWeights: CATEGORY_WEIGHTS,
-    svafFreshnessSeconds: 7200, // 2hr — session-length context
+    svafFreshnessSeconds: 7200,
     discoveryServiceType: serviceType,
     room,
-    relay,
-    relayToken,
+    relay: relay || undefined,
+    relayToken: relayToken || undefined,
+    relayOnly: LAN_OFF,
     silent: true,
   });
 }
 
-// A NAME HELD BY A LIVE PROCESS USED TO KILL THIS SERVER BEFORE IT COULD SAY SO. The engine takes
-// the identity lock inside the SymNode constructor, which ran at module load — before main(), before
-// mcp.connect — so EIDENTITYLOCK escaped as an uncaught throw. The host saw only "Connection closed",
-// and the explanation main().catch was written to give never ran. Observed 2026-10-01: two folders'
-// sessions shared the name pinned in ~/.claude.json, and the second session's mesh server was simply
-// gone. Now the server starts without a node, says why in its instructions, and every mesh tool
-// answers with the same reason until the conflict is fixed and the server restarted.
-function identityLockFault(err) {
-  const where = process.env.SYM_NODE_NAME
-    ? 'SYM_NODE_NAME in this MCP server\'s env'
-    : (PROJECT_CFG.node_name ? `node_name in ${PROJECT_CFG.file}` : 'the default name');
-  return `MESH NODE NOT RUNNING: node identity '${NODE_NAME}' (from ${where}) is already held by a live ` +
-    `process (PID ${err.holderPid ?? 'unknown'}). A pinned identity is one node, so this server started ` +
-    `without one; every mesh tool reports this until it is fixed. If that process is an older copy of ` +
-    `this same agent, close it. If it is a different agent sharing the name, give this one its own name ` +
-    `(node_name in <project>/.sym/node.json, or SYM_NODE_NAME). If no process with that PID is this agent ` +
-    `— on Windows a crashed session's PID is soon reused by an unrelated program, and the lock cannot tell — ` +
-    `delete ~/.sym/nodes/${NODE_NAME}/lock.pid. Then restart this MCP server.`;
-}
-
-let NODE_FAULT = null;
-let node = null;
-try {
-  node = buildNode({ serviceType: SERVICE_TYPE, room: ROOM, relay: RELAY_URL, relayToken: RELAY_TOKEN });
-} catch (err) {
-  if (!err || err.code !== 'EIDENTITYLOCK') throw err;
-  NODE_FAULT = identityLockFault(err);
-  process.stderr.write(`sym-mesh-channel: ${NODE_FAULT}\n`);
-}
-
-// ── Send-path delivery integrity (E8 variant c) ──────────────────────────────
-// explicitSend, deliveryTag and the dispatched-key bookkeeping live in channel-delivery.js so the
-// tests exercise the shipped code rather than a copy of it. The engine's own delivery report
-// (remember().delivery) decides whether a send left this node.
-const crypto = require('crypto');
-const { explicitSend, delivererOf, senderLabel, recallSender, inboxIdFor, createReadTracker, staleNote } = require('./channel-delivery.js');
-
-// ── input hygiene (0.3.39) — silent semantic drops must fail loudly ──────────────
-// Root-caused 2026-07-18: minds habitually call sym_publish/sym_send with a single
-// `content` param; the schema tolerated it as an unknown property and DROPPED it,
-// producing constant all-default categories whose hash collides — every call after the
-// first answered "Duplicate" while the mind's actual content never reached the mesh.
-// Two rails: `content` maps to `focus` (the semantic repair — the habitual call now
-// carries meaning), and any OTHER unknown top-level param is a loud error.
-function vetCmbArgs(args, extraKeys) {
-  const known = new Set(['focus', 'issue', 'intent', 'motivation', 'commitment', 'perspective', 'mood', 'payload', 'content', ...extraKeys]);
-  const unknown = Object.keys(args || {}).filter(k => !known.has(k));
-  if (unknown.length) {
-    return `Unknown parameter(s): ${unknown.join(', ')}. Allowed: ${[...known].join(', ')}. Nothing was published — fix the call (a dropped param is a dropped meaning).`;
+/** The words for a node that could not be built, by cause. Null for an error that is not about identity. */
+function identityFault(err) {
+  if (!err) return null;
+  const where = process.env.SYM_NODE_ID ? 'SYM_NODE_ID' : (PROJECT_CFG.node_id ? `node_id in ${PROJECT_CFG.file}` :
+    (process.env.SYM_NODE_NAME ? 'SYM_NODE_NAME in this MCP server\'s env' : (PROJECT_CFG.node_name ? `node_name in ${PROJECT_CFG.file}` : 'the default name')));
+  if (err.code === 'EIDENTITYLOCK') {
+    return `MESH NODE NOT RUNNING: node identity '${NODE_NAME}' (from ${where}) is already held by a live process ` +
+      `(PID ${err.holderPid ?? 'unknown'}). One agent is one node, so this server started without one; every mesh tool ` +
+      'reports this until it is fixed. If that process is an older copy of this agent, close it. If it is a different agent ' +
+      'sharing the name, give this one its own name (node_name in <project>/.sym/node.json, or SYM_NODE_NAME). Then restart this MCP server.';
   }
-  if (args && args.content && !args.focus) args.focus = String(args.content);
+  if (err.code === 'EIDENTITYABSENT') {
+    return `MESH NODE NOT RUNNING: ${where} names an identity that is not on this host, and this server does not mint a ` +
+      `replacement (that would be a different agent). ${err.message} Restore it, or remove the pin to start a new agent.`;
+  }
+  if (err.code === 'EIDENTITYTOMBSTONED') return `MESH NODE NOT RUNNING: ${err.message}`;
+  if (err.name === 'IdentityHaltError') return `MESH NODE NOT RUNNING: ${err.message}`;
   return null;
 }
 
-let deliveredCmbKeys = new Set();   // reset on hot-swap (sym_join_room)
-// What the session has read in full with sym_fetch, and which inbox ids reached it as a push.
-const readTracker = createReadTracker();
-const pushedInboxIds = new Set();
+// ── The host: this session's node, or a node's interior ──────
 
-// Event handlers are extracted into a single registration function so the
-// hot-swap path in sym_join_room can re-register them on the new node.
-// The function reads module-level `NODE_NAME`, `isPeerAllowed`, `pushChannel`,
-// `storeMessage`, and `extractCompactHeader` via closure; those don't change
-// across swaps.
-// Flush anything held for a peer that has just appeared. Items are dropped ONLY
-// after the send returns — never on dispatch, because a socket write is not
-// delivery and a crash between the two would lose mail we promised to hold.
-async function flushOutboxFor(peerName, peerId) {
-  const pending = outbox.pendingFor(NODE_NAME, peerName);
-  if (pending.length === 0) return;
-  process.stderr.write(
-    `sym-mesh-channel: "${peerName}" appeared — flushing ${pending.length} held CMB(s) from the outbox.\n`,
-  );
-  const sent = [];
-  for (const item of pending) {
-    try {
-      const opts = { to: peerId };
-      if (item.opts && item.opts.payload !== undefined) opts.payload = item.opts.payload;
-      const r = explicitSend(node, deliveredCmbKeys, item.categories, opts, (entry) => `flushed ${entry.key}`);
-      // The peer can vanish again between peer-joined and this send; an undelivered item stays held.
-      // Held items leave in order: anything not sent stops the flush, and the tail waits with it.
-      if (r.undelivered || r.isError) break;
-      sent.push(item.seq);
-    } catch (e) {
-      process.stderr.write(`sym-mesh-channel: outbox flush failed for #${item.seq}: ${e?.message || e}\n`);
-      break;   // keep ordering; a later item must not overtake a failed earlier one
-    }
+let NODE_FAULT = null;
+let host = null;
+let selfNodeId = null;
+const stderrLog = (m) => { try { process.stderr.write(`sym-mesh-channel: ${m}\n`); } catch {} };
+
+if (MODE === 'interior') {
+  const cap = readCapability();
+  if (cap.error || !cap.capability) {
+    NODE_FAULT = `INTERIOR MODE NOT ATTACHED: SYM_INTERIOR_SOCKET is set, but ${cap.error || 'no capability was given (SYM_INTERIOR_CAPABILITY_FILE, or SYM_INTERIOR_CAPABILITY)'}. ` +
+      'The node issues a capability when it starts a mind for a mission; without it every submission is refused.';
+  } else {
+    if (cap.warning) stderrLog(`interior: ${cap.warning}`);
+    host = new InteriorHost({
+      socketPath: INTERIOR_SOCKET,
+      capability: cap.capability,
+      defaultKind: (process.env.SYM_INTERIOR_KIND || '').trim() || null,
+      kinds: String(process.env.SYM_INTERIOR_KINDS || '').split(',').map((s) => s.trim()).filter(Boolean),
+      endOnExit: !/^(0|false|no|off)$/i.test(String(process.env.SYM_INTERIOR_END_ON_EXIT || '').trim()),
+      log: stderrLog,
+    });
   }
-  if (sent.length) {
-    const left = outbox.drop(NODE_NAME, sent);
-    process.stderr.write(
-      `sym-mesh-channel: flushed ${sent.length} to "${peerName}", ${left} still held in the outbox.\n`,
-    );
+} else {
+  if (PROJECT_CFG.badNodeId) stderrLog(`${PROJECT_CFG.file} node_id ${JSON.stringify(PROJECT_CFG.badNodeId)} is not a nodeId (a UUID); ignoring it.`);
+  if (process.env.SYM_NODE_ID && !isNodeId(process.env.SYM_NODE_ID)) stderrLog(`SYM_NODE_ID ${JSON.stringify(process.env.SYM_NODE_ID)} is not a nodeId (a UUID); ignoring it.`);
+  const nh = new NodeHost({ build: buildNode, nodeDir: (id) => sdk.identity.nodeDirById(id), log: stderrLog });
+  try {
+    nh.open({ serviceType: SERVICE_TYPE, room: ROOM, relay: RELAY_URL, relayToken: RELAY_TOKEN, nodeId: IDENTITY.nodeId, create: false });
+    host = nh;
+    selfNodeId = nh.nodeId;
+  } catch (err) {
+    NODE_FAULT = identityFault(err);
+    if (!NODE_FAULT) throw err;
+    stderrLog(NODE_FAULT);
   }
 }
 
-function registerNodeHandlers(n) {
-  // A peer we have actually SEEN is what makes a name "known" for the outbox.
-  // Recording it here — rather than trusting a directory on disk — is what stops
-  // a typo from creating a queue: identity.json exists for 961 of 962 node dirs
-  // on this machine, so disk presence admits essentially everything.
-  // Event name and payload verified in @sym-bot/sym lib/node.js:2584 —
-  // `this.emit('peer-joined', { id: peer.peerId, name: peer.name })`. It is
-  // 'peer-joined', NOT 'peer-connected'; a wrong name here would have failed
-  // silently, leaving the outbox correct but never flushed.
-  n.on('peer-joined', (p) => {
-    try {
-      const name = p?.name;
-      if (!name) return;
-      outbox.rememberPeer(NODE_NAME, name, p?.id || null);
-      flushOutboxFor(name, p?.id || null);
-    } catch { /* never let bookkeeping break peer handling */ }
-  });
+// ── Delivery policy (delivery-policy.js) ─────────────────────
+const ALLOWED = deliveryPolicy.readAllowedPeers(process.env.SYM_ALLOWED_PEERS);
+if (ALLOWED.ignored.length) {
+  stderrLog(`SYM_ALLOWED_PEERS entries that are not nodeIds are ignored (names are labels since 0.11): ${ALLOWED.ignored.map((s) => JSON.stringify(s)).join(', ')}` +
+    (ALLOWED.failClosed ? '. The list holds no nodeId, so it allows nothing until it lists nodeIds.' : ''));
+}
+const MAX_PAYLOAD = deliveryPolicy.readMaxPayloadBytes(process.env.SYM_MAX_PAYLOAD_BYTES);
+if (MAX_PAYLOAD.invalid !== undefined) stderrLog(`SYM_MAX_PAYLOAD_BYTES=${JSON.stringify(MAX_PAYLOAD.invalid)} is not a whole number of bytes; using the default of ${deliveryPolicy.DEFAULT_MAX_PAYLOAD_BYTES}.`);
+const policy = deliveryPolicy.createDeliveryPolicy({ allowedPeers: ALLOWED.nodeIds, failClosed: ALLOWED.failClosed, maxPayloadBytes: MAX_PAYLOAD.bytes });
+const RATE = deliveryPolicy.readRateLimit(process.env.SYM_RATE_LIMIT);
+if (RATE.invalid !== undefined) stderrLog(`SYM_RATE_LIMIT=${JSON.stringify(RATE.invalid)} is not a whole number of pushes per minute; using the default of ${deliveryPolicy.DEFAULT_RATE_LIMIT}.`);
+const pushRate = deliveryPolicy.createRateLimiter({ limit: RATE.limit });
 
-  // Identity collision (added in @sym-bot/sym 0.3.68): the relay told us
-  // another process is holding our nodeId. Don't try to reconnect — that
-  // caused the peer-flap loop documented in v0.1.2/v0.1.3 commit messages.
-  // Exit so Claude Code can decide whether to respawn (with the freshness
-  // window now elapsed) or surface the failure to the user.
-  n.on('identity-collision', (info) => {
-    process.stderr.write(
-      `sym-mesh-channel: identity collision on relay — another process is holding ` +
-      `nodeId=${info.nodeId} name=${info.name}. Exiting.\n`
-    );
-    process.exit(2);
-  });
-
-  // Auth refusal (@sym-bot/sym ≥ 0.13.5): the relay's channel table does not hold our token.
-  // The engine has already dropped to a slow retry; the node stays up for LAN peers. Put the
-  // line where the operator reads (the MCP server's stderr) — before this, the only trace of a
-  // misconfigured seat was in the relay operator's log, under a name nobody could place.
-  n.on('relay-auth-refused', (info) => {
-    const line =
-      `Relay ${info.relayUrl} refused ${info.name} (${info.code}: ${info.reason}). ` +
-      `The relay_token this session presents is not accepted by that relay — mint a fresh invite ` +
-      `with sym_invite_create, or get the team's invite, then sym_join_room with it ` +
-      `(or fix SYM_RELAY_TOKEN and restart). LAN peers are unaffected.`;
-    process.stderr.write(`sym-mesh-channel: ${line}\n`);
-    // Once per episode (the engine emits it once), so the session itself learns — stderr is
-    // read by a person, if anyone; the channel is read by the agent that can call the fix.
-    pushChannel('relay-auth-refused', { relayUrl: info.relayUrl, code: info.code, reason: info.reason, text: line });
-  });
-
-  n.on('cmb-accepted', (entry) => {
-    // The own-name check is on the deliverer (below), never on the createdBy a record claims (re-review F4).
-    if (entry.source === NODE_NAME) { securityAudit('push', 'own-name', NODE_NAME, '', inboxIdFor(n, entry) || undefined); return; }
-    // An admitted entry's `source` is the SDK's store-local `<receiver>+<deliverer>` key, which
-    // printed as "<us>+<them>" on every push. The allowlist, the own-name check and the rate key on
-    // the DELIVERER, the peer our own connection knows; the line prints the record's claimed author
-    // as well when that is someone else ("author via deliverer"). Neither is a verified identity.
-    // No recoverable deliverer is judged as 'unknown', never as the record's own claim (re-review F13).
-    const livePeers = (() => { try { return n.peers(); } catch { return []; } })();
-    const sender = delivererOf(entry, NODE_NAME, livePeers) || 'unknown';
-    const inboxId = inboxIdFor(n, entry);
-    // A peer delivering under our own name is an echo or an impostor; either way it is named on
-    // stderr with its id, and sym_receive lists the id, so it is never dropped without a trace.
-    if (sender === NODE_NAME) { securityAudit('push', 'own-name', sender, '', inboxId || undefined); return; }
-    const source = deliveryPolicy.displayName(senderLabel(entry, NODE_NAME, livePeers) || sender);   // what lines print
-    const categories = entry.cmb?.categories || {};
-    const payload = entry.cmb?.payload;
-    // The same judgement sym_receive, sym_fetch and sym_recall make (delivery-policy.js). This delivery
-    // is also in the SDK inbox, so nothing decided here loses it: sym_receive lists it, shown or withheld.
-    const delivery = deliveryPolicy.prepare({ from: sender, content: entry.content, categories, payload });
-    const verdict = policy.judge(delivery);
-    // Rate measures arrival, so it is counted once per delivery, before anything is pushed. Over it,
-    // only the push is held back: the delivery waits in the inbox and the unread line counts it.
-    const action = deliveryPolicy.pushAction(verdict, pushRate, sender);
-    if (action !== 'push') {
-      if (action === 'rate-held') securityAudit('push', 'rate-limit', sender, `over ${pushRate.limit}/min from this sender; push held, delivery waits in the inbox`, inboxId || undefined);
-      // An allowlisted-out sender is configuration, not an incident: no line per arrival on stderr.
-      else if (action !== 'silent') securityAudit('push', verdict.reason, sender, verdict.excerpt, inboxId || undefined);
-      // A withheld delivery is announced in our words only (the sender's name and our reason), with its
-      // id, so the session can tie the notice to the sym_receive line that names it.
-      if (action === 'notice') pushChannel('cmb-withheld', `[${source}] \u26a0 delivery withheld \u00b7 ${verdict.detail}${inboxId ? ` [${inboxId}]` : ''} \u00b7 sym_receive names it by id`);
-      return;
-    }
-    const focus = categories?.focus?.text || entry.content || '';
-    const mood = categories?.mood?.text || '';
-    const moodSuffix = mood && mood !== 'neutral' ? ` (mood: ${mood})` : '';
-    // Store the rendered CMB body so the agent can sym_fetch it by [mNNN] ID.
-    // When the CMB carries an opaque payload alongside CAT7 categories, the stored
-    // body gains a PAYLOAD section so sym_fetch returns it intact (in parts, when it
-    // is long), and the header a [+payload Nb] indicator saying structured data
-    // rides beyond CAT7. The inbox renders the same body the same way.
-    const body = deliveryPolicy.renderBody(entry.content || focus, delivery);
-    const payloadSuffix = deliveryPolicy.payloadTag(delivery);
-    // Directed (peer-bound) delivery indicator (MMP §9.2.2). A directed CMB was
-    // addressed to THIS node — surface it as sent-to-you so the agent knows to
-    // respond. `remixed:false` means SVAF delivered it but did not ingest it
-    // into memory (transient request, not stored) — flag it so the agent does
-    // not assume it is recallable later.
-    const dirTag = entry.directed ? ' →you' : '';
-    const memTag = entry.directed && entry.remixed === false ? ' ·not-stored' : '';
-    // Classifier-risk guard (2026-07-24): checkSecurity cleared this CMB of injection, but a benign
-    // CMB whose wording is offensive-security/policy-adjacent can still wedge OUR model the instant
-    // its text is auto-surfaced. Scan what we're about to surface; if flagged, quarantine — auto-push
-    // metadata only (quarantineHeader carries no peer free-text), keep the verbatim body stored for a
-    // deliberate sym_fetch. Guarantee is in NOT auto-surfacing, not in guessing the classifier.
-    const risk = scanClassifierRisk(deliveryPolicy.riskText(focus, body));
-    let header;
-    if (risk.risky) {
-      securityAudit('push', `classifier-risk:${risk.terms.join(',')}`, sender, focus);
-      // m122: a quarantined header that says only 'sym_fetch to view' gets ignored — the
-      // observed failure is the fetch round-trip NOT happening, twice this week (m034, the
-      // m053 original). Field NAMES and sizes are OUR vocabulary, not peer free-text, so the
-      // elision tag is safe here and tells the receiver substance exists and where.
-      header = quarantineHeader(source, dirTag, risk.terms.length, `${memTag}${payloadSuffix}${hiddenFieldsTag(categories)}`);
-    } else {
-      // m053: the header carries focus only — say what it cannot carry, explicitly.
-      header = `[${source}${dirTag}] ${focus}${moodSuffix}${memTag}${payloadSuffix}${hiddenFieldsTag(categories)}`;
-    }
-    // One message, one id: push under the delivery's inbox id, so sym_receive and sym_fetch name the
-    // same thing the notification did. Before, the push minted its own mNNN for a delivery the inbox
-    // already held as inNNNN, and the session met every message twice under two names.
-    const msgId = inboxId || storeMessage(sender, body, header);   // mNNN: an engine without an inbox; stores the routable name
-    // Credit the push only once it has gone out: one that failed (before mcp.connect, say) must not
-    // tag the sym_receive line as already seen.
-    const sent = pushChannel('cmb', `${header} [${msgId}]`);
-    if (inboxId) sent.then((ok) => { if (ok) pushedInboxIds.add(inboxId); });
-  });
-
-  n.on('message', (from, content) => {
-    const name = deliveryPolicy.displayName(from);
-    const verdict = policy.judge({ from, content, categories: null, payload: null });
-    // The same decision as a CMB, so the rate is counted before a withheld notice as before a push.
-    const action = deliveryPolicy.pushAction(verdict, pushRate, from);
-    if (action !== 'push') {
-      // A legacy direct message is not in the SDK inbox: over the rate it is dropped, and the audit
-      // line is the only record of it. Withheld, the push is the only place the session learns of it.
-      if (action === 'rate-held') securityAudit('push', 'rate-limit', from, `over ${pushRate.limit}/min from this sender; legacy message dropped`);
-      else securityAudit('push', verdict.reason, from, verdict.excerpt);
-      if (action === 'notice') pushChannel('message-withheld', `[${name}] \u26a0 legacy message withheld \u00b7 ${verdict.detail}`);
-      return;
-    }
-    // Same classifier-risk quarantine as cmb-accepted, for legacy direct messages.
-    const risk = scanClassifierRisk(content);
-    let header;
-    if (risk.risky) {
-      securityAudit('push', `classifier-risk:${risk.terms.join(',')}`, from, content.slice(0, 120));
-      header = quarantineHeader(name, '', risk.terms.length, '');
-    } else {
-      header = `[${name}] ${extractCompactHeader(from, content)}`;
-    }
-    const msgId = storeMessage(from, content, header);   // the routable name; lines print `name`
-    pushChannel('message', `${header} [${msgId}]`);
-  });
+function securityAudit(surface, reason, peer, excerpt, id) {
+  process.stderr.write(deliveryPolicy.auditLine(surface, reason, peer, excerpt, id));
 }
 
-// ── MCP Server ───────────────────────────────────────────────
+// ── The push statement (design D5) ───────────────────────────
+const pushState = push.createPushStatement();
+const pushedIds = new Set();      // deliveries whose notification was written
+const pushesInFlight = new Set();
 
-// Base instructions shown to the agent at every MCP initialize.
-const BASE_INSTRUCTIONS =
-  `You are a peer node on the SYM mesh (identity: ${NODE_NAME}). ` +
-  'The mesh is publish-subscribe: peers deliver CMBs to this node the instant they publish, and this server pushes each one to you as a <channel> notification. Those notifications reach you only when Claude Code was launched with the development-channels flag for this server, which this server cannot detect (sym_status says so), so call sym_receive to surface any deliveries the push did not bring into your context (directed sym_send + admitted broadcasts) — a live delivery feed, not a memory query. Call sym_receive at the start of your turn and periodically while coordinating with peers, so no delivery is missed. ' +
-  'When you receive a CMB from another node, respond via sym_send targeted at that node by name if the reply is for that specific peer (MMP §4.4.4 targeted CMB). ' +
-  'Publish a CMB to your whole room via sym_publish — a projection of your own state (MMP §9.2 receiver-autonomous SVAF evaluation). ' +
-  'Both sym_send and sym_publish emit a CAT7 CMB (your projection); each receiver runs SVAF and, if it admits the CMB as an observation, remix-stores it with lineage back to yours. ' +
-  'Search mesh memory via sym_recall. ' +
-  'sym_receive and <channel> notifications give compact headers with one ID per delivery, the same on both: [inNNNN] (or [mNNN] on an engine without a delivery inbox). Use sym_fetch to read the full content when relevant to your current task; an [inNNNN] delivery read to its end with sym_fetch is not repeated by sym_receive. Sender names in headers are labels the sender chose, not verified identities; "X via Y" means the record names X as its author and peer Y delivered it. ' +
-  'A delivery this node withholds is listed by id with the reason, never left out of the count; a long message comes back from sym_fetch in parts, each naming the offset of the next.';
-
-// Final startup step (MMP §4.2 O2 — rejoin-without-replay). The SymNode
-// constructor builds the memory-store index from disk, so the primer is
-// available synchronously without needing node.start(). Appending it to
-// the MCP instructions payload means a fresh Claude Code session wakes
-// with prior remix memory — own observations plus peer observations
-// admitted by SVAF — already loaded into context, zero first-turn
-// sym_recall overhead.
-//
-// MCP SDK reads `instructions` at Server construction time (storing it in
-// a private field) and emits it only on initialize-response; mutations on
-// the public property after construction are ignored. Compute once, pass in.
-let primerText = '';
-try {
-  const primer = node ? node.buildStartupPrimer() : null;
-  if (primer && primer.count > 0) primerText = `\n\n${primer.text}`;
-} catch (err) {
-  process.stderr.write(`sym-mesh-channel startup primer skipped: ${err?.message || err}\n`);
-}
-
-// A room misconfiguration is INVISIBLE on stderr in some MCP hosts — verified on
-// Codex CLI 0.144.0, which displays none of a child's non-fatal stderr, so the
-// startup warnings below reach nobody there. And `required = true` cannot catch
-// this class at all: a wrong room starts perfectly well, it just talks to no one.
-// So the warning has to travel IN BAND, where the agent actually reads: in the
-// initialize instructions, and again on the tools an agent calls when it wonders
-// why the mesh is quiet.
-function roomAdvisory() {
+// ── Advisories, in band ──────────────────────────────────────
+// Some hosts show none of a child's stderr, and a wrong room starts perfectly well, so the warnings
+// travel where the agent reads: the instructions, and the tools it calls when the mesh is quiet.
+let daemonRoomSaid = null;   // the room pair last said, so the daemon advisory is said once per change
+function roomAdvisory({ remember = true } = {}) {
+  if (MODE !== 'node') return [];
   const lines = [];
-  // The wrong-key case first: it EXPLAINS the fallback below, and a reader who sees only
-  // "you are in default" goes looking for a missing file rather than at the one they wrote.
   if (PROJECT_CFG.badNodeName) {
-    lines.push(
-      `MESH NODE ADVISORY: ${PROJECT_CFG.file} sets node_name ${JSON.stringify(PROJECT_CFG.badNodeName.value)}, which ` +
-      `${PROJECT_CFG.badNodeName.problem}. It was ignored, so this node runs as '${NODE_NAME}'. Fix the name in that file.`,
-    );
+    lines.push(`MESH NODE ADVISORY: ${PROJECT_CFG.file} sets node_name ${JSON.stringify(PROJECT_CFG.badNodeName.value)}, which ` +
+      `${PROJECT_CFG.badNodeName.problem}. It was ignored, so this node runs as '${NODE_NAME}'. Fix the name in that file.`);
+  }
+  if (PROJECT_CFG.badNodeId) {
+    lines.push(`MESH NODE ADVISORY: ${PROJECT_CFG.file} sets node_id ${JSON.stringify(PROJECT_CFG.badNodeId)}, which is not a nodeId (a UUID). It was ignored.`);
   }
   if (PROJECT_CFG.legacyGroup) {
-    lines.push(
-      `MESH ROOM ADVISORY: ${PROJECT_CFG.file} sets "group": "${PROJECT_CFG.legacyGroup}", which is ` +
-      `the name this project used BEFORE the rename to "room". It is not read, so the file looks ` +
-      `obeyed and this node fell back to '${ROOM}'. Rename the key to "room" — the value is right.`,
-    );
+    lines.push(`MESH ROOM ADVISORY: ${PROJECT_CFG.file} sets "group": "${PROJECT_CFG.legacyGroup}", the name this project used ` +
+      `before the rename to "room". It is not read, so this node fell back to '${ROOM}'. Rename the key to "room".`);
   } else if (PROJECT_CFG.unknownKeys && PROJECT_CFG.unknownKeys.length) {
-    lines.push(
-      `MESH ROOM ADVISORY: ${PROJECT_CFG.file} contains ${PROJECT_CFG.unknownKeys.map((k) => `"${k}"`).join(', ')}, ` +
-      `which this plugin does not read. Only "node_name" and "room" are honoured; anything else is ` +
-      `ignored silently, so check the spelling before trusting what the file appears to say.`,
-    );
+    lines.push(`MESH ROOM ADVISORY: ${PROJECT_CFG.file} contains ${PROJECT_CFG.unknownKeys.map((k) => `"${k}"`).join(', ')}, which this ` +
+      'plugin does not read. Only "node_name", "room" and "node_id" are honoured.');
   }
   if (ROOM === 'default' && !process.env.SYM_ROOM) {
-    lines.push(
-      `MESH ROOM ADVISORY: this node is in room 'default', which nothing configured — ` +
-      `it is the fallback. Peers in a named room are INVISIBLE from here and no error ` +
-      `will be raised. Set SYM_ROOM in this MCP server's env, or call sym_join_room.`,
-    );
+    lines.push('MESH ROOM ADVISORY: this node is in room \'default\', which nothing configured — it is the fallback. Peers in a named ' +
+      'room are invisible from here and no error will be raised. Set SYM_ROOM in this MCP server\'s env, or call sym_join_room.');
+  }
+  if (ALLOWED.ignored.length) {
+    lines.push(`MESH PEER ADVISORY: SYM_ALLOWED_PEERS lists ${ALLOWED.ignored.length} entr${ALLOWED.ignored.length === 1 ? 'y' : 'ies'} that ` +
+      `${ALLOWED.ignored.length === 1 ? 'is' : 'are'} not a nodeId, ignored: names are labels, not identities.` +
+      (ALLOWED.failClosed ? ' It lists no nodeId, so it allows nothing until it does (sym_peers shows nodeIds).' : ''));
   }
   try {
-    const fs = require('fs'), os = require('os'), path = require('path');
-    const daemonRoom = fs.readFileSync(path.join(os.homedir(), '.sym', 'room'), 'utf8').trim();
-    if (daemonRoom && daemonRoom !== ROOM) {
-      lines.push(
-        `MESH ROOM ADVISORY: the sym daemon is in room '${daemonRoom}' (~/.sym/room) but ` +
-        `this node resolved '${ROOM}' from ${ROOM_SOURCE}. They cannot see each other. ` +
-        `Call sym_join_room with room="${daemonRoom}", or fix the config to match.`,
-      );
+    const daemonRoom = fs.readFileSync(path.join(process.env.SYM_STATE_DIR || path.join(os.homedir(), '.sym'), 'room'), 'utf8').trim();
+    const pair = `${daemonRoom}|${ROOM}`;
+    if (daemonRoom && daemonRoom !== ROOM && (!remember || daemonRoomSaid !== pair)) {
+      if (remember) daemonRoomSaid = pair;
+      lines.push(`MESH ROOM ADVISORY: the sym daemon is in room '${daemonRoom}' but this node resolved '${ROOM}' from ${ROOM_SOURCE}. ` +
+        `They cannot see each other. Call sym_join_room with room="${daemonRoom}", or fix the config to match.`);
     }
-  } catch { /* absent daemon room file is the normal single-node case */ }
+  } catch { /* no daemon room file: the normal single-node case */ }
   return lines;
 }
 
-// ONE AGENT, ONE NODE (MMP §3.2). With the Claude Code plugin enabled AND a `claude-sym-mesh` entry in
-// ~/.claude.json or the project's .mcp.json (what `sym-mesh-channel start` writes), Claude Code runs
-// both servers, so one session is two mesh nodes with two identities and two stores — and only the one
-// named in the launch flag gets real-time push. Seen 2026-10-01: a session's plugin node sat in room
-// 'default' while its sibling was in the named room, and a peer's directed send to the plugin node
-// was never pushed. The plugin's .mcp.json sets SYM_CHANNEL_HOST=plugin so this server knows which it is.
+// ONE AGENT, ONE NODE. The plugin's .mcp.json sets SYM_CHANNEL_HOST=plugin, so this server knows which it is.
 const IS_PLUGIN_HOST = process.env.SYM_CHANNEL_HOST === 'plugin';
 function dualNodeAdvisory() {
-  const fs = require('fs'), os = require('os'), path = require('path');
+  if (MODE !== 'node') return [];
   const readJson = (p) => { try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return null; } };
   const projectDir = process.env.CLAUDE_PROJECT_DIR || process.cwd();
   try {
@@ -782,1152 +340,763 @@ function dualNodeAdvisory() {
       if (cj.mcpServers && cj.mcpServers['claude-sym-mesh']) where.push('~/.claude.json (user scope)');
       if (cj.projects?.[projectDir]?.mcpServers?.['claude-sym-mesh']) where.push(`~/.claude.json (project ${projectDir})`);
       const projEntry = readJson(path.join(projectDir, '.mcp.json'))?.mcpServers?.['claude-sym-mesh'];
-      // This repo's own .mcp.json IS the plugin's server definition; it is not a second server.
       if (projEntry && projEntry.env?.SYM_CHANNEL_HOST !== 'plugin') where.push(`${path.join(projectDir, '.mcp.json')}`);
       if (!where.length) return [];
-      return [
-        `MESH NODE ADVISORY: this is the sym-mesh-channel plugin's node, and a 'claude-sym-mesh' MCP server is also ` +
-        `configured in ${where.join(' and ')}. Claude Code runs both, so this agent is two mesh nodes (MMP §3.2 ` +
-        `requires one), and only the one named in --dangerously-load-development-channels gets real-time push. ` +
-        `Keep one: disable the plugin for this project, or remove the 'claude-sym-mesh' entry.`,
-      ];
+      return [`MESH NODE ADVISORY: this is the sym-mesh-channel plugin's node, and a 'claude-sym-mesh' MCP server is also configured in ` +
+        `${where.join(' and ')}. Claude Code runs both, so this agent is two mesh nodes (MMP §3.2 requires one). Keep one: disable the ` +
+        'plugin for this project, or remove the \'claude-sym-mesh\' entry.'];
     }
-    // Not the plugin: is the plugin enabled for this project? Later settings files override earlier ones.
     let enabled = false;
-    for (const f of [
-      path.join(os.homedir(), '.claude', 'settings.json'),
-      path.join(projectDir, '.claude', 'settings.json'),
-      path.join(projectDir, '.claude', 'settings.local.json'),
-    ]) {
+    for (const f of [path.join(os.homedir(), '.claude', 'settings.json'), path.join(projectDir, '.claude', 'settings.json'), path.join(projectDir, '.claude', 'settings.local.json')]) {
       const ep = readJson(f)?.enabledPlugins;
       if (!ep || typeof ep !== 'object') continue;
       for (const [k, v] of Object.entries(ep)) if (k.startsWith('sym-mesh-channel@')) enabled = v === true;
     }
     if (!enabled) return [];
-    return [
-      `MESH NODE ADVISORY: the sym-mesh-channel plugin is enabled for this project, and this '${NODE_NAME}' node is a ` +
-      `separate 'claude-sym-mesh' MCP server. Claude Code runs both, so this agent is two mesh nodes (MMP §3.2 ` +
-      `requires one), and only the one named in --dangerously-load-development-channels gets real-time push. ` +
-      `Keep one: set "enabledPlugins": {"sym-mesh-channel@<marketplace>": false} in .claude/settings.local.json, or remove this server.`,
-    ];
+    return [`MESH NODE ADVISORY: the sym-mesh-channel plugin is enabled for this project, and this '${NODE_NAME}' node is a separate ` +
+      '\'claude-sym-mesh\' MCP server. Claude Code runs both, so this agent is two mesh nodes (MMP §3.2 requires one). Keep one: set ' +
+      '"enabledPlugins": {"sym-mesh-channel@<marketplace>": false} in .claude/settings.local.json, or remove this server.'];
   } catch { return []; }
 }
 
-// Whether <channel> notifications reach the session is decided by how Claude Code was launched, and
-// MCP gives this server no signal of it — pushChannel() succeeds either way. The launch command line
-// is the next best evidence: walk up the process tree to the `claude` process and read its flags
-// (macOS and Linux; Windows has no cheap equivalent, so it stays "cannot be confirmed").
-let _launch;
-function claudeLaunch() {
-  if (_launch !== undefined) return _launch;
-  _launch = null;
-  if (process.platform === 'win32') return _launch;
-  try {
-    const { execFileSync } = require('child_process');
-    let pid = process.ppid;
-    const until = Date.now() + 2000;   // one budget for the whole walk, not 1.5 s per step (review F16)
-    for (let i = 0; i < 6 && pid > 1 && Date.now() < until; i++) {
-      const out = execFileSync('ps', ['-ww', '-o', 'ppid=,command=', '-p', String(pid)], { encoding: 'utf8', timeout: Math.max(200, until - Date.now()) }).trim();
-      const m = out.match(/^(\d+)\s+([\s\S]*)$/);
-      if (!m) break;
-      const cmd = m[2];
-      // Claude Code is `claude` as the program, `claude` as the script node or a shell runs (npm's bin
-      // shim), or node running its package's cli.js. Not just any command that ends in "claude" (F11).
-      // ps gives one string, so a path may hold spaces ("/Users/Jo Doe/.local/bin/claude"): match
-      // an absolute path that ends in /claude at the program position, or after node or a shell.
-      const PROG = '(?:\\/.*?\\/)?claude(?:\\s|$)';
-      const isClaude = new RegExp(`^${PROG}`).test(cmd)
-        || new RegExp(`^(?:\\S*\\/)?(?:node|sh|bash|zsh|dash)\\s+${PROG}`).test(cmd)
-        || /@anthropic-ai\/claude-code\/.*?cli\.m?js(\s|$)/.test(cmd);
-      if (isClaude) {
-        _launch = { flagged: /--dangerously-load-development-channels\b/.test(cmd), cmd };
-        break;
-      }
-      pid = Number(m[1]);
-    }
-  } catch { /* no ps, or no permission: unknown */ }
-  return _launch;
-}
-
-function pushStatusLine() {
-  const launch = claudeLaunch();
-  if (launch) {
-    // The whole handle, so `server:claude-sym-mesh-2` does not count as this server's (review F7).
-    const mine = IS_PLUGIN_HOST ? /plugin:sym-mesh-channel@\S+/ : /server:claude-sym-mesh(\s|,|$)/;
-    if (launch.flagged && mine.test(launch.cmd)) {
-      return `Push: on — Claude Code was launched with --dangerously-load-development-channels for this server, so deliveries arrive as <channel> notifications.`;
-    }
-    if (!launch.flagged) {
-      return `Push: off — Claude Code was launched without --dangerously-load-development-channels, so deliveries wait for sym_receive. ` +
-        `Relaunch with it (sym-mesh-channel start does) for real-time push.`;
-    }
-    return `Push: probably off for this server — Claude Code was launched with --dangerously-load-development-channels, but not naming ` +
-      `${IS_PLUGIN_HOST ? 'plugin:sym-mesh-channel@<marketplace>' : 'server:claude-sym-mesh'}.`;
-  }
-  const handle = IS_PLUGIN_HOST ? 'plugin:sym-mesh-channel@<marketplace>' : 'server:<this server\'s MCP name, normally claude-sym-mesh>';
-  let declared = '';
-  try {
-    const exp = mcp.getClientCapabilities()?.experimental;
-    if (exp && typeof exp === 'object' && Object.keys(exp).length) declared = ` Client declares experimental: ${Object.keys(exp).join(', ')}.`;
-  } catch { /* not connected yet */ }
-  return `Push: cannot be confirmed by this server. <channel> notifications reach the session only when Claude Code ` +
-    `was launched with --dangerously-load-development-channels ${handle}; otherwise deliveries wait for sym_receive.${declared}`;
-}
-
-// Built before the MCP server exists, on the path NODE_FAULT needs to survive: never let it throw.
 let startupAdvisory = [];
-try { startupAdvisory = [...roomAdvisory(), ...dualNodeAdvisory()]; }
-catch (e) { process.stderr.write(`sym-mesh-channel: startup advisory skipped: ${e?.message || e}\n`); }
+try { startupAdvisory = [...roomAdvisory({ remember: false }), ...dualNodeAdvisory()]; }
+catch (e) { stderrLog(`startup advisory skipped: ${e?.message || e}`); }
 
-const mcp = new Server(
-  { name: 'sym-mesh', version: '0.1.0' },
-  {
-    capabilities: {
-      tools: {},
-      experimental: { 'claude/channel': {} },
-    },
-    instructions: (NODE_FAULT ? `${NODE_FAULT}\n\n` : '') + BASE_INSTRUCTIONS
-      + (startupAdvisory.length ? `\n\n${startupAdvisory.join('\n')}` : '')
-      + primerText,
-  },
-);
+// ── The instructions: who this node is and how the tools work. No record text (design D8). ──
+function memoryLine() {
+  if (MODE !== 'node' || !host) return '';
+  const n = host.memoryCount();
+  return n > 0 ? ` This node's memory holds ${n} record(s); sym_recall "" lists the newest, as data.` : '';
+}
+
+function instructions() {
+  if (NODE_FAULT) return `${NODE_FAULT}\n\n`;
+  const common =
+    'A delivery line opens with who signed it and how it came: [label·last 8 of its nodeId →you] was directed to you, ' +
+    '[… →room] was bound to the room and admitted by this node\'s SVAF, and "via label·…" names the session that relayed it. ' +
+    'The label is the signer\'s own choice; the nodeId is the identity. A delivery this node cannot verify is listed by id and ' +
+    'reason, never shown. Each line ends with its id ([in0042]) and its CMB key. sym_fetch <id> gives the full verification ' +
+    'account and the body, in parts when long. ' +
+    'Pushes: deliveries are pushed as <channel> notifications when your host shows them. This server cannot see whether it does, ' +
+    'so it sends one push check carrying a code; if you received it, call sym_push_confirm with that code. Until then sym_receive ' +
+    'lists every delivery, so call it at the start of a turn and while coordinating. ' +
+    'Lineage: when you respond to a delivery, cite it — parents: ["<id or key>"] (MMP §14.3). Only the categories you give are sent.';
+  if (MODE === 'interior') {
+    const who = host && (host.name || host.nodeId) ? `the SYM mesh node ${host.name || ''}${host.nodeId ? ` (${host.nodeId})` : ''}` : 'a SYM mesh node';
+    const reads = host && host.supports.deliveries === true;
+    return `You are the mind of ${who}, attached to its interior (interior mode). You have no mesh identity of your own: ` +
+      'sym_send and sym_publish submit drafts to the node, which checks them against its mission, signs them as itself and sends them. ' +
+      `${host && host.kinds().length ? `The mission's submission kinds: ${host.kinds().join(', ')}. ` : 'Name the kind of each submission (kind). '}` +
+      (reads ? common : 'This node\'s interior does not serve its deliveries (sym 0.14\'s interior socket takes submit and end only), so you can submit but not read what the node admits; sym_receive says so. ' +
+        'Lineage: cite what a submission builds on in parents, as CMB keys of records the node holds (MMP §14.3). Only the categories you give are sent.');
+  }
+  return `You are a peer node on the SYM mesh: node '${NODE_NAME}', nodeId ${selfNodeId}. Peers' records reach you only after this ` +
+    'node has verified them (MMP v2.0 Core Secure). ' + common + ' ' +
+    'sym_send {to: "<nodeId or delivery id>", …} speaks to one peer; `to` never takes a name. sym_publish shares your own state with the room. ' +
+    'sym_recall searches this node\'s memory.' + memoryLine();
+}
+
+// The MCP server is built once the host has started (main): the instructions say who this node is,
+// and in interior mode only the node can say that. The SDK reads `instructions` at construction.
+let mcp = null;
 
 // ── Tools ────────────────────────────────────────────────────
 
-mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [
+const CAT7_PROPS = {
+  focus: { type: 'string', description: 'What this CMB is about. Required, and not blank.' },
+  issue: { type: 'string' },
+  intent: { type: 'string' },
+  motivation: { type: 'string' },
+  commitment: { type: 'string' },
+  perspective: { type: 'string' },
+  mood: { type: 'object', properties: { text: { type: 'string' }, valence: { type: 'number' }, arousal: { type: 'number' } } },
+};
+const PARENTS_PROP = {
+  type: 'array', items: { type: 'string' },
+  description: 'Lineage (MMP §14.3): the CMBs this one responds to or builds on — delivery ids (e.g. "in0042") or CMB keys ("cmb-" and 64 hex). Cite what you answer.',
+};
+const PAYLOAD_PROP = {
+  description: 'Optional structured data beyond CAT7 (any JSON value). It rides inside the signed record as its application section (MMP §8.8.3), so it is signed with the categories. Receivers read it with sym_fetch.',
+};
+const KIND_PROP = { type: 'string', description: 'The submission kind, one the mission declared (interior mode).' };
+
+function toolList() {
+  const interior = MODE === 'interior';
+  const extra = interior ? { kind: KIND_PROP } : {};
+  const tools = [
     {
       name: 'sym_send',
-      description:
-        'Send a structured CAT7 CMB to a specific mesh peer (targeted) or to all peers (broadcast, when "to" is omitted). ' +
-        'Receivers evaluate the CMB per-field via SVAF (MMP §9.2) and, if admitted, remix-store it with lineage pointing back to this CMB. ' +
-        'Use sym_send when the CMB is for a specific peer (e.g. a peer-review gating request directed at the reviewer role); ' +
-        'use sym_publish when publishing your own state to the whole room.',
+      description: interior
+        ? 'Submit a CAT7 CMB to the node for one recipient (`to`, a nodeId the mission allows) or for the room (no `to`). The node checks it, signs it as itself and sends it.'
+        : 'Send a CAT7 CMB to one peer (`to`: its nodeId, or a delivery id meaning that delivery\'s verified signer) or to the room (no `to`). ' +
+          'A name is never a route. Receivers run SVAF (MMP §9.2); a directed CMB is surfaced to its recipient whatever SVAF decides (§9.2.2). ' +
+          'Cite what you answer in `parents`. A peer with no session now is held in the outbox if this node has had one with it.',
       inputSchema: {
         type: 'object',
         properties: {
-          focus: { type: 'string', description: 'The task anchor / what this CMB is about. Required.' },
-          issue: { type: 'string' },
-          intent: { type: 'string' },
-          motivation: { type: 'string' },
-          commitment: { type: 'string' },
-          perspective: { type: 'string' },
-          mood: {
-            type: 'object',
-            properties: {
-              text: { type: 'string' },
-              valence: { type: 'number' },
-              arousal: { type: 'number' },
-            },
-          },
-          to: {
-            type: 'string',
-            description:
-              'Target peer: either the peer display name (e.g. "claude-research-win") or the full nodeId. ' +
-              'Call sym_peers first if unsure which peers are connected. Omit to broadcast to all peers.',
-          },
-          payload: {
-            description:
-              'Optional opaque payload riding alongside CAT7 categories. Use when carrying data beyond ' +
-              'CAT7 — e.g. an LLM request/response substrate protocol puts the prompt + request_id ' +
-              'in `payload` rather than smuggling JSON through `motivation` (which is reserved for ' +
-              'CAT7 semantics). Receivers see the payload via sym_fetch on the channel notification. ' +
-              'Any JSON-serializable value.',
-          },
+          ...CAT7_PROPS,
+          to: { type: 'string', description: interior ? 'Recipient nodeId (must be in the mission\'s allowlist). Omit for the room.' : 'Recipient: a nodeId (sym_peers lists them) or a delivery id such as "in0042" (its verified signer). Omit to send to the room.' },
+          parents: PARENTS_PROP,
+          payload: PAYLOAD_PROP,
+          ...extra,
         },
         required: ['focus'],
       },
     },
     {
       name: 'sym_publish',
-      description:
-        'Publish a structured CAT7 CMB — a projection of your own state — to all peers in your room. ' +
-        'Each receiver runs SVAF (MMP §9.2) and, if it admits the CMB as an observation, remix-stores it with lineage. ' +
-        'Equivalent to sym_send with "to" omitted — kept as a separate tool because publishing your own state is the common case and does not need peer selection.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          focus: { type: 'string' },
-          issue: { type: 'string' },
-          intent: { type: 'string' },
-          motivation: { type: 'string' },
-          commitment: { type: 'string' },
-          perspective: { type: 'string' },
-          mood: {
-            type: 'object',
-            properties: {
-              text: { type: 'string' },
-              valence: { type: 'number' },
-              arousal: { type: 'number' },
-            },
-          },
-          payload: {
-            description:
-              'Optional opaque payload riding alongside CAT7 categories. Use when broadcasting data ' +
-              'beyond CAT7 (e.g. llm-capability-advertise carrying served_capabilities). ' +
-              'Any JSON-serializable value.',
-          },
-        },
-        required: ['focus'],
-      },
-    },
-    {
-      name: 'sym_recall',
-      description: 'Search mesh memory for relevant CMBs.',
-      inputSchema: {
-        type: 'object',
-        properties: { query: { type: 'string', description: 'Search query (empty for all)' } },
-        required: ['query'],
-      },
-    },
-    {
-      name: 'sym_peers',
-      description: 'List connected mesh peers.',
-      inputSchema: { type: 'object', properties: {} },
-    },
-    {
-      name: 'sym_outbox_discard',
-      description: 'Discard CMBs this node is holding for a peer that is never coming back. Names the peer explicitly and reports what was dropped and how long it had been held — held mail is never evicted on its own, because only the sender knows it exists.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          peer: { type: 'string', description: 'The peer name whose held CMBs to discard, exactly as sym_peers reports it.' },
-        },
-        required: ['peer'],
-      },
-    },
-    {
-      name: 'sym_status',
-      description: 'Get mesh node status — relay state as one line (connected / refused with reason and fix / unreachable with next retry / not configured), peer count, memory count. Call it when a relay teammate is missing or after a relay-auth-refused channel notification.',
-      inputSchema: { type: 'object', properties: {} },
-    },
-    {
-      name: 'sym_fetch',
-      description: `Fetch full content of a mesh message by ID. Use when a compact channel notification needs deeper reading. A message longer than ${deliveryPolicy.FETCH_PAGE_CHARS.toLocaleString('en-US')} characters comes back in parts; each part names the offset that reads the next. A delivery this node withholds is answered with its reason, never its content.`,
-      inputSchema: {
-        type: 'object',
-        properties: {
-          msg_id: { type: 'string', description: 'Message ID (e.g., m007)' },
-          offset: { type: 'number', description: 'Character position to read from, for the next part of a long message (default 0). Each part names the offset of the one after it.' },
-        },
-        required: ['msg_id'],
-      },
+      description: interior
+        ? 'Submit a CAT7 CMB for the node\'s room: a projection of the work this mind is doing. The node checks it, signs it as itself and sends it.'
+        : 'Publish a CAT7 CMB — a projection of your own state — to the room. Each receiver runs SVAF (MMP §9.2) and, if it admits it, stores it with lineage. Cite what it builds on in `parents`.',
+      inputSchema: { type: 'object', properties: { ...CAT7_PROPS, parents: PARENTS_PROP, payload: PAYLOAD_PROP, ...extra }, required: ['focus'] },
     },
     {
       name: 'sym_receive',
-      description: 'Surface the CMBs the mesh has delivered to you in real-time — directed sym_send addressed to you, plus admitted broadcasts published to your room. The mesh is publish-subscribe: peers deliver the instant they publish, pushed as <channel> notifications. Because that push can be gated by Claude Code policy, sym_receive surfaces any deliveries it missed so none is lost — a live delivery feed, NOT a store query (use sym_recall to search stored memory). Call it at the start of a turn and periodically while coordinating so no delivery is missed. Returns compact headers with [mNNN] IDs (newest last); use sym_fetch for full content, reply via sym_send. A delivery withheld by this node\'s content policy is listed with its id, sender and reason, never counted as nothing.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          peek: { type: 'boolean', description: 'If true, do not advance the read cursor (same items return next call). Default false — draining.' },
-          limit: { type: 'number', description: 'Max messages to return (default 50, newest last).' },
-        },
-      },
+      description: 'The deliveries the mesh has brought you since the last call: directed CMBs and messages addressed to you, admitted room broadcasts, and moods (MMP §9.3). ' +
+        'Each line names its verified signer, its audience and its relay, its id and its CMB key. A delivery this node cannot verify, or withholds by its content policy, ' +
+        'is listed by id and reason, never counted as nothing. Once you have confirmed pushes reach you (sym_push_confirm), a delivery already pushed is named, not repeated. ' +
+        'A live delivery feed, not a memory search (that is sym_recall).',
+      inputSchema: { type: 'object', properties: { peek: { type: 'boolean', description: 'Do not advance the read cursor.' }, limit: { type: 'number', description: 'Most deliveries to return (default 50).' } } },
     },
     {
-      name: 'sym_room_info',
-      description: 'Report the mesh room this node is in (MMP §5.8). Shows service type + room name + peer count.',
+      name: 'sym_fetch',
+      description: `A delivery in full, by id: the whole verification account (signer nodeId and key source, audience, relay, assertion, room, whether it was stored) and the body. A body longer than ${deliveryPolicy.FETCH_PAGE_CHARS.toLocaleString('en-US')} characters comes in parts; each part names the offset of the next.`,
+      inputSchema: { type: 'object', properties: { msg_id: { type: 'string', description: 'Delivery id, e.g. "in0042" or "m007".' }, offset: { type: 'number', description: 'Character position to read from (default 0).' } }, required: ['msg_id'] },
+    },
+    {
+      name: 'sym_recall',
+      description: 'Search this node\'s memory. Shows this node\'s own records and peers\' records that were verified when admitted; others are counted, not shown.',
+      inputSchema: { type: 'object', properties: { query: { type: 'string', description: 'Search query (empty for the newest).' } }, required: ['query'] },
+    },
+    {
+      name: 'sym_push_confirm',
+      description: 'State, first-hand, whether this server\'s <channel> pushes reach you. Pass the code from a push-check notification you actually received ({code}); pass {} to have a new check sent; pass {reaching: false} if pushes do not reach you. ' +
+        'This server never guesses: until you confirm, sym_receive lists every delivery, pushed or not.',
+      inputSchema: { type: 'object', properties: { code: { type: 'string', description: 'The code in the push-check notification, e.g. "K7QX-29FM".' }, reaching: { type: 'boolean', description: 'false: pushes do not reach this session.' } } },
+    },
+    {
+      name: 'sym_status',
+      description: interior
+        ? 'Interior status: the node and mission this mind is attached to, the socket, what the node serves, submissions and refusals, and the push statement.'
+        : 'Node status: identity (nodeId, key fingerprint), room, relay state with the fix when refused, Core Secure sessions and key conflicts, peers, memory, and the push statement.',
       inputSchema: { type: 'object', properties: {} },
     },
+  ];
+  if (interior) return tools;
+  tools.push(
+    { name: 'sym_peers', description: 'Peers with a proven Core Secure session: each one\'s label, full nodeId, where its key came from, and its sessions. Also what the outbox holds.', inputSchema: { type: 'object', properties: {} } },
+    {
+      name: 'sym_outbox_discard',
+      description: 'Discard CMBs held for a peer that is not coming back: names the peer and reports what was dropped and how long it had been held. Held mail is never evicted on its own.',
+      inputSchema: { type: 'object', properties: { peer: { type: 'string', description: 'The nodeId the outbox holds for (sym_peers names it), or for a 0.10 item held under a label, that label.' } }, required: ['peer'] },
+    },
+    { name: 'sym_room_info', description: 'The mesh room this node is in (MMP §5.8): service type, room name and source, and its peers.', inputSchema: { type: 'object', properties: {} } },
     {
       name: 'sym_invite_create',
-      description: 'Generate a shareable invite URL for a named mesh room. LAN-only invite: pass room only, returns sym://room/{name}. Cross-network invite (sessions on different networks — a laptop on the road and a Mac at home, two teammates in two offices): pass cross_network=true; the URL carries the hosted relay and a token minted here that names an isolated channel on it, sym://team/{name}?relay=...&token=... Pass relay_url to use a relay your team runs instead; pass relay_token to reuse an existing channel token. Whoever holds the URL can join the channel.',
+      description: 'An invite URL for a room. It names this node and its key as the issuer, so whoever accepts it pins this node\'s key (sym D5). LAN invite: room only. Cross-network: cross_network=true (hosted relay, token minted here), or relay_url / relay_token. The URL is a secret (a team invite carries the relay token) and integrity-sensitive.',
       inputSchema: {
         type: 'object',
         properties: {
-          room: { type: 'string', description: 'Kebab-case room name (single or double hyphens), e.g. "backend-team" or a tenant-suffixed "x-review--team-…".' },
-          cross_network: { type: 'boolean', description: 'Make a relay invite: hosted relay + a token minted here (32 random bytes). Implied when relay_url or relay_token is given.' },
-          relay_url: { type: 'string', description: 'Optional WebSocket relay URL (wss://…) of a relay your team runs. Defaults to the hosted relay for a cross-network invite.' },
-          relay_token: { type: 'string', description: 'Optional existing channel token (32+ characters on the hosted relay; a relay you run may require a token its operator configured). Omit to mint one.' },
+          room: { type: 'string', description: 'Kebab-case room name.' },
+          cross_network: { type: 'boolean' },
+          relay_url: { type: 'string' },
+          relay_token: { type: 'string' },
         },
         required: ['room'],
       },
     },
     {
       name: 'sym_invite_info',
-      description: 'Parse a mesh invite URL and return everything the invitee needs to join: room name, service type, and any relay credentials. Read-only; does NOT switch the current node (use sym_join_room for that). Works on LAN room invites (sym://room/{name}), cross-network team invites (sym://team/{name}?relay=&token=), and app-specific room invites (e.g. melotune://room/{id}/{name}).',
-      inputSchema: {
-        type: 'object',
-        properties: { url: { type: 'string', description: 'Invite URL, e.g. sym://room/backend-team' } },
-        required: ['url'],
-      },
+      description: 'Parse an invite URL: room, service type, relay credentials, and the issuer\'s nodeId and key fingerprint. Read-only; sym_join_room {invite} joins and pins the issuer.',
+      inputSchema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] },
     },
     {
       name: 'sym_join_room',
-      description: 'Hot-swap this node into a different mesh room at runtime — no Claude Code restart needed. Stops the current SymNode, reconstructs it with the new room (and optional relay credentials), and restarts it. Teammates on the same room/relay will discover this node via Bonjour (LAN) or the relay (cross-network). With a relay, the result is the relay\'s answer (admitted / refused with the reason and fix / unreachable), waited for up to 10 s; a refusal returns isError. To leave a room, pass room="default" which reverts to the global _sym._tcp mesh.',
+      description: 'Move this node into another room at runtime (same identity). With `invite`, joins the invite\'s room and relay and pins the issuer\'s key when that nodeId is unbound here (a conflict is reported, never overridden). With a relay, the answer is the relay\'s (admitted / refused with the fix / unreachable), waited for up to 10 s. room="default" returns to the global mesh.',
       inputSchema: {
         type: 'object',
         properties: {
-          room: { type: 'string', description: 'Kebab-case room name (single or double hyphens), e.g. "backend-team" or a tenant-suffixed "x-review--team-…". Pass "default" to return to the global mesh.' },
-          relay_url: { type: 'string', description: 'Optional WebSocket relay URL for cross-network teams. When given, the credential is remembered for this room under ~/.sym/relays/ and re-used on the next start. When omitted, a credential remembered for this room is used if one exists.' },
-          relay_token: { type: 'string', description: 'Optional relay channel token (from the invite).' },
+          room: { type: 'string', description: 'Kebab-case room name, or "default".' },
+          invite: { type: 'string', description: 'An invite URL (sym://room/… or sym://team/…); its room and relay are used.' },
+          relay_url: { type: 'string' },
+          relay_token: { type: 'string' },
           lan_only: { type: 'boolean', description: 'Join LAN-only and forget any relay credential remembered for this room.' },
         },
-        required: ['room'],
       },
     },
-    {
-      name: 'sym_rooms_discover',
-      description: 'List SYM-mesh rooms currently advertising on the local network. Uses Bonjour / mDNS to find service types matching the SYM protocol. Only shows rooms with at least one node online right now — there is no central directory of offline-but-known rooms. macOS and Windows have Bonjour built in; Linux requires avahi-daemon.',
-      inputSchema: { type: 'object', properties: {} },
-    },
-  ],
-}));
-
-// UNREAD-INBOX ADVISORY (contract ruled by codex-mac, 2026-08-10).
-//
-// Some MCP hosts never invoke the model on an inbound CMB — verified on Codex,
-// where a directed CMB was verified and durable at cursor 4 / seq 5 and surfaced
-// only when the next user turn called sym_receive. So ANY mesh tool can succeed
-// while directed mail sits unread. This puts the count where the model already
-// looks: on every tool response.
-//
-// It is NOT a wake and NOT a push — nothing here invokes anyone. It is a count
-// on a reply the caller was already reading.
-//
-// Contract, kept deliberately narrow:
-//   · exactly one line, and ONLY when unread > 0 — silent at zero
-//   · COUNT ONLY: no sender, no focus, no payload
-//   · MUST NOT advance the cursor — inboxStatus() is read-only, unlike inbox()
-//   · labelled distinctly from held sender-outbox state, which is a different fact
-function inboxAdvisoryLine() {
-  try {
-    // read-only: does not move the cursor. Deliveries already read in full with sym_fetch are not
-    // unread, whatever the seq-ordered cursor says.
-    const s = readTracker.adjust(node, node.inboxStatus());
-    if (!s || !s.undrained) return null;
-    return `Mesh inbox: ${s.undrained} unread — call sym_receive.`;
-  } catch { return null; }
+    { name: 'sym_rooms_discover', description: 'SYM rooms advertising on the local network now (Bonjour / mDNS). Observation only.', inputSchema: { type: 'object', properties: {} } },
+  );
+  return tools;
 }
 
-// One wrapper so success and error responses behave identically. Applying this
-// per-case would drift the moment someone adds a tool.
-function withInboxAdvisory(result) {
-  const line = inboxAdvisoryLine();
-  if (!line || !result || !Array.isArray(result.content)) return result;
-  const last = result.content[result.content.length - 1];
-  if (last && last.type === 'text') {
-    // Append rather than push a second block: hosts differ in how they render
-    // multiple content blocks, and this must not become a second visual element.
-    return {
-      ...result,
-      content: [...result.content.slice(0, -1), { ...last, text: `${last.text}\n\n${line}` }],
-    };
+
+// ── The unread footer: one count, only when > 0, on every tool answer. Not a wake, not a push. ──
+function unreadNow() {
+  if (!host) return 0;
+  let n = 0;
+  try { n = host.unreadCount(); } catch { return 0; }
+  if (pushState.confirmed()) {
+    for (const id of pushedIds) { try { if (host.isUndrained(id)) n--; } catch { /* */ } }
   }
+  return Math.max(0, n);
+}
+function withInboxAdvisory(result) {
+  const n = unreadNow();
+  if (!n || !result || !Array.isArray(result.content)) return result;
+  const line = `Mesh inbox: ${n} unread — call sym_receive.`;
+  const last = result.content[result.content.length - 1];
+  if (last && last.type === 'text') return { ...result, content: [...result.content.slice(0, -1), { ...last, text: `${last.text}\n\n${line}` }] };
   return { ...result, content: [...result.content, { type: 'text', text: line }] };
 }
 
-mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
-  return withInboxAdvisory(await dispatchTool(request));
-});
+// ONE TOOL CALL AT A TIME, IN ARRIVAL ORDER (design D11). A call that never settles holds the queue
+// for at most TOOL_QUEUE_HOLD_MS, so one hung call costs order, not every later call.
+const TOOL_QUEUE_HOLD_MS = 60_000;
+let toolQueue = Promise.resolve();
+function onToolCall(request) {
+  const run = toolQueue.then(async () => withInboxAdvisory(await dispatchTool(request)));
+  toolQueue = Promise.race([run.catch(() => undefined), new Promise((r) => { const t = setTimeout(r, TOOL_QUEUE_HOLD_MS); t.unref?.(); })]);
+  return run;
+}
+
+/** Wait (at most 2 s) for pushes still being written, so their credit is settled before a drain. */
+async function settlePushes(ms = 2000) {
+  if (!pushesInFlight.size) return;
+  await Promise.race([Promise.allSettled([...pushesInFlight]), new Promise((r) => { const t = setTimeout(r, ms); t.unref?.(); })]);
+}
+
+const text = (t, isError) => ({ content: [{ type: 'text', text: t }], ...(isError ? { isError: true } : {}) });
 
 async function dispatchTool(request) {
-  const { name, arguments: args } = request.params;
-  // No node (identity held elsewhere, or a hot-swap that could not restore one): one answer for
-  // every tool, naming the cause, rather than a TypeError from whichever tool was called first.
-  if (!node) return { content: [{ type: 'text', text: NODE_FAULT || 'MESH NODE NOT RUNNING.' }], isError: true };
-
-  switch (name) {
-    case 'sym_send': {
-      {
-        const argErr = vetCmbArgs(args, ['to']);
-        if (argErr) return { content: [{ type: 'text', text: argErr }], isError: true };
-      }
-      // Emit a structured CAT7 CMB per MMP §4.2. When args.to names a peer,
-      // route as a targeted send (§4.4.4); otherwise broadcast. Receivers
-      // run SVAF (§9.2) and remix-store on accept — no separate "message"
-      // frame path, no raw-text channel.
-      const categories = {
-        focus: args.focus || 'directive',
-        issue: args.issue || 'none',
-        intent: args.intent || 'directive',
-        motivation: args.motivation || '',
-        commitment: args.commitment || '',
-        perspective: args.perspective || NODE_NAME,
-        mood: args.mood || { text: 'neutral', valence: 0, arousal: 0 },
-      };
-
-      let targetPeerId = null;
-      if (args.to) {
-        const peers = node.peers();
-        // Exact full-nodeId match first (unambiguous).
-        const byNodeId = peers.filter(p => p.peerId === args.to);
-        // Name match second.
-        const byName = peers.filter(p => p.name === args.to);
-        // Short-id prefix match last (for human-typed 8-char prefixes).
-        const byPrefix = peers.filter(p => p.id === args.to);
-
-        let matches;
-        if (byNodeId.length > 0) matches = byNodeId;
-        else if (byName.length > 0) matches = byName;
-        else if (byPrefix.length > 0) matches = byPrefix;
-        else matches = [];
-
-        if (matches.length === 0) {
-          // THE SEAM. This branch used to return before anything was sent, so no
-          // envelope ever left this package and a daemon-side spool sat
-          // downstream of a message that was never sent. Hold it here instead —
-          // but ONLY for a peer this node has actually seen. An unknown name
-          // stays a typed refusal, so a typo still creates no state.
-          if (!outbox.isKnownPeer(NODE_NAME, args.to)) {
-            return {
-              content: [{
-                type: 'text',
-                text: `Peer "${args.to}" not connected, and this node has never seen a peer by that name — ` +
-                      `nothing was queued. Call sym_peers to see connected peers. ` +
-                      `(An unrecognised name is refused rather than held, so a typo cannot create a queue.)`,
-              }],
-              isError: true,
-            };
-          }
-          const h = outbox.hold(NODE_NAME, args.to, categories, {
-            payload: args.payload !== undefined ? args.payload : undefined,
-          });
-          if (!h.held) {
-            return {
-              content: [{
-                type: 'text',
-                text: `Peer "${args.to}" not connected and the outbox could not hold this message (${h.reason}). ` +
-                      `NOTHING WAS QUEUED and nothing was sent. Full outbox refuses rather than evicting, ` +
-                      `because dropping held mail would be invisible to everyone but this node.`,
-              }],
-              isError: true,
-            };
-          }
-          const s = outbox.summary(NODE_NAME);
-          return {
-            content: [{
-              type: 'text',
-              text: `HELD AT SENDER — not delivered. Peer "${args.to}" is not connected, so this CMB is queued ` +
-                    `in this node's outbox (#${h.seq}; ${s.byPeer[args.to] || 1} waiting for "${args.to}", ` +
-                    `${s.total} total) and will be sent when "${args.to}" appears.\n\n` +
-                    `This queue lives at the SENDER and is invisible to "${args.to}" — it does not know the ` +
-                    `message exists. If this node does not come back, the message is lost. It is not delivery.`,
-            }],
-          };
-        }
-        if (matches.length > 1) {
-          const names = matches.map(p => `${p.name} (${p.peerId})`).join(', ');
-          return {
-            content: [{ type: 'text', text: `Peer "${args.to}" is ambiguous — matches: ${names}. Pass the full nodeId.` }],
-            isError: true,
-          };
-        }
-        targetPeerId = matches[0].peerId;
-      }
-
-      const sendOpts = {};
-      if (targetPeerId) sendOpts.to = targetPeerId;
-      if (args.payload !== undefined && args.payload !== null) sendOpts.payload = args.payload;
-      const targetPeer = targetPeerId ? node.peers().find((p) => p.peerId === targetPeerId) : null;
-      const r = explicitSend(node, deliveredCmbKeys, categories, sendOpts, (entry, connected) =>
-        targetPeerId
-          ? `Sent CMB ${entry.key} to ${args.to} (handed to the transport; MMP has no delivery receipt).${staleNote(targetPeer)}`
-          : (connected
-              ? `Broadcast CMB ${entry.key} to all peers`
-              : `Stored CMB ${entry.key} locally, but NO peers are connected — it was not delivered (not silently dropped; re-sendable once a peer connects).`));
-      if (r.undelivered && targetPeerId) {
-        // Listed in peers() but no transport took the frame: the peer is going or gone. Hold it the
-        // way an absent peer's mail is held, so it goes out when the peer next appears.
-        const holdName = targetPeer?.name || args.to;
-        const h = outbox.hold(NODE_NAME, holdName, categories, {
-          payload: args.payload !== undefined ? args.payload : undefined,
-        });
-        const held = h.held
-          ? ` HELD AT SENDER in this node's outbox (#${h.seq}) and re-sent when "${holdName}" appears. The queue is invisible to "${holdName}"; if this node does not come back, the message is lost.`
-          : ` The outbox could not hold it either (${h.reason}), so nothing is queued.`;
-        return { content: [{ type: 'text', text: r.text + held }], ...(h.held ? {} : { isError: true }) };
-      }
-      const dupNote = r.duplicate && targetPeer ? staleNote(targetPeer) : '';
-      return { content: [{ type: 'text', text: r.text + dupNote }], ...(r.isError ? { isError: true } : {}) };
-    }
-
-    case 'sym_publish': {
-      {
-        const argErr = vetCmbArgs(args, []);
-        if (argErr) return { content: [{ type: 'text', text: argErr }], isError: true };
-      }
-      const categories = {
-        focus: args.focus || 'observation',
-        issue: args.issue || 'none',
-        intent: args.intent || 'observation',
-        motivation: args.motivation || '',
-        commitment: args.commitment || '',
-        perspective: args.perspective || NODE_NAME,
-        mood: args.mood || { text: 'neutral', valence: 0, arousal: 0 },
-      };
-      const observeOpts = {};
-      if (args.payload !== undefined && args.payload !== null) observeOpts.payload = args.payload;
-      const r = explicitSend(node, deliveredCmbKeys, categories, observeOpts, (entry, connected) =>
-        connected
-          ? `Published: ${entry.key}`
-          : `Published locally: ${entry.key} — but NO peers are connected, so no one received it (not silently dropped).`);
-      return { content: [{ type: 'text', text: r.text }], ...(r.isError ? { isError: true } : {}) };
-    }
-
-    case 'sym_recall': {
-      const results = node.recall(args.query || '');
-      if (results.length === 0) {
-        return { content: [{ type: 'text', text: 'No memories found.' }] };
-      }
-      // A memory is text the session reads like any delivery: a peer's memory passes the same policy.
-      const lines = results.slice(0, 10).map((stored) => {
-        // The fourth surface: the same deliverer/label split as push, receive and fetch (re-review F8).
-        const who = recallSender(stored, NODE_NAME);
-        const r = { ...stored, source: who.from, label: who.label };
-        const out = deliveryPolicy.recallLine(r, { policy, selfName: NODE_NAME });
-        if (out.audit) securityAudit('recall', out.audit[0], who.from, out.audit[1]);
-        return out.line;
-      });
-      const more = results.length > 10
-        ? `\n\n(+${results.length - 10} more matched — narrow the query to see them)`
-        : '';
-      return { content: [{ type: 'text', text: lines.join('\n\n') + more }] };
-    }
-
-    case 'sym_outbox_discard': {
-      // THE ACTION THE ADVISORY NOW NAMES. A held CMB is invisible to everyone but this sender and
-      // is never evicted automatically — dropping mail silently is the one thing this queue must
-      // not do. But a peer ten days dead is not a wait, and its mail counts against the limit that
-      // refuses NEW mail, so the operator needs a way to accept the loss out loud.
-      const peer = String((args && args.peer) || '').trim();
-      if (!peer) return { content: [{ type: 'text', text: 'sym_outbox_discard needs a peer name — the one sym_peers reports in the OUTBOX line.' }] };
-      const pending = outbox.pendingFor(NODE_NAME, peer);
-      if (pending.length === 0) return { content: [{ type: 'text', text: `Nothing held for "${peer}". sym_peers lists the peers that do have mail waiting.` }] };
-      const now = Date.now();
-      const ages = pending.map((i) => outbox.ageDays(i, now)).filter((a) => a !== null);
-      const oldest = ages.length ? Math.max(...ages) : null;
-      const left = outbox.drop(NODE_NAME, pending.map((i) => i.seq));
-      return { content: [{ type: 'text', text:
-        `Discarded ${pending.length} CMB(s) held for "${peer}"` +
-        (oldest !== null ? `, the oldest held ${oldest} day(s)` : '') +
-        `. They were never delivered and are gone. ${left} CMB(s) remain held for other peers.` }] };
-    }
-
-    case 'sym_peers': {
-      const peers = node.peers();
-      // "No peers" is the exact moment someone asks why the mesh is quiet, and a
-      // wrong room is the commonest answer. Answer it here rather than making them
-      // find stderr the host may never show them.
-      const advisory = roomAdvisory();
-      // A sender-held queue is invisible to everyone but this node. Pending mail
-      // must therefore be reported wherever someone looks at peer state, or it
-      // is indistinguishable from mail that was delivered.
-      const ob = outbox.summary(NODE_NAME);
-      if (ob.total > 0) {
-        const per = Object.entries(ob.byPeer).map(([n, c]) => `${c} for "${n}"`).join(', ');
-        // The age is the part that makes this actionable. "They flush when the peer appears" reads
-        // as a wait; at ten days it is a peer that is not coming back, and the queue refuses new
-        // mail at MAX_ITEMS rather than evicting — so old mail for the dead eventually blocks new
-        // mail for the living (dev-team-4, 2026-09-14).
-        const age = ob.oldestDays;
-        const stale = age !== null && age >= 7;
-        advisory.push(
-          `OUTBOX: ${ob.total} CMB(s) HELD AT THIS SENDER, not delivered — ${per}` +
-          (age !== null ? `; oldest held ${age} day(s)` : "") + `. ` +
-          (stale
-            ? `A peer gone this long is unlikely to return: these will never flush, and they count against the ${outbox.MAX_ITEMS}-item limit that refuses NEW mail. Clear them with sym_outbox_discard once you accept they are lost.`
-            : `They flush when the peer appears. If this node does not come back, they are lost.`),
-        );
-      }
-      const advisoryText = advisory.length ? `\n\n${advisory.join('\n')}` : '';
-      if (peers.length === 0) {
-        return {
-          content: [{
-            type: 'text',
-            text: `No peers connected. (room '${ROOM}' — source: ${ROOM_SOURCE})${advisoryText}`,
-          }],
-        };
-      }
-      const lines = peers.map(p => `${p.name} via ${p.source || 'unknown'}`);
-      return {
-        content: [{
-          type: 'text',
-          text: `${peers.length} peer(s) in room '${ROOM}':\n${lines.join('\n')}${advisoryText}`,
-        }],
-      };
-    }
-
-    case 'sym_fetch': {
-      // A MALFORMED CALL AND A MISSING MESSAGE ARE DIFFERENT FACTS. Without this guard an
-      // absent msg_id (a caller sending some other parameter name) fell through to a store
-      // lookup on `undefined` and answered "Message undefined not found (expired or invalid
-      // ID)" — which names a cause that did not happen, sends the caller hunting for an
-      // expired message, and hides the one thing they could actually fix. Cost three
-      // round-trips of misdiagnosis on 2026-08-06, including a peer concluding the tool was
-      // broken mesh-wide when their call simply used the wrong key.
-      const rawId = typeof args.msg_id === 'string' ? args.msg_id.trim() : '';
-      if (!rawId) {
-        const got = Object.keys(args || {});
-        return { content: [{ type: 'text', text:
-          `sym_fetch was called without msg_id, so no lookup was attempted — this is a malformed call, not a missing message. ` +
-          `msg_id is required and takes an ID from a channel notification or sym_receive, e.g. "m007" or "in0003". ` +
-          (got.length ? `Received instead: ${got.join(', ')}.` : `No parameters were received.`) }] };
-      }
-      const at = deliveryPolicy.readOffset(args.offset);
-      if (at.error) return { content: [{ type: 'text', text: at.error }] };
-      // inNNNN → SDK delivery inbox (pull path); mNNN → channel-push store.
-      let head, body;
-      if (rawId.startsWith('in')) {
-        const stored = node.inboxGet(rawId);
-        if (!stored) return { content: [{ type: 'text', text: `Message ${rawId} not found (expired or invalid ID).` }] };
-        // Policy keys on the deliverer; the line shows the claimed author too (review F1).
-        const m = { ...stored, from: delivererOf(stored, NODE_NAME), label: senderLabel(stored, NODE_NAME) };
-        // The inbox holds every delivery, withheld ones included, so the fetch makes the same
-        // judgement push and receive make. Before, it made none, and a withheld message's whole
-        // text was one fetch away.
-        // A name is not proof, so under this node's own name only the allowlist is skipped.
-        const delivery = deliveryPolicy.prepare({ from: m.from, content: m.content, categories: m.categories, payload: m.payload });
-        const verdict = policy.judge(delivery, { self: m.from === NODE_NAME });
-        if (!verdict.show) {
-          securityAudit('fetch', verdict.reason, m.from, verdict.excerpt, rawId);
-          return { content: [{ type: 'text', text: `Withheld, so not shown: ${deliveryPolicy.withheldLine(rawId, m.from, verdict)}.` }] };
-        }
-        // The opaque payload rides along (preserved on the inbox message), rendered as the
-        // channel-push store renders it, so a directed CMB's structured data survives the pull path.
-        head = `[${deliveryPolicy.displayName(m.label || m.from)}] ${new Date(m.receivedAt).toISOString()}`;
-        body = deliveryPolicy.renderBody(m.content || '', delivery);
-      } else {
-        // The push store holds only what the push path judged fit to show, under this same policy.
-        const entry = MESSAGE_STORE.get(rawId);
-        if (!entry) {
-          return { content: [{ type: 'text', text: `Message ${rawId} not found (expired or invalid ID).` }] };
-        }
-        head = `[${deliveryPolicy.displayName(entry.from)}] ${new Date(entry.timestamp).toISOString()}`;
-        body = String(entry.content ?? '');
-      }
-      const part = deliveryPolicy.fetchPart({ id: rawId, head, body, offset: at.offset });
-      // Read only once the session has been handed the end of it: a long delivery comes in parts,
-      // and marking it read on part 1 would hide the rest from sym_receive and the unread footer.
-      if (rawId.startsWith('in') && part.last) readTracker.markRead(node, rawId);
-      return { content: [{ type: 'text', text: part.error || part.text }] };
-    }
-
-    case 'sym_receive': {
-      // Thin adapter over the SDK primitive: the node owns the delivery buffer
-      // + drain cursor (node.inbox()). This wrapper only formats for display.
-      const { messages, remaining } = node.inbox({ peek: !!args.peek, limit: args.limit });
-      // Every delivery drained here is accounted for in the answer: shown, withheld with its reason,
-      // counted against the allowlist, or counted as sent under this node's own name. The drain has
-      // already moved the cursor, so a delivery this answer leaves out is one the session never learns
-      // of (2026-09-27: a requested review, withheld for its size, reported as "Caught up").
-      // receiveLine never throws, so one delivery that cannot be rendered costs one line, not the batch.
-      const now = Date.now();
-      const shown = [], withheld = [], notAllowed = new Map(), alreadyRead = [], ownIds = [];
-      let ownName = 0;
-      for (const stored of messages) {
-        // Read in full with sym_fetch already: the drain moves past it and the answer names it, once.
-        if (readTracker.isRead(stored)) { alreadyRead.push(stored.id); continue; }
-        // Policy keys on the deliverer; the line shows the claimed author too (review F1).
-        const m = { ...stored, from: delivererOf(stored, NODE_NAME), label: senderLabel(stored, NODE_NAME) };
-        const r = deliveryPolicy.receiveLine(m, { policy, selfName: NODE_NAME, now, pushed: pushedInboxIds.has(m.id) });
-        if (!args.peek) pushedInboxIds.delete(m.id);   // reported once; keeps the set bounded
-        if (r.audit) securityAudit('receive', r.audit[0], m.from, r.audit[1], m.id);
-        if (r.bucket === 'shown') shown.push(r.line);
-        else if (r.bucket === 'withheld') withheld.push(r.line);
-        else if (r.bucket === 'not-allowed') notAllowed.set(m.from, (notAllowed.get(m.from) || 0) + 1);
-        else { ownName++; if (r.id) ownIds.push(r.id); }
-      }
-      return { content: [{ type: 'text', text: deliveryPolicy.receiveReport({ shown, withheld, notAllowed, ownName, ownIds, alreadyRead, remaining, peek: !!args.peek }) }] };
-    }
-
-    case 'sym_status': {
-      const s = node.status();
-      return {
-        content: [{
-          type: 'text',
-          text: `Node: ${NODE_NAME} (${node.nodeId?.slice(0, 8) || '?'})\n` +
-            `Room: ${ROOM} (${SERVICE_TYPE})\n` +
-            // The engine's one-line diagnosis (@sym-bot/sym ≥ 0.13.6): phase, fault and fix in the
-            // same sentence, so the session can act on a refused/unreachable relay without a
-            // human reading the relay operator's log. Older engines only know connected/not.
-            `Relay: ${s.relayStatus || (s.relayConnected ? 'connected' : 'disconnected')}\n` +
-            (RELAY_SOURCE ? `Relay credential: ${RELAY_SOURCE}\n` : '') +
-            `Peers: ${s.peerCount || 0}\n` +
-            `Memories: ${s.memoryCount || 0}\n` +
-            pushStatusLine() +
-            startupAdvisory.filter((l) => l.startsWith('MESH NODE ADVISORY')).map((l) => `\n${l}`).join('') +
-            (internalErrors ? `\nInternal errors survived: ${internalErrors} (last: ${lastInternalError}; stack on stderr)` : ''),
-        }],
-      };
-    }
-
-    case 'sym_room_info': {
-      const s = node.status();
-      // Read the connected-peer list from status() — `node.getPeers` is not a
-      // public method, so the old call always fell through to `[]` and printed
-      // "(no peers in this room)" even when peers were connected, while the
-      // count below (s.peerCount) showed the real number. That count/list
-      // disagreement looked like a membership-handshake failure but was purely
-      // this rendering bug. `status().peers` is the same source as peerCount.
-      const peers = Array.isArray(s.peers) ? s.peers : [];
-      const peerLines = peers.length
-        ? peers.map(p => `  ${p.name} (${(p.peerId || '').slice(0, 8)}) via ${p.source || '?'}`).join('\n')
-        : '  (no peers in this room)';
-      return {
-        content: [{
-          type: 'text',
-          text: `Mesh room (MMP §5.8):\n` +
-            `  room: ${ROOM}\n` +
-            `  room source: ${ROOM_SOURCE}\n` +
-            `  service type: ${SERVICE_TYPE}\n` +
-            `  node: ${NODE_NAME} (${node.nodeId?.slice(0, 8) || '?'})\n` +
-            `  peers in room: ${s.peerCount || 0}\n` +
-            peerLines + `\n\n` +
-            (ROOM === 'default' && !process.env.SYM_ROOM
-              ? `NOTE: 'default' is the fallback, not a configured choice — nothing set this room. ` +
-                `A teammate in a named room is invisible from here and nothing will error.\n`
-              : '') +
-            `To join a different room, restart the sym-mesh-channel MCP server with env var SYM_ROOM=<name> or SYM_SERVICE_TYPE=<_foo._tcp>.`,
-        }],
-      };
-    }
-
-    case 'sym_invite_create': {
-      const room = args?.room;
-      // Cross-network when asked for, or when either relay field is given. The relay
-      // defaults to the hosted one; the token is minted here when the caller brings none —
-      // 32 random bytes, which is both the hosted relay's admission floor and the reason two
-      // teams can never land in the same channel by picking the same phrase.
-      const crossNetwork = !!(args?.cross_network || args?.relay_url || args?.relay_token);
-      const relayUrl = crossNetwork ? (args?.relay_url || HOSTED_RELAY_URL) : undefined;
-      const minted = crossNetwork && !args?.relay_token;
-      const relayToken = crossNetwork
-        ? (args?.relay_token || crypto.randomBytes(32).toString('base64url'))
-        : undefined;
-      if (!room || typeof room !== 'string') {
-        return { content: [{ type: 'text', text: 'Missing required argument: room' }], isError: true };
-      }
-      if (!isCanonicalRoom(room) || room === 'default') {
-        return {
-          content: [{
-            type: 'text',
-            text: `Invalid room name: "${room}" — ${roomRefusalReason(room)}.`,
-          }],
-          isError: true,
-        };
-      }
-      // LAN-only flavor: sym://room/{name}
-      // Cross-network flavor: sym://team/{name}?relay=...&token=...
-      let url;
-      let flavor;
-      let tokenNote = '';
-      if (crossNetwork) {
-        if (relayUrl === HOSTED_RELAY_URL && relayToken.length < HOSTED_RELAY_MIN_TOKEN) {
-          return {
-            content: [{
-              type: 'text',
-              text: `relay_token is ${relayToken.length} characters; the hosted relay admits ${HOSTED_RELAY_MIN_TOKEN} or more. ` +
-                `Omit relay_token and one is minted for you.`,
-            }],
-            isError: true,
-          };
-        }
-        url = `sym://team/${room}?relay=${encodeURIComponent(relayUrl)}&token=${encodeURIComponent(relayToken)}`;
-        flavor = 'cross-network (relay)';
-        tokenNote = (minted
-          ? `The token in this URL was minted just now; it names an isolated channel on ${relayUrl}. `
-          : `The token in this URL names a channel on ${relayUrl}. `) +
-          `Anyone holding the URL can join that channel — share it as you would a password. ` +
-          `To lock a device out, mint a new invite and re-join with it; there is no per-device revocation.\n\n`;
-      } else {
-        url = `sym://room/${room}`;
-        flavor = 'LAN-only (Bonjour)';
-      }
-      const alreadyHere = ROOM === room && (!crossNetwork || (RELAY_URL === relayUrl && RELAY_TOKEN === relayToken));
-      const joinCall = { room, ...(crossNetwork ? { relay_url: relayUrl, relay_token: relayToken } : {}) };
-      const youRunning = alreadyHere
-        ? `You're already on this room${crossNetwork ? ' through this relay channel' : ''} — teammates who join will see you.`
-        : `You are not on this ${crossNetwork ? 'relay channel' : 'room'} yet. To be reachable, call sym_join_room first:\n\n    ${JSON.stringify(joinCall)}`;
-      return {
-        content: [{
-          type: 'text',
-          text: `Invite URL (${flavor}):\n\n    ${url}\n\n` +
-            `Share this URL with teammates. Each pastes it into Claude Code and calls sym_join_room (or sym_invite_info for a dry run first).\n\n` +
-            tokenNote +
-            youRunning,
-        }],
-      };
-    }
-
-    case 'sym_invite_info': {
-      const url = args?.url;
-      if (!url || typeof url !== 'string') {
-        return { content: [{ type: 'text', text: 'Missing required argument: url' }], isError: true };
-      }
-      const parsed = parseInviteURL(url);
-      if (parsed.error) {
-        return { content: [{ type: 'text', text: parsed.error }], isError: true };
-      }
-      const { appScheme, room, serviceType, roomId, roomName, relayUrl, relayToken } = parsed;
-
-      const out = {
-        app: appScheme,
-        room,
-        service_type: serviceType,
-        room_id: appScheme === 'sym' ? undefined : roomId,
-        room_name: appScheme === 'sym' ? undefined : roomName,
-        relay_url: relayUrl || undefined,
-        relay_token: relayToken || undefined,
-      };
-      for (const k of Object.keys(out)) if (out[k] === undefined) delete out[k];
-
-      const joinCall = {
-        room,
-        ...(relayUrl && { relay_url: relayUrl }),
-        ...(relayToken && { relay_token: relayToken }),
-      };
-
-      return {
-        content: [{
-          type: 'text',
-          text: `Parsed invite: ${url}\n\n` +
-            JSON.stringify(out, null, 2) + `\n\n` +
-            `To join, call sym_join_room:\n\n    ${JSON.stringify(joinCall)}\n\n` +
-            `This hot-swaps your node into the ${relayUrl ? 'relay channel' : 'LAN room'} — no Claude Code restart needed.`,
-        }],
-      };
-    }
-
-    case 'sym_join_room': {
-      const room = args?.room;
-      if (!room || typeof room !== 'string') {
-        return { content: [{ type: 'text', text: 'Missing required argument: room' }], isError: true };
-      }
-      if (!isCanonicalRoom(room)) {
-        return {
-          content: [{ type: 'text', text: `Invalid room name: "${room}" — ${roomRefusalReason(room)}.` }],
-          isError: true,
-        };
-      }
-      // Credential precedence: the call's own > the one remembered for this room > none.
-      // `lan_only` both skips and forgets the remembered one — the explicit way back to LAN.
-      let relayUrl = args?.relay_url || null;
-      let relayToken = args?.relay_token || null;
-      let relaySource = relayUrl ? 'this call' : null;
-      if (args?.lan_only) {
-        relayUrl = null; relayToken = null;
-        if (forgetRelay(room)) relaySource = 'forgotten';
-      } else if (!relayUrl) {
-        const saved = loadRelay(room);
-        if (saved) { relayUrl = saved.relay_url; relayToken = saved.relay_token; relaySource = `remembered (${saved.file})`; }
-      }
-
-      // The hosted relay's floor, applied HERE, before the current node is stopped: a token
-      // under 32 characters is refused by the relay with a reason an engine older than 0.13.5
-      // never prints, and the node then knocks every ~23 s for the life of the process — two
-      // sessions did exactly that on 2026-09-05. Refusing at the call leaves the node where it
-      // was and names the fix.
-      if (relayUrl && relayToken && relayUrl === HOSTED_RELAY_URL && relayToken.length < HOSTED_RELAY_MIN_TOKEN) {
-        return {
-          content: [{ type: 'text', text:
-            `relay_token is ${relayToken.length} characters; ${HOSTED_RELAY_URL} admits ${HOSTED_RELAY_MIN_TOKEN} or more, so this join would be refused on every attempt. ` +
-            `Nothing was changed — this node is still in room '${ROOM}'. Mint a token with sym_invite_create (cross_network: true) and share that invite; ` +
-            `the invitee joins with its token.` }],
-          isError: true,
-        };
-      }
-
-      const newServiceType = roomServiceType(room);
-      const prevRoom = ROOM;
-      const prevServiceType = SERVICE_TYPE;
-
-      // Stop the current node cleanly so peers see us leave, then construct
-      // a fresh one on the new service type. Any failure during restart is
-      // reported; the previous node will already be stopped, so the caller
-      // is in a known-disconnected state and can retry.
-      try {
-        await node.stop();
-      } catch (e) {
-        return {
-          content: [{ type: 'text', text: `Failed to stop current node: ${e?.message || e}` }],
-          isError: true,
-        };
-      }
-
-      // The old node is stopped, so a failure from here on used to leave the session holding a
-      // stopped node (a start failure) or no node at all (a constructor throw, uncaught, which
-      // killed the server). Either way: put the previous room back, and say what happened.
-      const restorePrevious = async (why) => {
-        let restored = null;
-        try {
-          try {
-            restored = buildNode({ serviceType: prevServiceType, room: prevRoom, relay: RELAY_URL, relayToken: RELAY_TOKEN });
-          } catch (e) {
-            // Our own half-stopped node can still hold the lock for a moment; wait once, then retry.
-            if (e?.code !== 'EIDENTITYLOCK' || (e.holderPid !== undefined && e.holderPid !== process.pid)) throw e;
-            await new Promise((r) => setTimeout(r, 500));
-            restored = buildNode({ serviceType: prevServiceType, room: prevRoom, relay: RELAY_URL, relayToken: RELAY_TOKEN });
-          }
-          registerNodeHandlers(restored);
-          await restored.start();
-          node = restored;
-          return `${why}\n\nRestored the previous room "${prevRoom}"; this node is back where it was.`;
-        } catch (e2) {
-          if (restored) { try { await restored.stop(); } catch {} }
-          node = null;
-          NODE_FAULT = `MESH NODE NOT RUNNING: sym_join_room "${room}" failed (${why}) and the previous room ` +
-            `"${prevRoom}" could not be restored (${e2?.message || e2}). Restart this MCP server.`;
-          return NODE_FAULT;
-        }
-      };
-
-      let newNode;
-      try {
-        newNode = buildNode({ serviceType: newServiceType, room, relay: relayUrl, relayToken });   // same stable identity across a room hot-swap
-      } catch (e) {
-        const why = e?.code === 'EIDENTITYLOCK' ? identityLockFault(e) : `could not create a node for room "${room}": ${e?.message || e}`;
-        return { content: [{ type: 'text', text: await restorePrevious(why) }], isError: true };
-      }
-      registerNodeHandlers(newNode);
-
-      try {
-        await newNode.start();
-      } catch (e) {
-        let stopNote = '';
-        try { await newNode.stop(); } catch (se) { stopNote = `; stopping it also failed: ${se?.message || se}`; }   // releases the identity lock for the restore
-        return { content: [{ type: 'text', text: await restorePrevious(`failed to start a node on room "${room}": ${e?.message || e}${stopNote}`) }], isError: true };
-      }
-
-      // Swap module-level references only after successful start.
-      node = newNode;
-      // A reconnect voids prior delivery credits: peers must re-establish, and a CMB
-      // delivered to the old room's peers may never reach the new room — so a
-      // dedup after the swap must be re-issued, not suppressed (E8 variant c).
-      deliveredCmbKeys = new Set();
-      ROOM = room;
-      // Keep the source honest after a hot-swap: reporting a stale `SYM_ROOM env`
-      // here would explain the room by something that is no longer why it is set.
-      ROOM_SOURCE = 'sym_join_room at runtime (not persisted to this server\'s env)';
-      SERVICE_TYPE = newServiceType;
-      RELAY_URL = relayUrl;
-      RELAY_TOKEN = relayToken;
-      // Remember the credential for this room so the next start of this server re-joins the
-      // same channel without being asked. Written under the state root, never the project.
-      let remembered = null;
-      if (relayUrl && relaySource === 'this call') {
-        remembered = saveRelay(room, { relay_url: relayUrl, relay_token: relayToken });
-        RELAY_SOURCE = remembered ? `remembered for room '${room}' (${remembered})` : 'sym_join_room (not persisted — the relays directory is not writable)';
-      } else if (relayUrl) {
-        RELAY_SOURCE = relaySource;
-      } else {
-        RELAY_SOURCE = null;
-      }
-
-      publishRoomBeacon();   // re-advertise the new room on _symrooms._tcp
-
-      const swapped = `Hot-swapped from room "${prevRoom}" (${prevServiceType}) to "${room}" (${newServiceType}).\n`;
-      if (!relayUrl) {
-        return {
-          content: [{
-            type: 'text',
-            text: swapped +
-              (relaySource === 'forgotten' ? `The relay credential remembered for "${room}" has been forgotten; this node is LAN-only.\n` : '') +
-              `Discovering peers on the new service type. Call sym_peers in a moment to see who's online.`,
-          }],
-        };
-      }
-      const credentialLine = remembered
-        ? `Relay credential remembered for room "${room}" (${remembered}, mode 0600) — the next start of this server re-joins it; sym_join_room {room, lan_only: true} forgets it.\n`
-        : relaySource && relaySource.startsWith('remembered')
-          ? `Relay credential restored from the one remembered for this room.\n`
-          : relaySource === 'this call'
-            ? `Relay credential NOT remembered (could not write under the relays directory) — this join lasts until the server restarts.\n`
-            : '';
-
-      // A join over a relay is answered by the relay — admitted, refused, or nobody home —
-      // and that answer is the result of this call, not "discovering peers". Wait for it
-      // (bounded) so the session sees a refused token or an unreachable relay here, in the
-      // tool result it is already reading, instead of in a log it never opens.
-      const outcome = typeof node.awaitRelayOutcome === 'function'
-        ? await node.awaitRelayOutcome(10000)
-        : null;
-      const relayLine = node.status().relayStatus || `relay: ${relayUrl}`;
-      const failed = outcome && (outcome.phase === 'refused' || outcome.phase === 'collision');
-      const settled = outcome && outcome.phase === 'connected';
-      return {
-        content: [{
-          type: 'text',
-          text: swapped +
-            `Relay: ${relayLine}\n` +
-            credentialLine +
-            (settled
-              ? `Call sym_peers to see who's online; teammates who join with the same invite will appear as they arrive.`
-              : failed
-                ? `You are still in room "${room}" for LAN peers; nothing crosses the relay until this is fixed.`
-                : `The relay has not answered yet — it keeps retrying in the background. Call sym_status to see where it stands.`),
-        }],
-        ...(failed ? { isError: true } : {}),
-      };
-    }
-
-    case 'sym_rooms_discover': {
-      const result = await discoverRooms();
-      return {
-        content: [{
-          type: 'text',
-          text: result.text,
-        }],
-        isError: result.isError || false,
-      };
-    }
-
-    default:
-      return { content: [{ type: 'text', text: `Unknown tool: ${name}` }] };
-  }
-}
-
-// ── Compact Channel — message store for lazy-load (v0.1) ────
-// Per COO spec cmb_compact_channel_v0.1.md: push compact headers,
-// store full content for on-demand sym_fetch retrieval. ~10% token
-// savings on mesh traffic without context loss.
-const MESSAGE_STORE = new Map(); // channel-push surface (mNNN) for sym_fetch when channels are enabled
-let msgSeq = 0;
-const MAX_STORED = 200;
-
-function storeMessage(from, content, header) {
-  const msgId = `m${String(++msgSeq).padStart(3, '0')}`;
-  MESSAGE_STORE.set(msgId, { from, content, header: header || null, timestamp: Date.now() });
-  while (MESSAGE_STORE.size > MAX_STORED) {
-    const oldest = MESSAGE_STORE.keys().next().value;
-    MESSAGE_STORE.delete(oldest);
-  }
-  return msgId;
-}
-
-function extractCompactHeader(from, content) {
-  const lines = content.split('\n').filter(l => l.trim());
-  const focusMatch = content.match(/focus[=:]\s*([^\n\]]{0,80})/i);
-  const bracketMatch = content.match(/\[([^\]]{0,120})\]/);
-
-  const hasHalt = /\bhalt\b/i.test(content);
-  const hasDirective = /\bdirective\b/i.test(content);
-  const hasResults = /\bresult|complete|landed|done\b/i.test(content);
-  const hasAck = /\back\b/i.test(content);
-
-  let signal = '';
-  if (hasHalt) signal = 'HALT';
-  else if (hasDirective) signal = 'DIRECTIVE';
-  else if (hasResults) signal = 'RESULT';
-  else if (hasAck) signal = 'ACK';
-
-  const parts = [];
-  if (signal) parts.push(signal);
-  if (focusMatch) parts.push(`focus=${focusMatch[1].trim()}`);
-  else if (bracketMatch) parts.push(bracketMatch[1].trim());
-  else if (lines[0]) parts.push(lines[0].slice(0, 100) + (lines[0].length > 100 ? '\u2026' : ''));
-
-  const approxTokens = Math.round(content.length / 4);
-  return parts.join(' | ') + ` (~${approxTokens}tok)`;
-}
-
-// ── Delivery policy (delivery-policy.js) ─────────────────────
-// SVAF gates on semantic relevance; this layer gates on safety, and it is the same judgement on
-// every surface where a peer's words can enter the context: the push, sym_receive, sym_fetch and sym_recall.
-//
-// SYM_ALLOWED_PEERS (optional, defense in depth): comma-separated peer node names. When set, only
-// deliveries from listed peers are shown; sym_receive counts the rest by sender. When empty or
-// unset, all authenticated peers are eligible (SVAF still gates on content relevance).
-//
-// SYM_MAX_PAYLOAD_BYTES: the largest payload shown, default 1 MiB. A larger one is withheld and
-// named; anything up to it is read in parts through sym_fetch.
-//
-// SYM_RATE_LIMIT: pushes per sender per minute, default 30. Over it the push is held back and the
-// delivery waits in the inbox for sym_receive.
-//
-// Never silently drop: every withholding writes an audit line to stderr for the operator, and the
-// session is told the delivery exists, with our reason and none of the peer's text.
-const ALLOWED_PEERS = (process.env.SYM_ALLOWED_PEERS || '')
-  .split(',')
-  .map(s => s.trim())
-  .filter(Boolean);
-
-const MAX_PAYLOAD = deliveryPolicy.readMaxPayloadBytes(process.env.SYM_MAX_PAYLOAD_BYTES);
-if (MAX_PAYLOAD.invalid !== undefined) {
-  process.stderr.write(
-    `sym-mesh-channel: SYM_MAX_PAYLOAD_BYTES=${JSON.stringify(MAX_PAYLOAD.invalid)} is not a whole number of bytes; ` +
-    `using the default of ${deliveryPolicy.DEFAULT_MAX_PAYLOAD_BYTES}.\n`
-  );
-}
-const policy = deliveryPolicy.createDeliveryPolicy({ allowedPeers: ALLOWED_PEERS, maxPayloadBytes: MAX_PAYLOAD.bytes });
-
-const RATE = deliveryPolicy.readRateLimit(process.env.SYM_RATE_LIMIT);
-if (RATE.invalid !== undefined) {
-  process.stderr.write(
-    `sym-mesh-channel: SYM_RATE_LIMIT=${JSON.stringify(RATE.invalid)} is not a whole number of pushes per minute; ` +
-    `using the default of ${deliveryPolicy.DEFAULT_RATE_LIMIT}.\n`
-  );
-}
-const pushRate = deliveryPolicy.createRateLimiter({ limit: RATE.limit });
-
-function securityAudit(surface, reason, peer, excerpt, id) {
-  process.stderr.write(deliveryPolicy.auditLine(surface, reason, peer, excerpt, id));
-}
-
-// ── Mesh Events → Channel Notifications ──────────────────────
-
-// mcp.notification() is async: "Not connected" (a CMB arriving while node.start() runs, before
-// mcp.connect) comes back as a rejected promise, which the try/catch around the call never saw and
-// which nothing else handled. A push that cannot go out is not lost — the delivery is in the inbox.
-// Resolves true once the notification was written, false if it could not be.
-function pushChannel(eventType, data) {
   try {
-    const sent = mcp.notification({
-      method: 'notifications/claude/channel',
-      params: {
-        content: typeof data === 'string' ? data : JSON.stringify(data),
-        meta: { event_type: eventType, source: 'sym-mesh' },
-      },
-    });
-    return Promise.resolve(sent).then(() => true, () => false);
-  } catch { return Promise.resolve(false); }
+    return await routeTool(request);
+  } catch (e) {
+    const answer = cd.notSentAnswer(request.params && request.params.name, e);
+    if (answer) return answer;
+    throw e;
+  }
 }
 
-// All node.on(...) handlers live in registerNodeHandlers(n) above so the
-// hot-swap path in sym_join_room can attach them to a freshly-constructed
-// SymNode without duplicating logic. This call wires up the initial node.
-if (node) registerNodeHandlers(node);
+// ── input hygiene: a dropped parameter is a dropped meaning ──
+function vetCmbArgs(args, extraKeys) {
+  const known = new Set(['focus', 'issue', 'intent', 'motivation', 'commitment', 'perspective', 'mood', 'payload', 'content', 'parents', ...extraKeys]);
+  const unknown = Object.keys(args || {}).filter((k) => !known.has(k));
+  if (unknown.length) {
+    const hint = MODE === 'node' && unknown.includes('kind') ? ' (`kind` applies only in interior mode)' : '';
+    return `Unknown parameter(s): ${unknown.join(', ')}${hint}. Allowed: ${[...known].join(', ')}. Nothing was sent — fix the call (a dropped parameter is a dropped meaning).`;
+  }
+  if (args && args.content && !args.focus) args.focus = String(args.content);
+  if (args && args.focus !== undefined && (typeof args.focus !== 'string' || !args.focus.trim())) {
+    return 'focus is required and must not be blank: it is what the CMB is about. Nothing was sent.';
+  }
+  return null;
+}
 
-// Peer presence events are intentionally NOT pushed to Claude's context.
-// They're high-frequency, low-signal (peers flap on relay reconnects, daemon
-// restarts, NAT keepalive blips), and a flood will eat the context window.
-// Use sym_peers / sym_status on demand instead. Only CMBs and direct messages
-// are surfaced as channel notifications — those carry actual cognitive payload.
+function peerTag(nodeId) {
+  if (!host || MODE !== 'node') return shortId(nodeId);
+  const p = host.peers().find((x) => x.peerId === nodeId);
+  const label = p ? p.name : host.outbox.knownLabel(nodeId);
+  return label ? deliveryPolicy.whoTag(label, nodeId) : shortId(nodeId);
+}
 
-// ── Start ────────────────────────────────────────────────────
+function lineageNote(parents) {
+  return parents.length ? ` Lineage: ${parents.length} parent(s) cited (${parents.map((k) => `${k.slice(0, 16)}…`).join(', ')}).` : '';
+}
 
-// Clean shutdown — disconnect from the relay before exiting so other peers
-// see us leave immediately, and so a fast restart of this MCP doesn't race
-// our own zombie connection on the relay (which would trigger the relay's
-// duplicate-nodeId replacement path and cause peer flap loops).
-//
-// Idempotent: Claude Code may send SIGTERM and then SIGKILL; we want the
-// first signal to get us cleanly off the relay even if the second one
-// arrives before stop() resolves.
+function emitAnswer(out, { to, parents }) {
+  const lin = lineageNote(parents);
+  switch (out.outcome) {
+    case 'sent': {
+      const peer = host.peers().find((p) => p.peerId === to);
+      return text(`Sent CMB ${out.key} (assertion ${out.assertionId}) to ${peerTag(to)} (${to}); handed to its session — MMP has no delivery receipt.` +
+        (out.duplicate ? ' This node\'s memory already held this cognition, so this is a new signed assertion of it.' : '') + lin + cd.staleNote(peer));
+    }
+    case 'published':
+      return text(`Published CMB ${out.key} (assertion ${out.assertionId}) to room '${ROOM}'${out.dispatched !== null ? `; handed to ${out.dispatched} session(s)` : ''}. Each receiver's SVAF decides whether to admit it.${lin}`);
+    case 'no-peers':
+      return text(`Published locally: CMB ${out.key} is in this node's memory, but no peer has a session with this node, so no one received it.${lin}`);
+    case 'already-in-memory':
+      return text('Already in memory: this node\'s store holds identical CAT7 cognition (one content address, MMP §8.8.2), so nothing new went out. ' +
+        'That is not an error. To say something new, change what you say.');
+    case 'already-said':
+      return text(`Already said: identical to this node's latest record (${out.key}), so it is cited, not minted again (MMP §7.5). Nothing new went out.`);
+    case 'remix-refused':
+      return text('Not sent: MMP §15.7 — a remix of a peer\'s record needs new domain data, and this node\'s last emission already remixed one. ' +
+        'Publish an observation of your own first (no parents), or send this without parents.', true);
+    case 'undelivered': {
+      const why = cd.NOT_SENT_SAID[out.reason] || out.reason || 'no session took the frame';
+      const base = `NOT DELIVERED — ${why}; CMB ${out.key} is in this node's memory only.`;
+      if (out.held) return text(`${base} HELD AT SENDER in this node's outbox (#${out.held.seq}) and re-sent when ${peerTag(to)}'s session returns. The queue is invisible to the recipient; if this node does not come back, it is lost.`);
+      return text(`${base} ${out.holdRefused && out.holdRefused.outcome === 'unknown-peer' ? 'It was not held: this node has never had a session with that nodeId.' : `The outbox could not hold it either (${out.holdRefused ? out.holdRefused.reason : 'unknown'}).`}`, true);
+    }
+    case 'held': {
+      const s = host.outbox.summary();
+      const forPeer = s.byPeer[to] ? s.byPeer[to].count : 1;
+      return text(`HELD AT SENDER — not delivered. ${peerTag(to)} (${to}) has no session with this node now, so the CMB is queued in this node's outbox ` +
+        `(#${out.seq}; ${forPeer} waiting for it, ${s.total} in all) and is sent when its session returns. The queue is invisible to the recipient; if this node does not come back, it is lost.`);
+    }
+    case 'unknown-peer':
+      return text(`Not sent: ${to} has no session with this node, and this node has never had one with it, so nothing was queued (an unknown nodeId is refused, so a typo creates no state). sym_peers lists the peers with a session.`, true);
+    case 'hold-refused':
+      return text(`Not sent and not held: ${peerTag(to)} has no session now, and the outbox could not hold the CMB (${out.reason}). A full outbox refuses rather than evicting.`, true);
+    case 'submitted':
+      return text(`Submitted as kind '${out.kind}': the node signed and sent CMB ${out.key} (assertion ${out.assertionId}) to its room.${lin}`);
+    case 'submitted-directed':
+      return text(`Submitted as kind '${out.kind}': the node signed and sent CMB ${out.key} (assertion ${out.assertionId}) to ${to}.${lin}`);
+    case 'refused':
+      return text(`Not submitted: ${out.text}.`, true);
+    default:
+      return text(`The node answered ${JSON.stringify(out.outcome)}.`, true);
+  }
+}
+
+async function emitTool(name, args) {
+  const extra = name === 'sym_send' ? ['to'] : [];
+  if (MODE === 'interior') extra.push('kind');
+  const argErr = vetCmbArgs(args, extra);
+  if (argErr) return text(argErr, true);
+  const categories = cd.givenCategories(args);
+  if (!categories.focus) return text('focus is required and must not be blank: it is what the CMB is about. Nothing was sent.', true);
+  const par = cd.resolveParents(args.parents, (id) => host.keyOf(id));
+  if (par.error) return text(`Not sent: ${par.error}`, true);
+  let to = null;
+  if (name === 'sym_send' && args.to !== undefined && args.to !== null && args.to !== '') {
+    const r = cd.resolveTo(args.to, {
+      signerOf: (id) => host.signerOf(id),
+      peersLabelled: (label) => (MODE === 'node' ? host.peers().filter((p) => p.name === label).map((p) => ({ nodeId: p.peerId })) : []),
+    });
+    if (r.error) return text(`Not sent: ${r.error}`, true);
+    to = r.nodeId;
+    if (selfNodeId && to === selfNodeId) return text('Not sent: that nodeId is this node itself.', true);
+  }
+  const out = await host.emitRecord({ categories, to, parents: par.keys, payload: args.payload, kind: args.kind });
+  return emitAnswer(out, { to, parents: par.keys });
+}
+
+async function routeTool(request) {
+  const { name } = request.params;
+  const args = request.params.arguments || {};
+  if (!host) return text(NODE_FAULT || 'MESH NODE NOT RUNNING.', true);
+
+  if (name === 'sym_push_confirm') return pushConfirmTool(args);
+  if (name === 'sym_send' || name === 'sym_publish') return emitTool(name, args);
+  if (name === 'sym_receive') return receiveTool(args);
+  if (name === 'sym_fetch') return fetchTool(args);
+  if (name === 'sym_recall') return recallTool(args);
+  if (name === 'sym_status') return statusTool();
+  if (MODE === 'interior') {
+    if (['sym_peers', 'sym_outbox_discard', 'sym_room_info', 'sym_invite_create', 'sym_invite_info', 'sym_join_room', 'sym_rooms_discover'].includes(name)) {
+      return text(`${name} is not available in interior mode: the node owns its room, its peers and its outbox; this mind only submits and reads.`, true);
+    }
+    return text(`Unknown tool: ${name}`, true);
+  }
+  switch (name) {
+    case 'sym_peers': return peersTool();
+    case 'sym_outbox_discard': return outboxDiscardTool(args);
+    case 'sym_room_info': return roomInfoTool();
+    case 'sym_invite_create': return inviteCreateTool(args);
+    case 'sym_invite_info': return inviteInfoTool(args);
+    case 'sym_join_room': return joinRoomTool(args);
+    case 'sym_rooms_discover': { const r = await discoverRooms(); return text(r.text, r.isError); }
+    default: return text(`Unknown tool: ${name}`, true);
+  }
+}
+
+// ── sym_push_confirm ─────────────────────────────────────────
+async function pushConfirmTool(args) {
+  const unknown = Object.keys(args).filter((k) => k !== 'code' && k !== 'reaching');
+  if (unknown.length) return text(`Unknown parameter(s): ${unknown.join(', ')}. Allowed: code, reaching.`, true);
+  if (args.reaching === false) {
+    pushState.answer({ reaching: false });
+    return text('Recorded: pushes do not reach this session. sym_receive lists every delivery; call it at the start of a turn and while coordinating.');
+  }
+  if (args.code === undefined || args.code === null || args.code === '') {
+    const ok = await sendPushCheck();
+    return text(ok
+      ? 'A push check was sent just now as a <channel> notification. If it reaches you, call sym_push_confirm with its code. If nothing arrives, pushes do not reach this session: sym_receive lists every delivery.'
+      : 'A push check could not be written to the host just now. sym_receive lists every delivery.');
+  }
+  const r = pushState.answer({ code: args.code });
+  if (!r.ok) return text('That is not a code this server sent. The code appears only in a push-check <channel> notification; nothing changed. sym_push_confirm {} sends a new check.', true);
+  return text('Confirmed, first-hand: pushes from this server reach you. sym_receive now names a delivery it already pushed instead of repeating it (sym_fetch reads one again), and the unread count leaves those out.');
+}
+
+async function sendPushCheck() {
+  const code = pushState.issue();
+  const label = MODE === 'interior' ? `the interior of ${host && host.name ? host.name : 'its node'}` : `node '${NODE_NAME}'`;
+  const ok = await pushChannel('push-check', push.checkText(code, label));
+  if (ok) pushState.sent();
+  return ok;
+}
+
+// ── sym_receive ──────────────────────────────────────────────
+async function receiveTool(args) {
+  await settlePushes();
+  const r = await host.drain({ peek: !!args.peek, limit: typeof args.limit === 'number' && args.limit > 0 ? Math.floor(args.limit) : 50 });
+  if (r.unsupported) return text(r.unsupported);
+  const now = Date.now();
+  const shown = [], withheld = [], unverified = [], own = [], alreadyRead = [], alreadyPushed = [];
+  const notAllowed = new Map();
+  const confirmed = pushState.confirmed();
+  for (const d of r.items) {
+    if (d.acked) { alreadyRead.push(d.id); continue; }
+    if (confirmed && pushedIds.has(d.id)) { alreadyPushed.push(d.id); if (!args.peek) pushedIds.delete(d.id); continue; }
+    const line = deliveryPolicy.receiveLine(d, { policy, selfNodeId, now, pushed: pushedIds.has(d.id) });
+    if (!args.peek) pushedIds.delete(d.id);
+    if (line.audit) securityAudit('receive', line.audit[0], d.facts ? d.facts.signer.nodeId : (d.moodFrom || 'unverified'), line.audit[1], d.id);
+    if (line.bucket === 'shown') shown.push(line.line);
+    else if (line.bucket === 'withheld') withheld.push(line.line);
+    else if (line.bucket === 'unverified') unverified.push(line.line);
+    else if (line.bucket === 'not-allowed') notAllowed.set(line.who, (notAllowed.get(line.who) || 0) + 1);
+    else own.push(d.id);
+  }
+  return text(deliveryPolicy.receiveReport({ shown, withheld, unverified, notAllowed, own, alreadyRead, alreadyPushed, remaining: r.remaining, peek: !!args.peek }));
+}
+
+// ── sym_fetch ────────────────────────────────────────────────
+async function fetchTool(args) {
+  const rawId = typeof args.msg_id === 'string' ? args.msg_id.trim() : '';
+  if (!rawId) {
+    const got = Object.keys(args || {});
+    return text('sym_fetch was called without msg_id, so no lookup was attempted — this is a malformed call, not a missing delivery. ' +
+      'msg_id is required and takes an id from a channel notification or sym_receive, e.g. "in0042" or "m007". ' +
+      (got.length ? `Received instead: ${got.join(', ')}.` : 'No parameters were received.'));
+  }
+  const at = deliveryPolicy.readOffset(args.offset);
+  if (at.error) return text(at.error);
+  const d = await host.get(rawId);
+  if (!d) return text(`Delivery ${rawId} not found (expired, unknown, or not served by this node's interior).`);
+  const j = deliveryPolicy.judgeDelivery(d, { policy, selfNodeId });
+  if (j.bucket === 'unverified') {
+    securityAudit('fetch', `unverified:${d.withheld}`, 'unverified', '', rawId);
+    return text(`Withheld, so not shown: ${deliveryPolicy.unverifiedLine(d)}.`);
+  }
+  if (j.bucket === 'withheld' || j.bucket === 'not-allowed') {
+    securityAudit('fetch', j.verdict.reason, d.facts ? d.facts.signer.nodeId : d.moodFrom, j.verdict.excerpt, rawId);
+    return text(`Withheld, so not shown: ${deliveryPolicy.withheldLine(rawId, d.facts ? deliveryPolicy.whoTag(d.facts.signer.label, d.facts.signer.nodeId) : 'its sender', j.verdict)}.`);
+  }
+  const head = deliveryPolicy.fetchHead(d) + (j.bucket === 'own' ? '\nSigned by this node itself: its own record, relayed back.' : '');
+  const prepared = deliveryPolicy.prepare({ content: d.content, categories: d.categories, payload: d.payload });
+  const body = d.kind === 'mood'
+    ? `mood: ${d.mood ? d.mood.text : d.content}`
+    : deliveryPolicy.renderBody(d.content || '', prepared);
+  const part = deliveryPolicy.fetchPart({ id: rawId, head, body, offset: at.offset });
+  if (part.last) { try { await host.markRead(rawId); } catch { /* best effort */ } }
+  return text(part.error || part.text);
+}
+
+// ── sym_recall ───────────────────────────────────────────────
+async function recallTool(args) {
+  const raw = await host.recall(args.query || '');
+  if (raw && raw.unsupported) return text(raw.unsupported);
+  const results = Array.isArray(raw) ? raw : (raw && raw.items) || [];
+  if (!results.length) return text('No memories found.');
+  const lines = [];
+  let hidden = 0;
+  for (const r of results) {
+    if (lines.length >= 10) break;
+    const out = deliveryPolicy.recallLine(r, { policy, selfName: NODE_NAME });
+    if (out.bucket === 'unverified') { hidden++; continue; }
+    if (out.audit) securityAudit('recall', out.audit[0], r.author && r.author.nodeId ? r.author.nodeId : 'self', out.audit[1]);
+    lines.push(out.line);
+  }
+  const more = results.length - lines.length - hidden;
+  return text((lines.length ? lines.join('\n\n') : 'No verified memory matched.') +
+    (hidden ? `\n\n(${hidden} peer record(s) matched that were not verified when admitted — stored before Core Secure, or quarantined — not shown.)` : '') +
+    (more > 0 ? `\n\n(+${more} more matched — narrow the query to see them)` : ''));
+}
+
+// ── sym_status ───────────────────────────────────────────────
+async function statusTool() {
+  const lines = [];
+  if (MODE === 'interior') {
+    const m = host.mission;
+    lines.push(`Mode: interior — this session is the mind of ${host.name || 'a node'}${host.nodeId ? ` (${host.nodeId})` : ''}; it has no mesh identity of its own.`);
+    lines.push(`Interior socket: ${host.socketPath}${host.closedReason ? ` — ${host.closedReason}` : ''}`);
+    lines.push(m ? `Mission: ${m.missionId || '?'} (mind ${m.mindId || '?'}); kinds ${Array.isArray(m.kinds) ? m.kinds.join(', ') : '?'}; allowlist ${Array.isArray(m.allowTo) && m.allowTo.length ? m.allowTo.join(', ') : 'room only'}`
+      : `Mission: not described by the node (sym 0.14's socket serves submit and end only)${host.kinds().length ? `; kinds from SYM_INTERIOR_KINDS: ${host.kinds().join(', ')}` : ''}${host.defaultKind ? `; default kind ${host.defaultKind}` : ''}`);
+    const sup = (k) => (host.supports[k] === true ? 'yes' : host.supports[k] === false ? 'no (SDK gap)' : 'not asked yet');
+    lines.push(`The node serves: deliveries ${sup('deliveries')}, push ${sup('subscribe')}, recall ${sup('recall')}`);
+    lines.push(`Submissions: ${host.counts.submitted} signed and sent, ${host.counts.refused} refused${host.counts.refused ? ` (${Object.entries(host.counts.refusedByReason).map(([k, v]) => `${k} ×${v}`).join(', ')})` : ''}`);
+    lines.push(`On exit: ${host.endOnExit ? 'ends this mind (revokes the capability)' : 'leaves the mind running (SYM_INTERIOR_END_ON_EXIT=0)'}`);
+  } else {
+    const s = host.status();
+    const cs = s.coreSecure || {};
+    let pub = null;
+    try { pub = sdk.identity.loadIdentity({ nodeId: host.nodeId, create: false }).publicKey; } catch { /* */ }
+    lines.push(`Node: ${NODE_NAME} — nodeId ${host.nodeId}, key fingerprint ${keyFingerprint(pub)}`);
+    if (!IDENTITY.nodeId) lines.push(`  Pin this folder's agent so it is never re-minted: add "node_id": "${host.nodeId}" to ${PROJECT_CFG.file || '.sym/node.json'}.`);
+    lines.push(`Room: ${ROOM} (${SERVICE_TYPE})${LAN_OFF ? ' — relay only (SYM_LAN=off)' : ''}`);
+    lines.push(`Relay: ${s.relayStatus || (s.relayConnected ? 'connected' : (RELAY_URL ? 'disconnected' : 'not configured'))}`);
+    if (RELAY_SOURCE) lines.push(`Relay credential: ${RELAY_SOURCE}`);
+    const sessions = cs.sessions || {};
+    lines.push(`Core Secure: ${sessions.confirmed || 0} confirmed session(s), ${sessions.authenticating || 0} authenticating; ${cs.keyBindings ?? '?'} key binding(s)` +
+      (Array.isArray(cs.keyConflicts) && cs.keyConflicts.length ? `; ${cs.keyConflicts.length} KEY CONFLICT(S) for the operator: ${cs.keyConflicts.map((c) => c.nodeId || JSON.stringify(c)).join(', ')} (sym keys resolve)` : '; no key conflicts'));
+    if (s.legacyImport && s.legacyImport.routes) lines.push(`Legacy Import: ${s.legacyImport.routes} route(s) — what they deliver is withheld here as unverified.`);
+    lines.push(`Peers: ${s.peerCount || 0}`);
+    lines.push(`Memories: ${s.memoryCount || 0}`);
+  }
+  if (ALLOWED.set) lines.push(`Allowlist: ${ALLOWED.nodeIds.length} nodeId(s)${ALLOWED.ignored.length ? `; ${ALLOWED.ignored.length} entr(ies) ignored (not nodeIds)` : ''}${ALLOWED.failClosed ? ' — it allows nothing until it lists nodeIds' : ''}`);
+  lines.push(push.statusLine(pushState));
+  for (const l of startupAdvisory.filter((x) => x.startsWith('MESH NODE ADVISORY'))) lines.push(l);
+  for (const l of roomAdvisory().filter((x) => x.includes('sym daemon'))) lines.push(l);
+  if (internalErrors) lines.push(`Internal errors survived: ${internalErrors} (last: ${lastInternalError}; stack on stderr)`);
+  return text(lines.join('\n'));
+}
+
+// ── sym_peers ────────────────────────────────────────────────
+const KEY_SOURCE_SHORT = { pinned: 'pinned', proven: 'proven', grant: 'grant-vouched', anchor: 'anchor' };
+function outboxLines() {
+  const ob = host.outbox.summary();
+  if (!ob.total) return [];
+  const per = Object.entries(ob.byPeer).map(([id, v]) => `${v.count} for ${v.label ? deliveryPolicy.whoTag(v.label, id) : shortId(id)} (${id})`);
+  const labels = Object.entries(ob.byLabelOnly).map(([l, c]) => `${c} held by 0.10 for the label "${deliveryPolicy.displayName(l)}", which is not a route (discard it with sym_outbox_discard {peer: "${deliveryPolicy.displayName(l)}"})`);
+  const stale = ob.oldestDays !== null && ob.oldestDays >= 7;
+  return [`OUTBOX: ${ob.total} CMB(s) HELD AT THIS SENDER, not delivered — ${[...per, ...labels].join(', ')}` +
+    (ob.oldestDays !== null ? `; oldest held ${ob.oldestDays} day(s)` : '') + '. ' +
+    (stale ? `A peer gone this long is unlikely to return; these count against the ${OUTBOX_MAX_ITEMS}-item limit that refuses new mail. Clear them with sym_outbox_discard once you accept they are lost.`
+      : 'They flush when the peer\'s session returns. If this node does not come back, they are lost.')];
+}
+
+function peersTool() {
+  const peers = host.peers();
+  const advisory = [...roomAdvisory(), ...outboxLines()];
+  const advisoryText = advisory.length ? `\n\n${advisory.join('\n')}` : '';
+  if (!peers.length) return text(`No peers with a proven session. (room '${ROOM}' — source: ${ROOM_SOURCE})${advisoryText}`);
+  const lines = peers.map((p) => {
+    const sessions = Array.isArray(p.sessions) && p.sessions.length ? p.sessions.map((x) => x.transport).join('+') : (p.source || '?');
+    return `${deliveryPolicy.displayName(p.name)} — nodeId ${p.peerId}; key ${KEY_SOURCE_SHORT[p.keySource] || p.keySource || '?'}; ${sessions}${p.profile && p.profile !== 'core-secure' ? ` (${p.profile}: unverified)` : ''}`;
+  });
+  return text(`${peers.length} peer(s) in room '${ROOM}' (send to one with to: "<nodeId>"):\n${lines.join('\n')}${advisoryText}`);
+}
+
+function outboxDiscardTool(args) {
+  const peer = String(args.peer || '').trim();
+  if (!peer) return text('sym_outbox_discard needs a peer: the nodeId the OUTBOX line names (or, for a 0.10 item, its label).', true);
+  const pending = isNodeId(peer) ? host.outbox.pendingFor(peer) : host.outbox.heldForLabel(peer);
+  if (!pending.length) return text(`Nothing held for ${JSON.stringify(peer)}. sym_peers lists what the outbox holds.`);
+  const now = Date.now();
+  const ages = pending.map((i) => ageDays(i, now)).filter((a) => a !== null);
+  const left = host.outbox.drop(pending.map((i) => i.seq));
+  return text(`Discarded ${pending.length} CMB(s) held for ${JSON.stringify(peer)}${ages.length ? `, the oldest held ${Math.max(...ages)} day(s)` : ''}. ` +
+    `They were never delivered and are gone. ${left} CMB(s) remain held for other peers.`);
+}
+
+function roomInfoTool() {
+  const s = host.status();
+  const peers = Array.isArray(s.peers) ? s.peers : [];
+  const peerLines = peers.length ? peers.map((p) => `  ${deliveryPolicy.whoTag(p.name, p.peerId)} via ${(p.sessions || []).map((x) => x.transport).join('+') || p.source || '?'}`).join('\n') : '  (no peers in this room)';
+  return text('Mesh room (MMP §5.8):\n' +
+    `  room: ${ROOM}\n  room source: ${ROOM_SOURCE}\n  service type: ${SERVICE_TYPE}\n  node: ${NODE_NAME} (${host.nodeId})\n  peers in room: ${s.peerCount || 0}\n` +
+    peerLines + '\n\n' +
+    (ROOM === 'default' && !process.env.SYM_ROOM ? 'NOTE: \'default\' is the fallback, not a configured choice. A teammate in a named room is invisible from here.\n' : '') +
+    'To change rooms, call sym_join_room.');
+}
+
+// ── Invites (design D9) ──────────────────────────────────────
+function inviteCreateTool(args) {
+  const room = args.room;
+  if (!room || typeof room !== 'string') return text('Missing required argument: room', true);
+  if (!isCanonicalRoom(room) || room === 'default') return text(`Invalid room name: "${room}" — ${roomRefusalReason(room)}.`, true);
+  const crossNetwork = !!(args.cross_network || args.relay_url || args.relay_token);
+  const relayUrl = crossNetwork ? (args.relay_url || HOSTED_RELAY_URL) : undefined;
+  const minted = crossNetwork && !args.relay_token;
+  const relayToken = crossNetwork ? (args.relay_token || crypto.randomBytes(32).toString('base64url')) : undefined;
+  if (crossNetwork && relayUrl === HOSTED_RELAY_URL && relayToken.length < HOSTED_RELAY_MIN_TOKEN) {
+    return text(`relay_token is ${relayToken.length} characters; the hosted relay admits ${HOSTED_RELAY_MIN_TOKEN} or more. Omit relay_token and one is minted for you.`, true);
+  }
+  const url = host.inviteURL({ room, relay: relayUrl, token: relayToken });
+  const alreadyHere = ROOM === room && (!crossNetwork || (RELAY_URL === relayUrl && RELAY_TOKEN === relayToken));
+  const joinCall = { room, ...(crossNetwork ? { relay_url: relayUrl, relay_token: relayToken } : {}) };
+  return text(`Invite URL (${crossNetwork ? 'cross-network (relay)' : 'LAN-only (Bonjour)'}):\n\n    ${url}\n\n` +
+    `It names this node as the issuer (nodeId ${host.nodeId}): whoever accepts it pins this node's key, so their node knows it is you (sym D5). ` +
+    'Share it over a channel you trust for both secrecy and integrity: whoever edits it before it is accepted chooses whom the acceptor pins.' +
+    (crossNetwork ? ` ${minted ? 'The token was minted just now; it' : 'The token'} names a channel on ${relayUrl}, and anyone holding the URL can join it — share it as you would a password. To lock a device out, mint a new invite.` : '') +
+    '\n\nEach teammate calls sym_join_room {invite: "<this URL>"}.\n\n' +
+    (alreadyHere ? `You're already on this room${crossNetwork ? ' through this relay channel' : ''}.` : `You are not on this ${crossNetwork ? 'relay channel' : 'room'} yet. To be reachable, call sym_join_room first:\n\n    ${JSON.stringify(joinCall)}`));
+}
+
+function inviteInfoTool(args) {
+  const url = args.url;
+  if (!url || typeof url !== 'string') return text('Missing required argument: url', true);
+  const p = parseInviteURL(url);
+  if (p.error) return text(p.error, true);
+  const out = {
+    app: p.appScheme, room: p.room, service_type: p.serviceType,
+    room_id: p.appScheme === 'sym' ? undefined : p.roomId, room_name: p.appScheme === 'sym' ? undefined : p.roomName,
+    relay_url: p.relayUrl || undefined, relay_token: p.relayToken || undefined,
+    issuer_node_id: p.issuer ? p.issuer.nodeId : undefined, issuer_key_fingerprint: p.issuer ? keyFingerprint(p.issuer.publicKey) : undefined,
+  };
+  for (const k of Object.keys(out)) if (out[k] === undefined) delete out[k];
+  return text(`Parsed invite: ${url}\n\n${JSON.stringify(out, null, 2)}\n\n` +
+    (p.issuer ? 'Joining with it pins the issuer\'s key for that nodeId, if this node has no key for it yet.\n\n' : 'This invite names no issuer, so joining pins no key: the first session with each peer is trusted on its own proof.\n\n') +
+    `To join, call sym_join_room:\n\n    ${JSON.stringify({ invite: url })}`);
+}
+
+async function joinRoomTool(args) {
+  let room = args.room;
+  let relayUrl = args.relay_url || null;
+  let relayToken = args.relay_token || null;
+  let invite = null;
+  if (args.invite) {
+    invite = parseInviteURL(String(args.invite));
+    if (invite.error) return text(invite.error, true);
+    room = room || invite.room;
+    if (room !== invite.room) return text(`room "${room}" and the invite's room "${invite.room}" differ; pass one.`, true);
+    relayUrl = relayUrl || invite.relayUrl;
+    relayToken = relayToken || invite.relayToken;
+  }
+  if (!room || typeof room !== 'string') return text('Missing required argument: room (or invite)', true);
+  if (!isCanonicalRoom(room)) return text(`Invalid room name: "${room}" — ${roomRefusalReason(room)}.`, true);
+  let relaySource = relayUrl ? (invite && !args.relay_url ? 'the invite' : 'this call') : null;
+  if (args.lan_only) {
+    relayUrl = null; relayToken = null;
+    if (forgetRelay(room)) relaySource = 'forgotten';
+  } else if (!relayUrl) {
+    const saved = loadRelay(room);
+    if (saved) { relayUrl = saved.relay_url; relayToken = saved.relay_token; relaySource = `remembered (${saved.file})`; }
+  }
+  if (relayUrl && relayToken && relayUrl === HOSTED_RELAY_URL && relayToken.length < HOSTED_RELAY_MIN_TOKEN) {
+    return text(`relay_token is ${relayToken.length} characters; ${HOSTED_RELAY_URL} admits ${HOSTED_RELAY_MIN_TOKEN} or more, so this join would be refused on every attempt. ` +
+      `Nothing was changed — this node is still in room '${ROOM}'.`, true);
+  }
+  const newServiceType = roomServiceType(room);
+  const prevRoom = ROOM;
+  const prevServiceType = SERVICE_TYPE;
+  const r = await host.rebuild({ serviceType: newServiceType, room, relay: relayUrl, relayToken });
+  if (!r.ok) {
+    if (r.restored) return text(`Could not join room "${room}": ${r.error}\n\nRestored the previous room "${prevRoom}"; this node is back where it was.`, true);
+    NODE_FAULT = `MESH NODE NOT RUNNING: sym_join_room "${room}" failed (${r.error}) and the previous room "${prevRoom}" could not be restored (${r.restoreError}). Restart this MCP server.`;
+    host = null;
+    return text(NODE_FAULT, true);
+  }
+  ROOM = room;
+  ROOM_SOURCE = 'sym_join_room at runtime (not persisted to this server\'s env)';
+  SERVICE_TYPE = newServiceType;
+  RELAY_URL = relayUrl;
+  RELAY_TOKEN = relayToken;
+  let remembered = null;
+  if (relayUrl && (relaySource === 'this call' || relaySource === 'the invite')) {
+    remembered = saveRelay(room, { relay_url: relayUrl, relay_token: relayToken });
+    RELAY_SOURCE = remembered ? `remembered for room '${room}' (${remembered})` : 'sym_join_room (not persisted — the relays directory is not writable)';
+  } else RELAY_SOURCE = relayUrl ? relaySource : null;
+  publishRoomBeacon();
+
+  let pinLine = '';
+  if (invite && invite.issuer) {
+    const a = host.acceptInvite(String(args.invite));
+    pinLine = a.pinned
+      ? `Pinned the issuer's key for ${invite.issuer.nodeId} (fingerprint ${keyFingerprint(invite.issuer.publicKey)}): a session from that nodeId must prove this key.\n`
+      : `The issuer's key was not pinned: ${a.reason || 'unknown reason'}${a.reason === 'conflict' ? ' — this node holds a different key for that nodeId; the operator resolves it (sym keys resolve)' : ''}.\n`;
+  }
+  const swapped = `Moved from room "${prevRoom}" (${prevServiceType}) to "${room}" (${newServiceType}), same identity.\n${pinLine}`;
+  if (!relayUrl) {
+    return text(swapped + (relaySource === 'forgotten' ? `The relay credential remembered for "${room}" has been forgotten; this node is LAN-only.\n` : '') +
+      'Discovering peers in the new room. Call sym_peers in a moment to see who has a session.');
+  }
+  const credentialLine = remembered
+    ? `Relay credential remembered for room "${room}" (${remembered}, mode 0600) — the next start re-joins it; sym_join_room {room, lan_only: true} forgets it.\n`
+    : (relaySource && relaySource.startsWith('remembered') ? 'Relay credential restored from the one remembered for this room.\n' : '');
+  const outcome = await host.awaitRelayOutcome(10000);
+  const relayLine = host.status().relayStatus || `relay: ${relayUrl}`;
+  const failed = outcome && (outcome.phase === 'refused' || outcome.phase === 'collision');
+  const settled = outcome && outcome.phase === 'connected';
+  return text(swapped + `Relay: ${relayLine}\n` + credentialLine +
+    (settled ? 'Call sym_peers to see who has a session; teammates who join with the same invite appear as they arrive.'
+      : failed ? `You are still in room "${room}" for LAN peers; nothing crosses the relay until this is fixed.`
+        : 'The relay has not answered yet — it keeps retrying in the background. Call sym_status to see where it stands.'), failed);
+}
+
+// ── Mesh events → channel notifications ──────────────────────
+
+// mcp.notification() is async: one that cannot go out (before connect) is not lost — the delivery is
+// in the inbox. Resolves true once the notification was written.
+function pushChannel(eventType, data) {
+  let p;
+  if (!mcp) return Promise.resolve(false);
+  try {
+    p = Promise.resolve(mcp.notification({
+      method: 'notifications/claude/channel',
+      params: { content: typeof data === 'string' ? data : JSON.stringify(data), meta: { event_type: eventType, source: 'sym-mesh' } },
+    })).then(() => true, () => false);
+  } catch { p = Promise.resolve(false); }
+  pushesInFlight.add(p);
+  p.finally(() => pushesInFlight.delete(p));
+  return p;
+}
+
+function onDelivery(d) {
+  try {
+    const j = deliveryPolicy.judgeDelivery(d, { policy, selfNodeId });
+    if (j.bucket === 'own') { securityAudit('push', 'own-record', 'self', '', d.id); return; }
+    const rateKey = d.facts ? (d.facts.deliverer ? d.facts.deliverer.nodeId : d.facts.signer.nodeId) : `unattributed:${d.moodFrom || d.withheld || '?'}`;
+    if (j.bucket === 'unverified') {
+      securityAudit('push', `unverified:${d.withheld}`, 'unverified', '', d.id);
+      if (pushRate.admit(rateKey)) pushChannel('delivery-withheld', `⚠ delivery withheld, not verified [${d.id}] · ${deliveryPolicy.unverifiedLine(d).replace(/^\[[^\]]+\] withheld, not verified: /, '')} · sym_receive names it`);
+      return;
+    }
+    const action = deliveryPolicy.pushAction(j.verdict, pushRate, rateKey);
+    const who = d.facts ? d.facts.signer.nodeId : d.moodFrom;
+    if (action !== 'push') {
+      if (action === 'rate-held') securityAudit('push', 'rate-limit', who, `over ${pushRate.limit}/min from this session; push held, the delivery waits in the inbox`, d.id);
+      else if (action !== 'silent') securityAudit('push', j.verdict.reason, who, j.verdict.excerpt, d.id);
+      if (action === 'notice') pushChannel('delivery-withheld', `${deliveryPolicy.deliveryTag(d)} ⚠ delivery withheld · ${j.verdict.detail} [${d.id}] · sym_receive names it by id`);
+      return;
+    }
+    const { header, risk, lead } = deliveryPolicy.pushHeader(d, j.prepared);
+    if (risk && risk.risky) securityAudit('push', `classifier-risk:${risk.terms.join(',')}`, who, lead, d.id);
+    const sent = pushChannel(d.kind === 'mood' ? 'mood' : 'cmb', `${header} [${d.id}]${deliveryPolicy.keyTag(d)}`);
+    sent.then((ok) => { if (ok) { pushedIds.add(d.id); if (pushedIds.size > 2000) pushedIds.delete(pushedIds.values().next().value); } });
+  } catch (err) { stderrLog(`push failed for ${d && d.id}: ${err && err.message}`); }
+}
+
+function wireHost(h) {
+  h.on('delivery', onDelivery);
+  h.on('relay-auth-refused', (info) => {
+    const line = `Relay ${info.relayUrl} refused ${info.name} (${info.code}: ${info.reason}). The relay_token this session presents is not accepted by that relay — ` +
+      'mint a fresh invite with sym_invite_create, or get the team\'s invite, then sym_join_room with it (or fix SYM_RELAY_TOKEN and restart). LAN peers are unaffected.';
+    stderrLog(line);
+    pushChannel('relay-auth-refused', { relayUrl: info.relayUrl, code: info.code, reason: info.reason, text: line });
+  });
+  h.on('identity-collision', (info) => {
+    stderrLog(`identity collision on relay — another process is holding nodeId=${info.nodeId} name=${info.name}. Exiting.`);
+    process.exit(2);
+  });
+}
+if (host) wireHost(host);
+
+function createMcpServer() {
+  const server = new Server(
+    { name: 'sym-mesh', version: PKG_VERSION },
+    {
+      capabilities: { tools: {}, experimental: { 'claude/channel': {} } },
+      instructions: instructions() + (startupAdvisory.length ? `\n\n${startupAdvisory.join('\n')}` : ''),
+    },
+  );
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: toolList() }));
+  server.setRequestHandler(CallToolRequestSchema, onToolCall);
+  // The push check goes out once the host has initialised (design D5).
+  // An interior that serves no delivery stream has nothing to push, so it gets no check.
+  server.oninitialized = () => { if (host && (MODE === 'node' || host.supports.subscribe === true)) sendPushCheck().catch(() => {}); };
+  return server;
+}
+
+// ── Shutdown and survival ────────────────────────────────────
 let shuttingDown = false;
-async function shutdown(signal) {
+async function shutdown() {
   if (shuttingDown) return;
   shuttingDown = true;
   stopRoomBeacon();
-  try {
-    await node.stop();
-  } catch {
-    // Best effort — we're exiting anyway. Don't block on cleanup errors.
-  }
+  try { if (host) await host.stop(); } catch { /* exiting anyway */ }
   process.exit(0);
 }
 
-// A bad frame from a peer or a relay must not take the session's mesh down with it: a relay answering
-// 'null' threw a TypeError inside the engine's ws listener and killed this process (audit B-T3). The
-// engine fixes its own causes; this is the backstop. Each one is logged with its stack, counted, and
-// shown by sym_status. A broken stdout pipe means the host is gone, so that one shuts down instead.
-// Before the host is connected nothing could ever read the count, so a fault there exits as before:
-// a process that stays up but never answers initialize is worse than "Connection closed" (review F4).
 let internalErrors = 0;
 let lastInternalError = null;
 let mcpConnected = false;
 function recordInternalError(kind, err) {
-  if (err && err.code === 'EPIPE') { shutdown('epipe'); return; }
+  if (err && err.code === 'EPIPE') { shutdown(); return; }
   if (!mcpConnected) {
     try { process.stderr.write(`sym-mesh-channel: ${kind} before the host connected: ${err?.stack || err}\n`); } catch {}
     process.exit(1);
@@ -1938,47 +1107,25 @@ function recordInternalError(kind, err) {
 }
 process.on('uncaughtException', (err) => recordInternalError('uncaught exception', err));
 process.on('unhandledRejection', (err) => recordInternalError('unhandled rejection', err));
+process.on('SIGTERM', () => shutdown());
+process.on('SIGINT', () => shutdown());
+process.on('SIGHUP', () => shutdown());
+// A stdio server whose stdin has closed can never be asked anything again: leave the mesh cleanly
+// (and, in interior mode, end the mind).
+process.stdin.on('end', () => shutdown());
+process.stdin.on('close', () => shutdown());
+process.stdin.on('error', () => shutdown());
 
-process.on('SIGTERM', () => shutdown('SIGTERM'));
-process.on('SIGINT',  () => shutdown('SIGINT'));
-process.on('SIGHUP',  () => shutdown('SIGHUP'));
-
-// A STDIO SERVER WHOSE STDIN HAS CLOSED IS ALREADY DEAD — it can never receive
-// another request, because the only channel a client could speak on is gone.
-// Signals alone are not enough: not every host signals its children on the way
-// out. Codex quits without one, which left a `codex-mac` connector running with
-// PPID 1 for twenty minutes past its parent, still holding the pinned identity.
-// The next launch then hit EIDENTITYLOCK and — correctly, with required=true —
-// died reporting a conflict with a process that could no longer serve anyone.
-//
-// This is also where the -2/-3 identity forks come from: an orphan holding a
-// name is what makes the next start collide, and a collision is what mints a
-// second store with a second signing key.
-//
-// Exiting on stdin EOF closes all of it: the node leaves the mesh cleanly, the
-// identity lock is released, and restarting the same node is just a restart.
-process.stdin.on('end', () => shutdown('stdin-eof'));
-process.stdin.on('close', () => shutdown('stdin-close'));
-// A stdin that errors (parent died mid-write) is the same condition.
-process.stdin.on('error', () => shutdown('stdin-error'));
-
-// ── Room discovery beacon (MMP §5.8) ──────────────────────────
-// Mirror the sym CLI daemon: advertise this node's room on the shared
-// `_symrooms._tcp` service (room name in TXT) via the pure-JS bonjour-service,
-// so `sym rooms` lists this Claude/MCP node cross-platform alongside
-// CLI-daemon nodes. Discovery-only — comms stay on the room's own
-// `_<room>._tcp`. Re-published on room hot-swap; torn down on shutdown.
+// ── Room discovery beacon (MMP §5.8), node mode ──────────────
 let roomBeacon = null;
 function publishRoomBeacon() {
+  if (MODE !== 'node' || LAN_OFF || !host) return;
   try {
     const { Bonjour } = require('bonjour-service');
-
     if (roomBeacon) { try { roomBeacon.unpublishAll(); roomBeacon.destroy(); } catch {} roomBeacon = null; }
     roomBeacon = new Bonjour();
-    roomBeacon.publish({ name: NODE_NAME, type: "symrooms", port: (node && node._port) || 7777, txt: { room: ROOM, node: NODE_NAME } });
-  } catch (e) {
-    process.stderr.write(`room beacon unavailable: ${e?.message || e}\n`);
-  }
+    roomBeacon.publish({ name: NODE_NAME, type: 'symrooms', port: (host.status().port) || 7777, txt: { room: ROOM, node: NODE_NAME } });
+  } catch (e) { stderrLog(`room beacon unavailable: ${e?.message || e}`); }
 }
 function stopRoomBeacon() {
   if (!roomBeacon) return;
@@ -1986,86 +1133,35 @@ function stopRoomBeacon() {
   roomBeacon = null;
 }
 
-// One line that would have saved a night: the resolved room, and WHERE it came
-// from. A node in the wrong room fails by going quiet, and quiet is the one
-// symptom that looks identical to "nobody is talking right now".
-function announceRoom() {
-  process.stderr.write(
-    `sym-mesh-channel: node '${NODE_NAME}' in room '${ROOM}' (${SERVICE_TYPE}) ` +
-    `— room source: ${ROOM_SOURCE}\n`,
-  );
-  if (RELAY_URL) process.stderr.write(`sym-mesh-channel: relay ${RELAY_URL} — credential source: ${RELAY_SOURCE}\n`);
-  if (ROOM === 'default' && !process.env.SYM_ROOM) {
-    process.stderr.write(
-      `sym-mesh-channel: room 'default' was not configured anywhere — it is the fallback. ` +
-      `If a teammate is in a named room you will NOT discover them and nothing will error. ` +
-      `Set SYM_ROOM=<room> in this MCP server's env, or run sym_join_room.\n`,
-    );
-  }
-  // The daemon keeps its room in ~/.sym/room; this server does not read that
-  // file. Two sym nodes on one host, two sources of truth — so when they
-  // disagree the host is partitioned against ITSELF, which reads exactly like
-  // a network problem and is not one.
+function announce() {
+  if (MODE === 'interior') { stderrLog(`interior mode: attached to ${INTERIOR_SOCKET}`); return; }
+  stderrLog(`node '${NODE_NAME}' (${selfNodeId}) in room '${ROOM}' (${SERVICE_TYPE}) — room source: ${ROOM_SOURCE}`);
+  if (RELAY_URL) stderrLog(`relay ${RELAY_URL} — credential source: ${RELAY_SOURCE}`);
   try {
-    const fs = require('fs'), os = require('os'), path = require('path');
-    const daemonRoom = fs.readFileSync(path.join(os.homedir(), '.sym', 'room'), 'utf8').trim();
-    if (daemonRoom && daemonRoom !== ROOM) {
-      process.stderr.write(
-        `sym-mesh-channel: WARNING — the sym daemon is in room '${daemonRoom}' ` +
-        `(~/.sym/room) but this MCP node resolved '${ROOM}' from ${ROOM_SOURCE}. ` +
-        `They will not see each other. Make them match, or run sym_join_room ${daemonRoom}.\n`,
-      );
-    }
-  } catch { /* no daemon room file is the normal single-node case */ }
+    const ob = host.outbox.summary();
+    if (ob.total) stderrLog(`OUTBOX carries ${ob.total} CMB(s) held from a previous run. They are NOT delivered; they flush when each peer's session returns.`);
+  } catch { /* never block startup on bookkeeping */ }
 }
 
 async function main() {
-  // Start SymNode — connects to relay as a peer. The startup primer is
-  // computed at module-load time (see BASE_INSTRUCTIONS above) and is
-  // already embedded in the MCP server's initialize-response payload.
-  if (!node) {
-    // Serve the tools anyway: that is the only way the session learns why the mesh is missing.
-    const transport = new StdioServerTransport();
-    await mcp.connect(transport);
-    mcpConnected = true;
-    return;
-  }
-  await node.start();
-
-  announceRoom();
-  // Say it at startup too: mail held from a previous run is exactly the mail
-  // most likely to be forgotten, and only this node knows it exists.
-  try {
-    const ob = outbox.summary(NODE_NAME);
-    if (ob.total > 0) {
-      const per = Object.entries(ob.byPeer).map(([n, c]) => `${c} for "${n}"`).join(', ');
-      process.stderr.write(
-        `sym-mesh-channel: OUTBOX carries ${ob.total} CMB(s) held from a previous run — ${per}. ` +
-        `They are NOT delivered; they flush when each peer appears.\n`,
-      );
+  if (host) {
+    try { await host.start(); }
+    catch (e) {
+      if (MODE !== 'interior') throw e;
+      NODE_FAULT = `INTERIOR MODE NOT ATTACHED: could not open ${INTERIOR_SOCKET} (${e.code || e.message}). Is the node running, and listening on its interior?`;
+      stderrLog(NODE_FAULT);
+      host = null;
     }
-  } catch { /* never block startup on bookkeeping */ }
-  publishRoomBeacon();
-
-  // Start MCP server — communicates with Claude Code via stdio
+    if (host) { announce(); publishRoomBeacon(); }
+  }
+  mcp = createMcpServer();
   const transport = new StdioServerTransport();
   await mcp.connect(transport);
   mcpConnected = true;
 }
 
 main().catch((err) => {
-  if (err && err.code === 'EIDENTITYLOCK') {
-    // A pinned identity is a singleton: some live process already holds this node's identity.
-    // We intentionally do NOT fork a -2/-3 identity (that would start a separate empty store).
-    // Surface the conflict instead. A stale lock from a dead holder is not this — the engine
-    // reclaims those (start-time-verified), so reaching here means a genuinely live holder.
-    process.stderr.write(
-      `sym-mesh-channel: node identity '${NODE_NAME}' is already held by a live process ` +
-      `(PID ${err.holderPid ?? 'unknown'}). A pinned role is one node — not starting a second ` +
-      `copy. Close the other session, or run this one under a distinct SYM_NODE_NAME.\n`
-    );
-    process.exit(3);
-  }
-  process.stderr.write(`sym-mesh-channel failed: ${err.message}\n`);
+  process.stderr.write(`sym-mesh-channel failed: ${err && err.message}\n`);
   process.exit(1);
 });
+

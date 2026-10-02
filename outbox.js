@@ -1,161 +1,173 @@
 'use strict';
 
-// outbox.js — hold a directed envelope AT THE SENDER when the peer is not connected.
+// outbox.js — hold a directed CMB AT THE SENDER while its recipient has no session, by nodeId.
 //
-// WHY THIS EXISTS, and why it is here rather than in the daemon.
+// WHAT THIS IS NOT. It is not delivery. The queue is invisible to the recipient: nobody but this
+// process knows the record waits. If this node never comes back, the record is gone. Every surface
+// therefore says HELD, never "delivered", and a queue that is not flushing is reported loudly.
 //
-// A directed send to an absent peer used to be refused inside this package, in
-// sym_send's `matches.length === 0` branch, BEFORE anything was sent. No envelope
-// left mesh-channel — so a correct, well-tested delivery spool in sym-daemon sat
-// downstream of a message that was never sent. The refusal lived in the seam
-// between two test suites: mesh-channel's cannot see the daemon, the daemon's
-// cannot see mesh-channel.
+// KEYED BY NODE ID (design D6). A name is a label the sender chose, so it is never a route: the
+// queue holds only for a nodeId this node has had a PROVEN session with. sym 0.14 raises
+// `peer-joined` only for a confirmed §5.2 session, and that is where a nodeId becomes known here.
+// An unknown nodeId is refused rather than held, so a typo creates no state.
 //
-// The daemon spool cannot serve seats yet, and that is measured rather than
-// assumed: mesh-channel has ZERO references to register-agent/daemon.sock, and
-// the daemon log carries ZERO hosted-agent registrations for any seat against
-// 109 for the ops agents. Seats are standalone SymNodes. So for seat-to-seat the
-// envelope is held HERE, by the sender, which needs no registration at all.
-//
-// WHAT THIS IS NOT. It is not delivery. The queue is invisible to the receiver —
-// nobody but this process knows the message exists. If this node never comes
-// back, the message is gone. Every surface therefore says HELD, never
-// "delivered", and an unflushed queue is reported loudly rather than pending
-// quietly. Its weakness is the mirror of the daemon spool's: this fails when the
-// SENDER is the intermittent one.
-//
-// KNOWN vs UNKNOWN is the guard against a typo creating state. A name is known
-// only if THIS node has actually seen it as a peer, recorded when the peer was
-// observed. `identity.json exists on disk` was rejected as the test: it is true
-// for 961 of 962 node directories here, so it admits essentially everything.
+// It lives in the node's own directory (sym 0.14: `nodes/by-id/<nodeId>/`), which sym's migration
+// moved there with the rest of a 0.13 node's files. A 0.10 item addressed by NAME is converted
+// through the 0.10 roster's recorded id when it has one; otherwise it stays, reported as held for a
+// label that is not a route, for the operator to discard.
 
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
+const { isNodeId } = require('./identity.js');
 
 const MAX_ITEMS = 200;
 const MAX_BYTES = 8 * 1024 * 1024;   // count is the wrong instrument alone: CMB size varies hugely
-
-// SYM_HOME exists so a test can have a store of its own. Without it every run of this module's
-// tests wrote into the operator's REAL ~/.sym/nodes, so state accumulated across runs and two
-// tests here have been failing on leftovers rather than on the code — a suite that is red for a
-// reason nobody reads teaches everyone to ignore red. Production never sets it.
-function symHome() {
-  return process.env.SYM_HOME || path.join(os.homedir(), '.sym');
-}
-function baseDir(nodeName) {
-  return path.join(symHome(), 'nodes', nodeName);
-}
-function outboxFile(nodeName) { return path.join(baseDir(nodeName), 'outbox.json'); }
-function rosterFile(nodeName) { return path.join(baseDir(nodeName), 'known-peers.json'); }
 
 function readJson(file, fallback) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; }
 }
 
-// Atomic: a torn write here loses mail that the sender has already promised to
-// hold, which is the one thing this module exists to prevent.
+// Atomic: a torn write here loses mail that the sender has already promised to hold.
 function writeJsonAtomic(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = `${file}.tmp`;
+  const tmp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(value, null, 2));
   fs.renameSync(tmp, file);
 }
 
-// ── Known-peer roster ────────────────────────────────────────
-// Written when a peer is actually observed. Proves the name connected to us at
-// some point, rather than merely existing somewhere on disk.
-function rememberPeer(nodeName, peerName, peerId) {
-  if (!peerName) return;
-  const roster = readJson(rosterFile(nodeName), {});
-  if (roster[peerName] && roster[peerName].peerId === peerId) return;   // no churn
-  roster[peerName] = { peerId: peerId || null, lastSeen: null };
-  writeJsonAtomic(rosterFile(nodeName), roster);
-}
-
-function isKnownPeer(nodeName, name) {
-  if (!name) return false;
-  const roster = readJson(rosterFile(nodeName), {});
-  if (roster[name]) return true;
-  return Object.values(roster).some(v => v && v.peerId === name);
-}
-
-// ── Outbox ───────────────────────────────────────────────────
-function load(nodeName) {
-  // One-time upgrade of items persisted under the pre-rename key. This is a load-time
-  // MIGRATION, not a runtime fallback: after the first save the old key no longer exists.
-  const d = readJson(outboxFile(nodeName), { seq: 0, items: [] });
-  if (!Array.isArray(d.items)) d.items = [];
-  if (typeof d.seq !== 'number') d.seq = 0;
-  for (const it of d.items) {
-    if (it && it.fields !== undefined && it.categories === undefined) { it.categories = it.fields; delete it.fields; }
-  }
-  return d;
-}
-
-/**
- * Hold an envelope for a peer that is not currently connected.
- * @returns {{held: true, seq: number, queued: number} | {held: false, reason: string}}
- */
-function hold(nodeName, to, categories, opts) {
-  const d = load(nodeName);
-  const bytes = Buffer.byteLength(JSON.stringify({ categories, opts }));
-  if (bytes > MAX_BYTES) return { held: false, reason: 'envelope-too-large' };
-
-  const used = Buffer.byteLength(JSON.stringify(d.items));
-  // Refuse rather than evict. Evicting here would drop mail the sender already
-  // said it was holding — silently, and only for the sender to know.
-  if (d.items.length >= MAX_ITEMS || used + bytes > MAX_BYTES) {
-    return { held: false, reason: 'outbox-full' };
-  }
-
-  d.seq += 1;
-  // heldAt was in this shape from the start and was never filled in, so nothing could say how old a
-  // held CMB was — which is why one addressed to a doer that died on 2026-09-04 was still being
-  // reported ten days later as "they flush when the peer appears" (dev-team-4, 2026-09-14). A queue
-  // with no age cannot distinguish mail waiting for a peer that is coming back from mail waiting
-  // for one that never will, and at MAX_ITEMS the second kind starts refusing the first.
-  d.items.push({ seq: d.seq, to, categories, opts: opts || {}, heldAt: Date.now() });
-  writeJsonAtomic(outboxFile(nodeName), d);
-  return { held: true, seq: d.seq, queued: d.items.length };
-}
-
-function pendingFor(nodeName, to) {
-  return load(nodeName).items.filter(i => i.to === to);
-}
-
 /** Days an item has been held, or null for one stamped before heldAt was populated. */
 function ageDays(item, now = Date.now()) {
-  return typeof item.heldAt === "number" ? Math.floor((now - item.heldAt) / 86_400_000) : null;
-}
-
-function summary(nodeName, now = Date.now()) {
-  const d = load(nodeName);
-  const byPeer = {};
-  let oldestDays = null;
-  for (const i of d.items) {
-    byPeer[i.to] = (byPeer[i.to] || 0) + 1;
-    const age = ageDays(i, now);
-    if (age !== null && (oldestDays === null || age > oldestDays)) oldestDays = age;
-  }
-  return { total: d.items.length, byPeer, oldestDays, bytes: Buffer.byteLength(JSON.stringify(d.items)) };
+  return typeof item.heldAt === 'number' ? Math.floor((now - item.heldAt) / 86_400_000) : null;
 }
 
 /**
- * Remove items for a peer once they have actually been sent.
- * Called only AFTER a successful send — never on dispatch.
+ * The outbox of the node whose directory is `dir`.
  */
-function drop(nodeName, seqs) {
-  const set = new Set(seqs);
-  const d = load(nodeName);
-  d.items = d.items.filter(i => !set.has(i.seq));
-  writeJsonAtomic(outboxFile(nodeName), d);
-  return d.items.length;
+function createOutbox(dir) {
+  const outboxFile = path.join(dir, 'outbox.json');
+  const rosterFile = path.join(dir, 'known-peers.json');
+
+  // ── Known peers: nodeIds this node has had a proven session with ──
+  // 0.10 wrote { "<name>": { peerId, lastSeen } }; 0.11 writes { version: 2, peers: { "<nodeId>":
+  // { label, lastSeen } } }. A 0.10 roster is read for its ids, and its names are kept only to convert
+  // held items.
+  function loadRoster() {
+    const raw = readJson(rosterFile, {});
+    if (raw && raw.version === 2 && raw.peers && typeof raw.peers === 'object') return { peers: raw.peers, byOldName: raw.byOldName || {} };
+    const peers = {};
+    const byOldName = {};
+    for (const [name, v] of Object.entries(raw || {})) {
+      const id = v && isNodeId(v.peerId) ? v.peerId.toLowerCase() : null;
+      if (!id) continue;
+      peers[id] = { label: name, lastSeen: v.lastSeen || null };
+      byOldName[name] = id;
+    }
+    return { peers, byOldName };
+  }
+  function saveRoster(r) { writeJsonAtomic(rosterFile, { version: 2, peers: r.peers, byOldName: r.byOldName }); }
+
+  function rememberPeer(nodeId, label) {
+    if (!isNodeId(nodeId)) return;
+    const id = nodeId.toLowerCase();
+    const r = loadRoster();
+    const prev = r.peers[id];
+    if (prev && prev.label === (label || prev.label) && prev.lastSeen && Date.now() - prev.lastSeen < 3_600_000) return;   // no churn
+    r.peers[id] = { label: typeof label === 'string' ? label.slice(0, 256) : (prev && prev.label) || '', lastSeen: Date.now() };
+    saveRoster(r);
+  }
+
+  function isKnown(nodeId) {
+    return isNodeId(nodeId) && !!loadRoster().peers[nodeId.toLowerCase()];
+  }
+
+  function knownLabel(nodeId) {
+    const p = isNodeId(nodeId) ? loadRoster().peers[nodeId.toLowerCase()] : null;
+    return p ? p.label : null;
+  }
+
+  // ── The queue ──
+  function load() {
+    const d = readJson(outboxFile, { seq: 0, items: [] });
+    if (!Array.isArray(d.items)) d.items = [];
+    if (typeof d.seq !== 'number') d.seq = 0;
+    let changed = false;
+    let roster = null;
+    for (const it of d.items) {
+      if (!it) continue;
+      // The pre-rename key (0.9): a load-time migration, not a runtime fallback.
+      if (it.fields !== undefined && it.categories === undefined) { it.categories = it.fields; delete it.fields; changed = true; }
+      // A 0.10 item addressed by name: converted through the old roster's id, or marked as a label.
+      if (!isNodeId(it.to) && !it.label) {
+        roster = roster || loadRoster();
+        const id = roster.byOldName[it.to];
+        if (id) { it.label = it.to; it.to = id; } else { it.label = it.to; it.to = null; }
+        changed = true;
+      }
+    }
+    if (changed) { try { writeJsonAtomic(outboxFile, d); } catch { /* converted again next load */ } }
+    return d;
+  }
+
+  /**
+   * Hold a CMB for a nodeId that has no session now.
+   * @returns {{held: true, seq: number, queued: number} | {held: false, reason: string}}
+   */
+  function hold(to, envelope) {
+    if (!isNodeId(to)) return { held: false, reason: 'not-a-node-id' };
+    const d = load();
+    const item = { to: to.toLowerCase(), label: knownLabel(to) || '', categories: envelope.categories, parents: envelope.parents || [], payload: envelope.payload };
+    const bytes = Buffer.byteLength(JSON.stringify(item));
+    if (bytes > MAX_BYTES) return { held: false, reason: 'envelope-too-large' };
+    const used = Buffer.byteLength(JSON.stringify(d.items));
+    // Refuse rather than evict: evicting would drop mail the sender already said it was holding.
+    if (d.items.length >= MAX_ITEMS || used + bytes > MAX_BYTES) return { held: false, reason: 'outbox-full' };
+    d.seq += 1;
+    d.items.push({ seq: d.seq, ...item, heldAt: Date.now() });
+    writeJsonAtomic(outboxFile, d);
+    return { held: true, seq: d.seq, queued: d.items.length };
+  }
+
+  /** Items held for `nodeId`, oldest first. */
+  function pendingFor(nodeId) {
+    if (!isNodeId(nodeId)) return [];
+    const id = nodeId.toLowerCase();
+    return load().items.filter((i) => i.to === id);
+  }
+
+  /** Items a 0.10 build held for a name this node cannot map to a nodeId. */
+  function heldForLabel(label) {
+    return load().items.filter((i) => i.to === null && i.label === label);
+  }
+
+  function summary(now = Date.now()) {
+    const d = load();
+    const byPeer = {};
+    const byLabelOnly = {};
+    let oldestDays = null;
+    for (const i of d.items) {
+      if (i.to) {
+        const k = i.to;
+        byPeer[k] = byPeer[k] || { count: 0, label: i.label || '' };
+        byPeer[k].count++;
+      } else {
+        byLabelOnly[i.label] = (byLabelOnly[i.label] || 0) + 1;
+      }
+      const age = ageDays(i, now);
+      if (age !== null && (oldestDays === null || age > oldestDays)) oldestDays = age;
+    }
+    return { total: d.items.length, byPeer, byLabelOnly, oldestDays, bytes: Buffer.byteLength(JSON.stringify(d.items)) };
+  }
+
+  /** Remove items once they have actually been sent — never on dispatch alone. */
+  function drop(seqs) {
+    const set = new Set(seqs);
+    const d = load();
+    d.items = d.items.filter((i) => !set.has(i.seq));
+    writeJsonAtomic(outboxFile, d);
+    return d.items.length;
+  }
+
+  return { hold, pendingFor, heldForLabel, summary, drop, rememberPeer, isKnown, knownLabel, outboxFile, rosterFile };
 }
 
-module.exports = {
-  hold, pendingFor, summary, drop, ageDays,
-  rememberPeer, isKnownPeer,
-  outboxFile, rosterFile,
-  MAX_ITEMS, MAX_BYTES,
-};
+module.exports = { createOutbox, ageDays, MAX_ITEMS, MAX_BYTES };

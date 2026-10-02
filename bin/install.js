@@ -71,7 +71,7 @@ try {
   if (n) process.stderr.write(`[sym-mesh-channel] migrated ${n} node store(s): meshmem → cmbs\n`);
 } catch { /* SDK not resolvable or nothing to do — non-fatal */ }
 
-// The room grammar belongs to the SDK (@sym-bot/sym >= 0.12.3 exports `rooms`).
+// The room grammar belongs to the SDK (its `rooms` export).
 // Prefer it. The literal below is a LAST-RESORT MIRROR for the one case the SDK
 // cannot serve: install runs before/without a resolvable SDK, and a validator
 // that silently disappears would let a malformed room reach the config file —
@@ -83,7 +83,7 @@ const FALLBACK_KEBAB_CASE_RE = /^[a-z0-9]+(?:--?[a-z0-9]+)*$/;
 let KEBAB_CASE_RE = FALLBACK_KEBAB_CASE_RE;
 try {
   const sdk = require('@sym-bot/sym');
-  KEBAB_CASE_RE = (sdk.rooms || require('@sym-bot/sym/lib/rooms.js')).KEBAB_CASE_RE;
+  KEBAB_CASE_RE = sdk.rooms.KEBAB_CASE_RE;
 } catch { /* SDK not resolvable — mirror stands */ }
 function validateRoomValue(value, source) {
   if (!value) return;
@@ -296,7 +296,7 @@ function disablePluginForFolder(dir) {
 // The npx / MCP-server install path always exposes the channel as a raw
 // server, so the handle is deterministically `server:claude-sym-mesh`.
 //
-//   sym-mesh-channel start                       # this dir, real-time push on
+//   sym-mesh-channel start                       # this dir, launched with the channels flag
 //   sym-mesh-channel start --project --name cto --room my-team
 //   sym-mesh-channel start --print               # show the command, don't launch
 //   sym-mesh-channel start -- --resume           # pass args through to claude
@@ -459,13 +459,15 @@ if (cmd === 'start') {
   }
   else if (roomArg) writeProjectConfig(launchDir, { room: roomArg, defaultName: false });
 
-  // ONE AGENT, ONE NODE. `start` launches the server: registration with real-time push. If the Claude
+  // ONE AGENT, ONE NODE. `start` launches the server registration named in the channels flag. If the Claude
   // plugin is installed, Claude Code would start its node too, and that node reads the same
   // .sym/node.json, so the session's two nodes would claim one name and whichever started first would
   // win — a coin flip on whether the push-enabled node exists. Turn the plugin off for this folder.
   disablePluginForFolder(launchDir);
 
-  console.log(`\n▶ Launching Claude Code on the SYM mesh — real-time push on.\n  (channel: ${handle}; the dev flag is temporary until Anthropic allowlists it)\n`);
+  // Launched with the channels flag, push CAN reach the session; whether it does, only the session can
+  // say (design D5): the server sends a push check, and the session answers it with sym_push_confirm.
+  console.log(`\n▶ Launching Claude Code on the SYM mesh with the channels flag for ${handle}.\n  (the dev flag is temporary until Anthropic allowlists it; the session confirms push itself with sym_push_confirm)\n`);
   // On Windows the `claude` CLI is a `.cmd`/`.ps1` shim (npm) or `.exe`
   // (native installer). Node's spawn does an exact-filename lookup that
   // ignores PATHEXT, so bare `spawnSync('claude', …)` returns ENOENT even

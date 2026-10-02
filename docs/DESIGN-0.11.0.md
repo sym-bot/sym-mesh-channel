@@ -208,6 +208,8 @@ starts no SymNode and has no mesh identity.
   interior does not serve deliveries"), never as an empty inbox.
 - **Not available:** `sym_peers`, `sym_join_room`, the invite tools, `sym_rooms_discover` and the
   outbox. The node owns its room and its peers. They answer so.
+- **Push:** an interior that serves no delivery stream has nothing to push, so it gets no push
+  check, and the instructions say the mind can submit but not read.
 - **Ending:** when the host's stdin closes (the mind's session is over), the channel sends `end`,
   which revokes the capability and lets the node start its next queued mission.
   `SYM_INTERIOR_END_ON_EXIT=0` leaves the mind running for a host that restarts the channel.
@@ -312,7 +314,14 @@ push still being written, so its credit is settled first.
    already holds, and a remix the §15.7 guard declined, both return `null`. The channel tells
    them apart by the `remix-rejected` metric emitted during the call. The need: a result object
    `{ key, duplicate: true }` or `{ refused: 'remix-without-new-domain-data' }`.
-5. **The interior capability is a bearer token.** It reaches the mind through its environment or
+5. **A cited reply counts as a remix.** `remember()` applies §15.7's guard to every record with a
+   peer parent, so a directed reply that cites what it answers (§14.3 MUST) is refused unless the
+   node emitted a record of its own since its last remix. In a conversation, every second reply
+   with lineage is refused. The channel says so and names both ways forward, but the rule fights
+   §14.3. The need, from the spec and the SDK together: a reply that adds content of its own (its
+   categories differ from the parent's) is new domain data, or a directed reply is exempt from the
+   remix guard.
+6. **The interior capability is a bearer token.** It reaches the mind through its environment or
    a file. A per-mind socket (or a socket path the node creates per mind, 0600) would bind the
    capability to the connection instead.
 
