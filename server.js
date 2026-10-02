@@ -823,8 +823,10 @@ async function statusTool() {
   } else {
     const s = host.status();
     const cs = s.coreSecure || {};
+    // This node's own public key, through the public API: the issuer an invite of its own names
+    // (there is no accessor for it, and reading identity.json would load the private key as well).
     let pub = null;
-    try { pub = sdk.identity.loadIdentity({ nodeId: host.nodeId, create: false }).publicKey; } catch { /* */ }
+    try { pub = sdk.invite.parseInvite(host.inviteURL({ room: ROOM })).issuer.publicKey; } catch { /* */ }
     lines.push(`Node: ${NODE_NAME} — nodeId ${host.nodeId}, key fingerprint ${keyFingerprint(pub)}`);
     if (!IDENTITY.nodeId) lines.push(`  Pin this folder's agent so it is never re-minted: add "node_id": "${host.nodeId}" to ${PROJECT_CFG.file || '.sym/node.json'}.`);
     lines.push(`Room: ${ROOM} (${SERVICE_TYPE})${LAN_OFF ? ' — relay only (SYM_LAN=off)' : ''}`);
@@ -964,6 +966,16 @@ async function joinRoomTool(args) {
   const newServiceType = roomServiceType(room);
   const prevRoom = ROOM;
   const prevServiceType = SERVICE_TYPE;
+  // The pin comes BEFORE the move, so it precedes the first session in the new room: a squatter
+  // racing the issuer to that first session would otherwise be bound first. The key registry is
+  // persisted in the node's directory, so the rebuilt node reads it.
+  let pinLine = '';
+  if (invite && invite.issuer) {
+    const a = host.acceptInvite(String(args.invite));
+    pinLine = a.pinned
+      ? `Pinned the issuer's key for ${invite.issuer.nodeId} (fingerprint ${keyFingerprint(invite.issuer.publicKey)}): a session from that nodeId must prove this key.\n`
+      : `The issuer's key was not pinned: ${a.reason || 'unknown reason'}${a.reason === 'conflict' ? ' — this node holds a different key for that nodeId; the operator resolves it (sym keys resolve)' : ''}.\n`;
+  }
   const r = await host.rebuild({ serviceType: newServiceType, room, relay: relayUrl, relayToken });
   if (!r.ok) {
     if (r.restored) return text(`Could not join room "${room}": ${r.error}\n\nRestored the previous room "${prevRoom}"; this node is back where it was.`, true);
@@ -983,13 +995,6 @@ async function joinRoomTool(args) {
   } else RELAY_SOURCE = relayUrl ? relaySource : null;
   publishRoomBeacon();
 
-  let pinLine = '';
-  if (invite && invite.issuer) {
-    const a = host.acceptInvite(String(args.invite));
-    pinLine = a.pinned
-      ? `Pinned the issuer's key for ${invite.issuer.nodeId} (fingerprint ${keyFingerprint(invite.issuer.publicKey)}): a session from that nodeId must prove this key.\n`
-      : `The issuer's key was not pinned: ${a.reason || 'unknown reason'}${a.reason === 'conflict' ? ' — this node holds a different key for that nodeId; the operator resolves it (sym keys resolve)' : ''}.\n`;
-  }
   const swapped = `Moved from room "${prevRoom}" (${prevServiceType}) to "${room}" (${newServiceType}), same identity.\n${pinLine}`;
   if (!relayUrl) {
     return text(swapped + (relaySource === 'forgotten' ? `The relay credential remembered for "${room}" has been forgotten; this node is LAN-only.\n` : '') +
@@ -1152,7 +1157,10 @@ async function main() {
       stderrLog(NODE_FAULT);
       host = null;
     }
-    if (host) { announce(); publishRoomBeacon(); }
+    if (host) {
+      if (MODE === 'interior' && host.nodeId) selfNodeId = host.nodeId;   // the node's own records are its own
+      announce(); publishRoomBeacon();
+    }
   }
   mcp = createMcpServer();
   const transport = new StdioServerTransport();
