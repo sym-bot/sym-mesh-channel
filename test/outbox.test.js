@@ -1,96 +1,83 @@
 'use strict';
 
-// Tests for the sender-held outbox — the mesh-channel half of the directed-send
-// seam. The daemon half lives in @sym-bot/sym; neither suite can see the other,
-// which is exactly how the refusal hid. The end-to-end proof is the sym_send-first
-// acceptance test in the sym repo; these cover this package's contract.
+// outbox.js — a directed CMB held AT THE SENDER while its recipient has no session, keyed by nodeId
+// (design D6). A name is never a route; a nodeId this node never had a proven session with is refused,
+// so a typo creates no state. A 0.10 outbox addressed by name is converted through its old roster.
 
+require('./_harness.js'); // sandbox first
 const { test } = require('node:test');
 const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
-// Isolate the store BEFORE the module loads: these tests used to write into the operator's real
-// ~/.sym/nodes, so leftovers from earlier runs made two of them fail on history rather than code.
-process.env.SYM_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'sym-outbox-test-'));
-const outbox = require('../outbox.js');
+const { createOutbox, ageDays, MAX_ITEMS } = require('../outbox.js');
 
-const N = 'outbox-test-node';
-const dir = path.join(process.env.SYM_HOME, 'nodes', N);   // the store the module actually uses
-const clean = () => fs.rmSync(dir, { recursive: true, force: true });
+const A = '01a0fd15-52ca-726c-9ce1-5767a1379249';
+const B = '01a0fd15-52ca-77cd-bc1c-8eef67a748e6';
+const fresh = () => fs.mkdtempSync(path.join(process.env.HOME, 'node-dir-'));
 
-test('an UNKNOWN peer name is not holdable — a typo must not create a queue', () => {
-  clean();
-  // Deliberately NOT using "identity.json exists on disk" as the test: that is
-  // true for 961 of 962 node directories on a working machine, so it admits
-  // essentially everything. Known means THIS node saw the peer.
-  assert.equal(outbox.isKnownPeer(N, 'never-seen-peer'), false);
-  clean();
+test('an unknown nodeId and a name are not holdable', () => {
+  const ob = createOutbox(fresh());
+  assert.strictEqual(ob.isKnown(A), false);
+  assert.deepStrictEqual(ob.hold('alice', { categories: { focus: 'x' } }), { held: false, reason: 'not-a-node-id' });
+  ob.rememberPeer('alice', 'alice');
+  assert.strictEqual(ob.isKnown('alice'), false, 'a name never becomes known');
 });
 
-test('a peer becomes known only by being observed, and then can be held for', () => {
-  clean();
-  assert.equal(outbox.isKnownPeer(N, 'real-peer'), false);
-  outbox.rememberPeer(N, 'real-peer', 'peer-id-1');
-  assert.equal(outbox.isKnownPeer(N, 'real-peer'), true, 'observing a peer makes its name known');
-  const h = outbox.hold(N, 'real-peer', { focus: 'x' }, {});
-  assert.equal(h.held, true);
-  assert.equal(h.seq, 1);
-  clean();
+test('a nodeId becomes known by a proven session, and is then held for, durably, with its parents', () => {
+  const dir = fresh();
+  const ob = createOutbox(dir);
+  ob.rememberPeer(A.toUpperCase(), 'alice');
+  assert.strictEqual(ob.isKnown(A), true);
+  assert.strictEqual(ob.knownLabel(A), 'alice');
+  const h = ob.hold(A, { categories: { focus: 'held' }, parents: [`cmb-${'f'.repeat(64)}`], payload: { n: 1 } });
+  assert.strictEqual(h.held, true);
+  const again = createOutbox(dir).pendingFor(A);
+  assert.strictEqual(again.length, 1, 'the queue survives a reload');
+  assert.deepStrictEqual(again[0].parents, [`cmb-${'f'.repeat(64)}`]);
+  assert.deepStrictEqual(again[0].payload, { n: 1 });
+  assert.strictEqual(typeof again[0].heldAt, 'number');
 });
 
-test('a nodeId is accepted as known once its name has been observed', () => {
-  clean();
-  outbox.rememberPeer(N, 'real-peer', 'peer-id-1');
-  assert.equal(outbox.isKnownPeer(N, 'peer-id-1'), true, 'addressing by nodeId must resolve too');
-  clean();
+test('drop removes only the given items; a full outbox refuses rather than evicting', () => {
+  const ob = createOutbox(fresh());
+  ob.rememberPeer(A, 'alice'); ob.rememberPeer(B, 'bob');
+  const a = ob.hold(A, { categories: { focus: 'a' } });
+  ob.hold(B, { categories: { focus: 'b' } });
+  assert.strictEqual(ob.drop([a.seq]), 1);
+  assert.strictEqual(ob.pendingFor(A).length, 0);
+  assert.strictEqual(ob.pendingFor(B).length, 1);
+  for (let i = ob.summary().total; i < MAX_ITEMS; i++) assert.ok(ob.hold(B, { categories: { focus: `n${i}` } }).held);
+  assert.deepStrictEqual(ob.hold(B, { categories: { focus: 'one too many' } }), { held: false, reason: 'outbox-full' });
 });
 
-test('held items survive a reload — the queue is durable, not in-memory', () => {
-  clean();
-  outbox.rememberPeer(N, 'p', 'id');
-  outbox.hold(N, 'p', { focus: 'first' }, {});
-  outbox.hold(N, 'p', { focus: 'second' }, {});
-  const again = outbox.pendingFor(N, 'p');   // re-reads from disk
-  assert.equal(again.length, 2);
-  assert.equal(again[0].categories.focus, 'first', 'FIFO order preserved across reload');
-  clean();
+test('age is reported, and an item stamped before ages existed reads as unknown, not zero', () => {
+  const now = Date.now();
+  assert.strictEqual(ageDays({ heldAt: now - 10 * 86400000 }, now), 10);
+  assert.strictEqual(ageDays({ heldAt: null }, now), null);
+  const ob = createOutbox(fresh());
+  ob.rememberPeer(A, 'alice');
+  ob.hold(A, { categories: { focus: 'x' } });
+  const s = ob.summary(Date.now() + 3 * 86400000 + 1000);
+  assert.strictEqual(s.oldestDays, 3);
+  assert.deepStrictEqual(s.byPeer[A], { count: 1, label: 'alice' });
 });
 
-test('drop removes ONLY the acknowledged seqs', () => {
-  clean();
-  outbox.rememberPeer(N, 'p', 'id');
-  const a = outbox.hold(N, 'p', { focus: 'a' }, {});
-  outbox.hold(N, 'p', { focus: 'b' }, {});
-  const left = outbox.drop(N, [a.seq]);
-  assert.equal(left, 1);
-  assert.equal(outbox.pendingFor(N, 'p')[0].categories.focus, 'b');
-  clean();
-});
-
-test('a FULL outbox REFUSES rather than evicting', () => {
-  clean();
-  outbox.rememberPeer(N, 'p', 'id');
-  for (let i = 0; i < outbox.MAX_ITEMS; i++) outbox.hold(N, 'p', { focus: `f${i}` }, {});
-  const over = outbox.hold(N, 'p', { focus: 'one too many' }, {});
-  assert.equal(over.held, false, 'must refuse');
-  assert.equal(over.reason, 'outbox-full');
-  // Evicting would drop mail the sender already said it was holding — silently,
-  // and only this node would ever know. A refusal is visible to the caller.
-  assert.equal(outbox.pendingFor(N, 'p').length, outbox.MAX_ITEMS, 'nothing was evicted');
-  clean();
-});
-
-test('summary reports per-peer counts — held mail must be visible somewhere', () => {
-  clean();
-  outbox.rememberPeer(N, 'p1', 'id1');
-  outbox.rememberPeer(N, 'p2', 'id2');
-  outbox.hold(N, 'p1', { focus: 'a' }, {});
-  outbox.hold(N, 'p2', { focus: 'b' }, {});
-  outbox.hold(N, 'p2', { focus: 'c' }, {});
-  const s = outbox.summary(N);
-  assert.equal(s.total, 3);
-  assert.equal(s.byPeer.p1, 1);
-  assert.equal(s.byPeer.p2, 2);
-  clean();
+test('a 0.10 outbox addressed by name is converted through its roster; one it cannot map is held for a label', () => {
+  const dir = fresh();
+  fs.writeFileSync(path.join(dir, 'known-peers.json'), JSON.stringify({ alice: { peerId: A, lastSeen: null }, ghost: { peerId: 'not-a-uuid' } }));
+  fs.writeFileSync(path.join(dir, 'outbox.json'), JSON.stringify({ seq: 2, items: [
+    { seq: 1, to: 'alice', categories: { focus: 'for alice' }, opts: {}, heldAt: 1 },
+    { seq: 2, to: 'ghost', fields: { focus: 'for a 0.9 ghost' }, opts: {} },
+  ] }));
+  const ob = createOutbox(dir);
+  assert.strictEqual(ob.isKnown(A), true, 'the 0.10 roster\'s recorded id is kept');
+  const forAlice = ob.pendingFor(A);
+  assert.strictEqual(forAlice.length, 1);
+  assert.strictEqual(forAlice[0].label, 'alice');
+  const ghost = ob.heldForLabel('ghost');
+  assert.strictEqual(ghost.length, 1);
+  assert.deepStrictEqual(ghost[0].categories, { focus: 'for a 0.9 ghost' }, 'the pre-rename key is migrated too');
+  assert.deepStrictEqual(ob.summary().byLabelOnly, { ghost: 1 });
+  const onDisk = JSON.parse(fs.readFileSync(path.join(dir, 'outbox.json'), 'utf8'));
+  assert.deepStrictEqual(onDisk.items.map((i) => i.to), [A, null], 'the conversion is written back');
 });

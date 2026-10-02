@@ -1,70 +1,44 @@
 'use strict';
-const { test } = require('node:test');
+
+// sym_outbox_discard, through the MCP surface: held mail must say how old it is, and there must be a
+// way out (dev-team-4, 2026-09-14: one CMB held ten days for a doer that had died). In 0.11 the queue
+// is keyed by nodeId; a 0.10 item held for a name that maps to no nodeId is reported, and discardable
+// by that label.
+
+const h = require('./_harness.js');
 const assert = require('node:assert');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
+const sdk = require('@sym-bot/sym');
 
-/**
- * outbox-age-discard.test.js — a held CMB must know how old it is, and there must be a way out.
- *
- * dev-team-4, 2026-09-14: sym_peers reported one CMB held for "mission-28c163-doer-1-mind", a doer
- * that died on 4 September, advising that it would "flush when the peer appears". The peer was ten
- * days gone and the project shelved. Two defects underneath: `heldAt` was in the item shape from
- * the start and never populated, so nothing could tell waiting from abandoned; and the queue
- * refuses new mail at MAX_ITEMS rather than evicting, so mail for the dead eventually blocks mail
- * for the living, with no command to clear it.
- */
+const t = h.suite('outbox: age and discard (MCP surface)');
+const A = '01a0fd15-52ca-726c-9ce1-5767a1379249';
 
-// SYM_HOME must be set before the module loads, or the store is the operator's real ~/.sym.
-process.env.SYM_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'sym-outbox-age-'));
-const outbox = require('../outbox.js');
-
-const NODE = 'test-node';
-
-test('a held item is stamped with the time it was held', () => {
-  const before = Date.now();
-  const r = outbox.hold(NODE, 'ghost-peer', { focus: 'mail for a peer that never returns' }, {});
-  assert.ok(r.held, 'the hold must succeed');
-  const [item] = outbox.pendingFor(NODE, 'ghost-peer');
-  assert.equal(typeof item.heldAt, 'number', 'heldAt must be populated, not null');
-  assert.ok(item.heldAt >= before, 'and must be the moment it was held');
+t('sym_peers reports held mail with its age and the label-only 0.10 item; discard removes exactly one peer\'s', async () => {
+  // The sandbox's own state root, which this process's sym reads too (sym reads it once, at load).
+  const state = process.env.SYM_STATE_DIR;
+  // The node's identity and a held outbox, as a 0.10 node would have left it, moved by sym's migration.
+  const ident = sdk.identity.loadIdentity({ name: 'outbox-e2e', create: true });
+  const dir = sdk.identity.nodeDirById(ident.nodeId);
+  fs.writeFileSync(path.join(dir, 'known-peers.json'), JSON.stringify({ version: 2, peers: { [A]: { label: 'alice', lastSeen: 1 } }, byOldName: {} }));
+  fs.writeFileSync(path.join(dir, 'outbox.json'), JSON.stringify({ seq: 2, items: [
+    { seq: 1, to: A, label: 'alice', categories: { focus: 'old mail' }, parents: [], heldAt: Date.now() - 10 * 86400000 },
+    { seq: 2, to: null, label: 'ghost', categories: { focus: 'mail for a name' }, parents: [] },
+  ] }));
+  const s = new h.McpSession({ env: { SYM_STATE_DIR: state, SYM_NODE_NAME: 'outbox-e2e', SYM_ROOM: 'outbox-room' } });
+  try {
+    await s.initialize();
+    const peers = (await s.call('sym_peers')).text;
+    assert.match(peers, /OUTBOX: 2 CMB\(s\) HELD AT THIS SENDER, not delivered/);
+    assert.match(peers, new RegExp(`1 for alice·a1379249 \\(${A}\\)`));
+    assert.match(peers, /held by 0.10 for the label "ghost", which is not a route/);
+    assert.match(peers, /oldest held 10 day\(s\)/);
+    assert.match(peers, /Clear them with sym_outbox_discard/);
+    const d = (await s.call('sym_outbox_discard', { peer: A })).text;
+    assert.match(d, /Discarded 1 CMB\(s\) held for .*the oldest held 10 day\(s\)\. They were never delivered and are gone\. 1 CMB\(s\) remain/);
+    assert.match((await s.call('sym_outbox_discard', { peer: 'ghost' })).text, /Discarded 1 CMB\(s\)/);
+    assert.match((await s.call('sym_outbox_discard', { peer: A })).text, /Nothing held for/);
+  } finally { await s.close(); }
 });
 
-test('age is reported, and an item stamped before this fix reads as unknown rather than zero', () => {
-  const now = Date.now();
-  assert.equal(outbox.ageDays({ heldAt: now - 10 * 86400000 }, now), 10);
-  assert.equal(outbox.ageDays({ heldAt: null }, now), null, 'an unstamped legacy item must not claim to be new');
-  const s = outbox.summary(NODE, now);
-  assert.ok('oldestDays' in s, 'the summary must carry the oldest age');
-});
-
-test('discarding a peer\'s mail removes exactly that peer\'s items', () => {
-  outbox.hold(NODE, 'live-peer', { focus: 'mail for someone still here' }, {});
-  const ghost = outbox.pendingFor(NODE, 'ghost-peer');
-  assert.equal(ghost.length, 1);
-  const left = outbox.drop(NODE, ghost.map((i) => i.seq));
-  assert.equal(outbox.pendingFor(NODE, 'ghost-peer').length, 0, 'the dead peer\'s mail is gone');
-  assert.equal(outbox.pendingFor(NODE, 'live-peer').length, 1, 'the live peer\'s mail is untouched');
-  assert.equal(left, 1);
-});
-
-// --- node.json keys the plugin does not read -------------------------------------------------
-// dev-team-5, 2026-09-14: its node.json said "group", the name used before the rename to "room".
-// The key is not read, so the file sat there looking obeyed while the node joined `default` alone
-// — correct identity, fallback room, one advisory and then silence. An ignored key must speak.
-
-test('a node.json using the pre-rename "group" key is named, not silently ignored', () => {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-  assert.ok(/legacyGroup/.test(src), 'the reader must detect the old key');
-  assert.ok(/used BEFORE the rename to "room"/.test(src), 'and the advisory must say what happened');
-  assert.ok(/Rename the key to "room"/.test(src), 'and give the one-line fix');
-  assert.ok(!/room: clean\(cfg\.room\) \|\| clean\(cfg\.group\)/.test(src),
-    'it must NOT be honoured — reading it would hide the same trap one release later');
-});
-
-test('any unrecognised node.json key is reported', () => {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-  assert.ok(/unknownKeys/.test(src), 'unknown keys must be collected');
-  assert.ok(/does not read/.test(src), 'and reported in the advisory');
-});
+t.run();
