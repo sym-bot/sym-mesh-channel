@@ -245,11 +245,35 @@ hung call releases only the next call after 60 s, and calls behind it still run 
    - `{type:'recall', query, limit?}` → `{items:[{key, record, verified, storedAt, author}]}`;
    - the capability is bound to the first connection that presents it.
 
-**Still a gap:** none of the above is in 341dafb except what the WIP has started; §7 lists what each
-test ran against.
+**Status at sym 72daeb6:** every item above is in sym. The defect reported upstream at 341dafb (a
+pinned key's source became `proven` once a session proved it) is fixed: `pinned` now outranks
+`proven`.
 
-**Defect reported upstream:** a pinned key's source becomes `proven` once a session proves it (sym
-D3 keeps the stronger source).
+**Where sym 72daeb6 differs from this section** (recorded, not adapted to silently; the channel takes
+sym's names, one name and no aliases):
+
+1. **The interior refusal name** is `capability-bound-to-another-connection` (this design said
+   `capability-bound-elsewhere`). The channel uses sym's name only.
+2. **The interior delivery item** is `{ seq, id, kind: 'directed'|'broadcast', record, verified,
+   profile, assertionId, verification, session, author, remixed, receivedAt }`. `kind` is the
+   audience, not cmb/message/mood: the interior serves inbox items (CMBs) only, never messages or
+   moods. `record` is the signed projection. Items carry no `payload` (it is in
+   `record.metadata.application`) and no `acked` mark. sym's own module header lists fewer fields
+   than it sends.
+3. **The `message` event** carries `{ from, fromName, content, timestamp, key, assertionId, via }`:
+   no `verification` and no `session`. The channel builds the facts from the event's names and
+   `node.keyBindings()`. Asked of sym: the entry's `verification` and `session` on this event too.
+4. **`mood-delivered`** carries the author's nodeId but not the author's key or label. The key and
+   its source come from `node.keyBindings()`, and the label is the deliverer's when author and
+   deliverer are one node. Asked of sym: the same as 3.
+5. **The fingerprint form.** `node.fingerprint` is `sha256:<hex>`, and the channel printed bare hex
+   of the same hash. The channel now prints sym's form wherever it prints a full fingerprint; the
+   suffix in a tag is the end of the same hex.
+6. **Inbox items carry `record`**, the signed projection, beside the raw `categories` and `payload`.
+   The channel shows only the projection's parts.
+7. **The kind is signed.** The node writes the submission's kind as the record's intent and refuses
+   a submission whose intent differs (`intent-is-not-the-kind`).
+8. **Windows:** interior `listen` refuses without `{ allowDefaultPipeAcl: true }`.
 
 ## 7. Tests
 
@@ -275,3 +299,50 @@ D3 keeps the stronger source).
 - `relay-auth` is unproven, so a relay token holder can evict a node (4004).
 - Whether a push reaches the model is the model's own statement.
 - Messages and moods are not durable.
+
+## Parked 2026-10-02: what remains
+
+Parked at the coordinator's request (workload moved to the XMesh runtime). Head: the commit that adds
+this section. The move onto sym 72daeb6 is half done and **not committed**. These files are changed
+in the worktree and have not been run yet:
+
+- `package.json` and `package-lock.json`: the dependency is `file:.sdk/sym-bot-sym-0.14.0-dev.72daeb6.tgz`
+  (repacked from commit 72daeb6 and installed), and `signed-parts.js` is in `files`.
+- `signed-parts.js` (new): the CAT7 texts and the signed payload, both read from `record`.
+- `provenance.js`: the interim join (`createInterimJoin`) is removed; `eventFacts` builds message and
+  mood facts from the event and the key bindings; there is a new reason, `no-key-binding`.
+- `node-host.js`: no `verified-record` listener. `cmb-accepted` reads the inbox item and gates it.
+  Messages and moods go through `_eventVerdict`, which uses the key bindings and quarantines a
+  Legacy Import deliverer. `signedCategories` moved to `signed-parts.js`.
+- `interior-host.js`: sym's refusal name; `intent-is-not-the-kind`; `_fromServed` reads sym's item
+  shape (`kind` is the audience, parts from `record`, acks kept locally); recall reads the payload
+  from `record`.
+- `key-display.js`: `bindingFor(nodeId)` reads the SDK's bindings only; a key bound under two nodeIds
+  is said as such; `fullFingerprint` gives the `sha256:<hex>` form.
+- `delivery-policy.js`, `server.js`, `room-names.js`: print `fullFingerprint`. `server.js`: the
+  `kind` description says the kind is signed as the intent.
+
+**To resume:**
+
+1. Update the tests to the new code. In `test/provenance.test.js`, drop the interim-join tests and add
+   tests for `eventFacts` and `no-key-binding`. In `test/interior.test.js`, use sym's refusal name in
+   the stub and expect sym's item shape. Anything that asserted a bare-hex full fingerprint
+   (`core-secure-e2e`, `delivery-policy`, `interior`, `node-config`) now expects `sha256:<hex>`.
+2. Replace the fake-node tests in `test/node-host.test.js` with real-SDK ones:
+   - provenance on the inbox entry, the same after a restart (the facts are now persisted);
+   - an attributed mood: give a SymNode a rejecting SVAF evaluator, after checking the result shape
+     sym expects;
+   - a message, with its facts from the key bindings;
+   - the key-fingerprint suffix computed from `node.keyBindings()`.
+3. Run the interior tests against a real node's interior: `mission`, `deliveries`, `subscribe`,
+   `ack`, `recall`, the connection-bound capability and its refusal name, and `intent-is-not-the-kind`.
+4. Make `core-secure-e2e` expect the invite issuer's key as `pinned`, now that pinned outranks proven.
+5. Rewrite §7 (Tests) to name 72daeb6. Update the CHANGELOG, SECURITY and the reference: the facts
+   are durable, messages and moods use the key bindings, and the fingerprint form is sym's.
+6. Re-run the ten mutations against the new locations. The full suite runs only under the heavy lock,
+   below load 12, and after the coordinator says "go". Then commit with explicit paths.
+
+**Still waiting on others:** spec drafts #34 and #35 to merge; sym 0.14.0 on npm, for the `^0.14.0`
+switch and the release gate; sym adding `verification` and `session` to `message` and
+`mood-delivered` (items 3 and 4 above).
+
