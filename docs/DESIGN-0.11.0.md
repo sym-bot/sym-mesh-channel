@@ -95,7 +95,7 @@ their own either, because they do not carry the verification facts. So:
   key (§8.8.2).
 - **Durable.** The SDK's inbox is durable across restarts and the facts map is not, so the facts
   of every inbox delivery are written beside the inbox, under the node's directory
-  (`mesh-channel/deliveries.json`, bounded to the inbox's size). A restarted channel still shows
+  (`mesh-channel/deliveries.json`, mode 0600, at most 1,000 entries; the inbox holds 500). A restarted channel still shows
   who signed each delivery waiting in the inbox.
 - **What is never shown.** An inbox delivery with no facts is withheld, named by id and reason,
   never by its text, on every surface (push, `sym_receive`, `sym_fetch`). The reasons are:
@@ -291,7 +291,7 @@ push still being written, so its credit is settled first.
      session, remixed, receivedAt}], cursor, remaining}`: the node's durable inbox, with the facts
      `verified-record` carried;
    - `{id, type:'subscribe', capability}`, then unsolicited `{type:'delivery', item}` lines: push;
-   - `{id, type:'ack', capability, id}`: read in full, as `inboxAck`;
+   - `{id, type:'ack', capability, delivery}` → `{id, type:'acked'}`: read in full, as `inboxAck`;
    - `{id, type:'recall', capability, query, limit?}` → `{id, type:'recall', items:[{key, record,
      verified, storedAt}]}`;
    - `{id, type:'mission', capability}` → `{id, type:'mission', mindId, missionId, kinds, allowTo,
