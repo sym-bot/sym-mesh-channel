@@ -26,14 +26,16 @@ t('the pre-rename "group" key, an unknown key and an unusable name are each name
   const s = new h.McpSession({ cwd: project({ node_name: 'bad/name', group: 'team-x', colour: 'blue' }), env: { SYM_NODE_NAME: '' } });
   try {
     await s.initialize();
-    assert.match(s.instructions, /sets node_name "bad\/name", which must not contain path separators/);
-    assert.match(s.instructions, /sets "group": "team-x", the name this project used before the rename to "room"\. It is not read/);
+    assert.match(s.instructions, /sets a node_name that must not contain path separators/);
+    assert.match(s.instructions, /sets a "group" key, the name this project used before the rename to "room"\. It is not read/);
     assert.match(s.instructions, /Rename the key to "room"/);
+    assert.ok(!/bad\/name|team-x/.test(s.instructions), 'the file\'s own values never reach the instructions (L8)');
   } finally { await s.close(); }
   const u = new h.McpSession({ cwd: project({ room: 'cfg-room', colour: 'blue' }), env: { SYM_NODE_NAME: '' } });
   try {
     await u.initialize();
-    assert.match(u.instructions, /contains "colour", which this plugin does not read\. Only "node_name", "room" and "node_id" are honoured/);
+    assert.match(u.instructions, /contains 1 key\(s\) this plugin does not read\. Only "node_name", "room" and "node_id" are honoured/);
+    assert.ok(!/colour/.test(u.instructions), 'nor its unknown key names (L8)');
     assert.match((await u.call('sym_room_info')).text, /room: cfg-room\n {2}room source: .*node\.json/);
   } finally { await u.close(); }
 });
@@ -60,7 +62,7 @@ t('a pinned node_id that is on this host is loaded as itself, and status says so
     await s.initialize();
     assert.match(s.instructions, new RegExp(`node 'pinned-real', nodeId ${id}`));
     const st = (await s.call('sym_status')).text;
-    assert.match(st, new RegExp(`^Node: pinned-real — nodeId ${id}, key fingerprint [0-9a-f]{16}`));
+    assert.match(st, new RegExp(`^Node: pinned-real — nodeId ${id}, key fingerprint ([0-9a-f]{64}|\\(this SDK has no accessor for the node's own key\\))`), 'from the SDK accessor, never a minted invite');
     assert.ok(!/Pin this folder's agent/.test(st), 'already pinned');
   } finally { await s.close(); }
   const u = new h.McpSession({ env: { SYM_NODE_NAME: 'unpinned' } });

@@ -59,7 +59,23 @@ test('age is reported, and an item stamped before ages existed reads as unknown,
   ob.hold(A, { categories: { focus: 'x' } });
   const s = ob.summary(Date.now() + 3 * 86400000 + 1000);
   assert.strictEqual(s.oldestDays, 3);
-  assert.deepStrictEqual(s.byPeer[A], { count: 1, label: 'alice' });
+  assert.deepStrictEqual(s.byPeer[A], { count: 1, label: 'alice', stuck: 0, stuckReason: null });
+});
+
+test('L9: the outbox and roster files are 0600; a refused item is marked stuck with its reason and kept, lineage included', () => {
+  const ob = createOutbox(fresh());
+  ob.rememberPeer(A, 'alice');
+  const h = ob.hold(A, { categories: { focus: 'a cited reply' }, parents: [`cmb-${'f'.repeat(64)}`] });
+  if (process.platform !== 'win32') {
+    assert.strictEqual(fs.statSync(ob.outboxFile).mode & 0o777, 0o600);
+    assert.strictEqual(fs.statSync(ob.rosterFile).mode & 0o777, 0o600);
+  }
+  assert.strictEqual(ob.markStuck(h.seq, 'the SDK refused it'), true);
+  const s = ob.summary();
+  assert.deepStrictEqual([s.byPeer[A].stuck, s.byPeer[A].stuckReason], [1, 'the SDK refused it']);
+  assert.deepStrictEqual(ob.pendingFor(A)[0].parents, [`cmb-${'f'.repeat(64)}`]);
+  assert.strictEqual(ob.clearStuck(h.seq), true);
+  assert.strictEqual(ob.summary().byPeer[A].stuck, 0);
 });
 
 test('a 0.10 outbox addressed by name is converted through its roster; one it cannot map is held for a label', () => {

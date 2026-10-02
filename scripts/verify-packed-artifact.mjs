@@ -41,11 +41,23 @@ if (local.length) {
 }
 ok('no dependency is a local path');
 
-// Everything below runs in a sandboxed home and state root: the gate must never write an identity
-// or a store into the operator's real ~/.sym.
+// Everything below runs in a sandboxed home and state root, from an allowlisted environment: the gate
+// must never write an identity or a store into the operator's real ~/.sym (review M4), and no
+// variable of the operator's session (an XMesh mind's interior socket, a pinned nodeId) may reach it.
 const sandbox = path.join(tmp, 'home');
 fs.mkdirSync(path.join(sandbox, '.sym'), { recursive: true });
-const sandboxEnv = { ...process.env, HOME: sandbox, USERPROFILE: sandbox, SYM_STATE_DIR: path.join(sandbox, '.sym') };
+const PASS = ['PATH', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LC_ALL', 'SystemRoot', 'ComSpec', 'PATHEXT', 'npm_config_cache'];
+const sandboxEnv = { HOME: sandbox, USERPROFILE: sandbox, SYM_STATE_DIR: path.join(sandbox, '.sym') };
+for (const k of PASS) if (process.env[k] !== undefined) sandboxEnv[k] = process.env[k];
+
+// The real home, found through the OS user record, and what the gate's own probe name there looks like
+// now: afterwards it must look the same.
+const realHome = os.userInfo().homedir;
+const realProbe = [path.join(realHome, '.sym', 'nodes', 'packgate-probe'), path.join(realHome, '.sym', 'nodes', 'by-name', 'packgate-probe.json')];
+// npm's download cache is not mesh state; reusing it saves a full download per gate.
+if (!sandboxEnv.npm_config_cache) sandboxEnv.npm_config_cache = path.join(realHome, '.npm');
+const stamp = (p) => { try { return fs.statSync(p).mtimeMs; } catch { return null; } };
+const before = realProbe.map(stamp);
 
 // 1. Pack.
 const tgzName = execFileSync('npm', ['pack', '--silent', '--pack-destination', tmp], {
@@ -115,13 +127,14 @@ const b = text(await answer(3));
 if (/never had one with it/.test(b) && /nothing was queued/.test(b)) ok('an unknown nodeId is refused and nothing is queued');
 else bad(`unknown-nodeId case wrong: ${b.slice(0, 160)}`);
 
-// Case B — a nodeId this node HAS had a session with, while absent, must be HELD.
+// Case B — a nodeId this node HAS had a session with, while absent, must be HELD. The roster entry is
+// written by a CHILD process with the sandbox's environment: sym fixes its state root once, at load,
+// from the loading process's environment, so a write from this process would land in the real home
+// (review r6).
 try {
-  const { createRequire } = await import('node:module');
-  const req = createRequire(installed);
-  const sdk = req('@sym-bot/sym');
-  const { createOutbox } = req('./outbox.js');
-  createOutbox(sdk.identity.nodeDirById(nodeId)).rememberPeer(ghost, 'packgate-ghost');
+  const seed = `const sdk=require('@sym-bot/sym');const {createOutbox}=require('./outbox.js');` +
+    `createOutbox(sdk.identity.nodeDirById(${JSON.stringify(nodeId)})).rememberPeer(${JSON.stringify(ghost)},'packgate-ghost');`;
+  execFileSync(process.execPath, ['-e', seed], { cwd: installedDir, env: sandboxEnv, stdio: 'inherit' });
   send({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'sym_send', arguments: { to: ghost, focus: `held probe ${Date.now()}` } } });
   const c = text(await answer(4));
   if (/HELD AT SENDER/.test(c) && /not delivered/.test(c)) ok('a known-but-absent nodeId is HELD and says not delivered');
@@ -129,6 +142,9 @@ try {
 } catch (e) { bad(`could not exercise the held case: ${e.message}`); }
 
 child.kill('SIGTERM');
+const after = realProbe.map(stamp);
+if (JSON.stringify(before) === JSON.stringify(after)) ok('the real ~/.sym is untouched by the gate');
+else bad(`the gate touched the real home: ${realProbe.filter((p, i) => before[i] !== after[i]).join(', ')}`);
 fs.rmSync(tmp, { recursive: true, force: true });
 
 console.log(failures === 0 ? '\nRelease gate PASSED\n' : `\nRelease gate FAILED — ${failures} problem(s)\n`);

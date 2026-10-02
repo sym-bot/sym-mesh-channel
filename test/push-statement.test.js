@@ -44,10 +44,10 @@ test('the status line says only what the session stated: no guess, no "probably"
   let t = 1_000;
   const p = push.createPushStatement({ now: () => t });
   assert.match(push.statusLine(p), /^Push: not confirmed — no push check has been sent yet/);
-  p.issue(); p.sent();
+  const code = p.issue(); p.sent();
   assert.match(push.statusLine(p), /a push check was sent at .* and has not been answered/);
   t = 2_000;
-  p.answer({ code: p.code });
+  p.answer({ code });
   assert.match(push.statusLine(p), /^Push: confirmed by this session at 1970-01-01T00:00:02.000Z/);
   assert.ok(!/probably/i.test(push.statusLine(p)));
 });

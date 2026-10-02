@@ -30,8 +30,8 @@ t('sym_peers reports held mail with its age and the label-only 0.10 item; discar
     await s.initialize();
     const peers = (await s.call('sym_peers')).text;
     assert.match(peers, /OUTBOX: 2 CMB\(s\) HELD AT THIS SENDER, not delivered/);
-    assert.match(peers, new RegExp(`1 for alice·a1379249 \\(${A}\\)`));
-    assert.match(peers, /held by 0.10 for the label "ghost", which is not a route/);
+    assert.match(peers, new RegExp(`1 for alice \\(${A}\\)`));
+    assert.match(peers, /held by 0.10 for a label that is not a route \(discard it with sym_outbox_discard \{peer: "ghost"\}\)/);
     assert.match(peers, /oldest held 10 day\(s\)/);
     assert.match(peers, /Clear them with sym_outbox_discard/);
     const d = (await s.call('sym_outbox_discard', { peer: A })).text;

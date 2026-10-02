@@ -70,11 +70,23 @@ test('a directed send to a peer silent for over 30 s says its session may be gon
   assert.strictEqual(cd.staleNote(null), '');
 });
 
-test('the salt is gone: nothing in the shipped code appends to what the agent wrote', () => {
-  const fs = require('fs');
-  const path = require('path');
-  for (const f of ['channel-delivery.js', 'node-host.js', 'server.js', 'interior-host.js']) {
-    const src = fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
-    assert.ok(!/re-sent \$\{/.test(src) && !/focus: `\$\{categories\.focus\}/.test(src), `${f} still salts a re-send`);
-  }
+test('spec draft #35\'s shapes: a refusal names itself, a broadcast duplicate names its key', () => {
+  assert.deepStrictEqual(cd.emitOutcome({ refused: 'remix-without-new-domain-data' }, [], true), { outcome: 'remix-refused', reason: 'remix-without-new-domain-data' });
+  assert.deepStrictEqual(cd.emitOutcome({ key: KEY, duplicate: true }, [], false), { outcome: 'already-in-memory', key: KEY });
+});
+
+test('the salt is gone: identical cognition is answered once, never re-sent with words the agent did not write', () => {
+  const EventEmitter = require('node:events');
+  const { NodeHost } = require('../node-host.js');
+  const calls = [];
+  const node = Object.assign(new EventEmitter(), {
+    nodeId: '01a0fd15-0000-7000-8000-000000000001', name: 'n', peers: () => [], inboxStatus: () => ({ seq: 0, cursor: 0, undrained: 0 }),
+    remember(categories) { calls.push(JSON.parse(JSON.stringify(categories))); return null; },   // the store already holds it
+  });
+  const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
+  const host = new NodeHost({ build: () => node, nodeDir: () => fs.mkdtempSync(path.join(os.tmpdir(), 'cd-')) });
+  host.open({});
+  const out = host.emitRecord({ categories: { focus: 'the same words' } });
+  assert.strictEqual(out.outcome, 'already-in-memory');
+  assert.deepStrictEqual(calls, [{ focus: 'the same words' }], 'one remember(), with exactly what was given');
 });

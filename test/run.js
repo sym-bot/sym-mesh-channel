@@ -16,19 +16,24 @@ const { tmpdir } = require('os');
 const { spawnSync } = require('child_process');
 
 // The test files here when this floor was last set. Raise it with a new file; lower it only in the
-// commit that removes one, so the removal is on the record. 0.11.0: 22 (removed channel-reliability,
+// commit that removes one, so the removal is on the record. 0.11.0: 27 (removed channel-reliability,
 // restart-survival and receive-withheld-surface, whose cases moved to node-host, core-secure-e2e and
-// withheld-surface; added channel-delivery, core-secure-e2e, delivery-facts, interior, node-config,
-// node-host, push-statement, sdk-boundary and withheld-surface).
-const MIN_FILES = 22;
+// withheld-surface; review round 2 removed delivery-facts with its module and added provenance,
+// key-display, tool-queue, sandbox, release-gate and zz-real-home-untouched).
+const MIN_FILES = 27;
 
 // EVERY FILE RUNS SANDBOXED. HOME, USERPROFILE and SYM_STATE_DIR point into a temp dir made for that
 // file, so no test can write an identity, a key or a store into the real ~/.sym, or read the real
 // ~/.claude.json. test/_harness.js refuses to run outside one as well.
+// Each file's environment is built from an allowlist (test/_clean-env.js), never the developer's, and the
+// suite refuses to start where an XMesh mind's or a pinned agent's variables are set (review M5).
+const { cleanEnv, refuseDangerous } = require('./_clean-env.js');
+refuseDangerous(process.env, 'test/run.js');
+const STARTED_AT = String(Date.now());
 function sandboxEnv() {
   const box = mkdtempSync(join(realpathSync(tmpdir()), 'mesh-channel-run-'));
   mkdirSync(join(box, '.sym'), { recursive: true });
-  return { box, env: { ...process.env, HOME: box, USERPROFILE: box, SYM_STATE_DIR: join(box, '.sym') } };
+  return { box, env: cleanEnv({ HOME: box, USERPROFILE: box, SYM_STATE_DIR: join(box, '.sym'), MESH_CHANNEL_RUN_STARTED_AT: STARTED_AT }) };
 }
 
 function find(dir) {

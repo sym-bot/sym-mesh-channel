@@ -1,47 +1,42 @@
 'use strict';
 
-// UNREAD-INBOX ADVISORY — the contract ruled by codex-mac, 2026-08-10. Some MCP hosts never invoke the
-// model on an inbound CMB, so the count rides on every tool answer. It is not a wake and not a push.
-// The behaviour end to end is in core-secure-e2e.test.js ("the unread footer counts what waits"); these
-// pin the shape: count only, read without draining, one wrapper for every tool, folded into the last
-// text block, and — 0.11 — a delivery pushed into a session that CONFIRMED push is not counted.
+// UNREAD-INBOX ADVISORY — the contract ruled by codex-mac, 2026-08-10, as BEHAVIOUR through MCP (review
+// L11). Some hosts never invoke the model on an inbound CMB, so the count rides on every tool answer:
+// one line, only when something is unread, the count and nothing else, folded into the answer's last
+// text block, on errors as on successes, and never moving the cursor. It is not a wake and not a push.
 
-const { test } = require('node:test');
+const h = require('./_harness.js');
 const assert = require('node:assert');
-const fs = require('node:fs');
-const path = require('node:path');
 
-const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-const host = fs.readFileSync(path.join(__dirname, '..', 'node-host.js'), 'utf8');
-const region = (s, from, to) => s.slice(s.indexOf(from), s.indexOf(to));
+const t = h.suite('unread-inbox advisory — MCP surface');
+const TOKEN = 'advisory-token-'.padEnd(40, 'z');
 
-test('the count reads inboxStatus(), which does not move the cursor, and says nothing but the count', () => {
-  const fn = region(host, '  unreadCount() {', '  /** Whether `id` is still waiting');
-  assert.match(fn, /inboxStatus\(\)\.undrained/);
-  assert.ok(!/inbox\(\{/.test(fn), 'must not call inbox(), which drains');
-  const line = region(src, 'function withInboxAdvisory', '// ONE TOOL CALL AT A TIME');
-  assert.match(line, /`Mesh inbox: \$\{n\} unread — call sym_receive\.`/);
-  for (const leak of ['focus', 'payload', 'categories', 'facts', 'label']) assert.ok(!line.includes(`.${leak}`), `count only: ${leak}`);
-  assert.match(line, /if \(!n \|\| !result/, 'silent at zero');
+t('the footer: count only, only when unread, on every answer including errors, without draining', async () => {
+  const relay = await h.fakeRelay();
+  const env = { SYM_ROOM: 'advisory-room', SYM_RELAY_URL: relay.url, SYM_RELAY_TOKEN: TOKEN };
+  const A = new h.McpSession({ env: { ...env, SYM_NODE_NAME: 'sender' } });
+  const B = new h.McpSession({ env: { ...env, SYM_NODE_NAME: 'receiver' } });
+  try {
+    await A.initialize(); await B.initialize();
+    const b = B.instructions.match(/nodeId ([0-9a-f-]{36})/)[1];
+    await h.until(async () => /1 peer\(s\)/.test((await A.call('sym_peers')).text), 20000, 400);
+    const quiet = await B.call('sym_status');
+    assert.ok(!/Mesh inbox/.test(quiet.text), 'silent at zero');
+    await A.call('sym_send', { to: b, focus: 'MARKER-FOCUS count me' });
+    const st = await h.until(async () => { const x = await B.call('sym_status'); return /Mesh inbox: 1 unread — call sym_receive\.$/.test(x.text) && x; }, 10000, 300);
+    assert.ok(st, 'one line, at the end');
+    const blocks = st.raw.result.content;
+    assert.strictEqual(blocks.length, 1, 'folded into the last text block, not a second block');
+    const footer = st.text.split('\n\n').pop();
+    assert.strictEqual(footer, 'Mesh inbox: 1 unread — call sym_receive.');
+    assert.ok(!/MARKER-FOCUS|sender/.test(footer), 'count only');
+    const err = await B.call('sym_send', { to: 'not-a-node', focus: 'x' });
+    assert.strictEqual(err.isError, true);
+    assert.match(err.text, /Mesh inbox: 1 unread/, 'on an error answer too');
+    assert.match((await B.call('sym_status')).text, /Mesh inbox: 1 unread/, 'the footer moved no cursor');
+    assert.match((await B.call('sym_receive')).text, /MARKER-FOCUS/);
+    assert.ok(!/Mesh inbox/.test((await B.call('sym_status')).text), 'read: silent again');
+  } finally { await A.close(); await B.close(); await relay.close(); }
 });
 
-test('pushed deliveries leave the count only once the session confirmed push, first-hand', () => {
-  const fn = region(src, 'function unreadNow', 'function withInboxAdvisory');
-  assert.match(fn, /if \(pushState\.confirmed\(\)\)/);
-  assert.match(fn, /host\.isUndrained\(id\)/, 'and only while the engine still holds it unread');
-});
-
-test('one wrapper covers every tool, success and error alike, folded into the last text block', () => {
-  assert.match(src, /toolQueue\.then\(async \(\) => withInboxAdvisory\(await dispatchTool\(request\)\)\)/);
-  assert.strictEqual((src.match(/withInboxAdvisory\(/g) || []).length, 2, 'its definition and the one call');
-  const fn = region(src, 'function withInboxAdvisory', '// ONE TOOL CALL AT A TIME');
-  assert.match(fn, /content\.slice\(0, -1\)/);
-  assert.match(fn, /\$\{last\.text\}\\n\\n\$\{line\}/);
-});
-
-test('inbox-unread and outbox-held are different facts, labelled apart', () => {
-  assert.ok(src.includes('Mesh inbox:'));
-  assert.ok(src.includes('OUTBOX:'));
-  assert.ok(!/OUTBOX[^\n]*unread/.test(src));
-  assert.match(src, /Not a wake, not a push/);
-});
+t.run();

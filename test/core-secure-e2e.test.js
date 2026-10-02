@@ -32,23 +32,28 @@ t('a directed CMB arrives with who signed it, the audience, the id and the key; 
   const { A, B, a, b } = await pair();
   try {
     const peers = (await A.call('sym_peers')).text;
-    assert.match(peers, new RegExp(`bob — nodeId ${b}; key proven; relay`));
+    assert.match(peers, new RegExp(`^bob ⟨[^⟩]+⟩ — nodeId ${b}; key proven; relay`, 'm'));
     const byName = await A.call('sym_send', { to: 'bob', focus: 'by name' });
     assert.strictEqual(byName.isError, true);
     assert.match(byName.text, new RegExp(`Connected peers that use the label "bob": ${b}`));
     const sent = await A.call('sym_send', { to: b, focus: 'review the outbox migration', payload: { pr: 42 } });
-    assert.match(sent.text, /^Sent CMB cmb-[0-9a-f]{64} \(assertion asrt-[0-9a-f]+\) to bob·/);
+    assert.match(sent.text, new RegExp(`^Sent CMB cmb-[0-9a-f]{64} \\(assertion asrt-[0-9a-f]+\\) to bob \\(${b}\\);`));
     const push = await B.waitForPush((p) => p.type === 'cmb', 10000);
     assert.ok(push, `no push. B stderr:\n${B.stderr}`);
-    assert.match(push.text, new RegExp(`^\\[alice·${a.slice(-8)} →you\\] review the outbox migration \\[\\+payload 9 bytes\\] \\[in\\d{4}\\] key cmb-[0-9a-f]{64}$`));
+    assert.match(push.text, /^\[alice ⟨…[0-9a-f]{8,}⟩ →you\] "review the outbox migration" \[\+payload 9 bytes\] \[in\d{4}\]$/, 'one line: the tag, an escaped lead, the id');
+    const meta = B.notifications.find((n) => n.params && n.params.content === push.text).params.meta;
+    assert.strictEqual(meta.signer_node_id, a, 'the facts travel as structured meta');
+    assert.match(meta.signer_key_fingerprint, /^[0-9a-f]{64}$/);
+    assert.match(meta.cmb_key, /^cmb-[0-9a-f]{64}$/);
+    assert.ok(!push.text.includes(a.slice(-8)), 'no truncated nodeId identifies the signer');
     const r = (await B.call('sym_receive')).text;
     const id = inIdOf(r);
     assert.ok(id, r);
     assert.match(r, /·pushed/, 'until the session confirms push, a pushed delivery is still listed');
     const f = (await B.call('sym_fetch', { msg_id: id })).text;
-    assert.match(f, new RegExp(`Signed by: alice — nodeId ${a}; its key is proven by a Core Secure session with it`));
+    assert.match(f, new RegExp(`Signed by: alice — nodeId ${a}; key fingerprint [0-9a-f]{64}; the key is proven by a Core Secure session with it`));
     assert.match(f, /Audience: directed to this node/);
-    assert.match(f, /---PAYLOAD \(signed application data\)---\n\{\n {2}"pr": 42\n\}/);
+    assert.match(f, /----- BEGIN PEER TEXT in\d{4} [0-9a-f]{12} -----\nfocus: review the outbox migration\n\n\(payload — signed application data\)\n\{\n {2}"pr": 42\n\}\n----- END PEER TEXT in\d{4} [0-9a-f]{12} -----/, 'the signed text, fenced');
   } finally { await closeAll(A, B); }
 });
 
@@ -59,7 +64,12 @@ t('a reply cites what it answers; the asker sees the lineage, and identical cogn
     await h.until(async () => inIdOf((await B.call('sym_receive', { peek: true })).text), 10000, 300);
     const id = inIdOf((await B.call('sym_receive')).text);
     const first = await B.call('sym_send', { to: id, parents: [id], focus: 'yes, healthy for an hour' });
-    assert.match(first.text, /^Not sent: MMP §15\.7/, 'the SDK\'s remix guard, said as such');
+    if (/^Not sent/.test(first.text)) {
+      // An SDK before spec draft #35 gates a cited reply: the answer keeps the lineage and never says "without parents".
+      assert.match(first.text, /^Not sent: this SDK refuses a record that cites a peer's \(MMP §15\.7, before spec draft #35\)/);
+      assert.match(first.text, /then send this again with the same parents/);
+      assert.ok(!/without parents/.test(first.text));
+    }
     assert.match((await B.call('sym_publish', { focus: 'bob has watched the relay for an hour' })).text, /^Published CMB/);
     const reply = await B.call('sym_send', { to: id, parents: [id], focus: 'yes, healthy for an hour' });
     assert.match(reply.text, /Lineage: 1 parent\(s\) cited/);
@@ -138,7 +148,7 @@ t('SYM_ALLOWED_PEERS of names allows nothing, and says so; of nodeIds, admits ex
   } finally { await closeAll(C.A, C.B, impostor); }
 });
 
-t('a restarted server still says who signed what waits in its inbox, and its instructions carry no record text', async () => {
+t('a restarted server shows nothing that lacks its own facts, and its instructions carry no record text', async () => {
   const bState = h.stateDir('bob-restart');
   const bCwd = fs.mkdtempSync(path.join(process.env.HOME, 'bob-proj-'));
   const { A, B, b } = await pair({}, { SYM_STATE_DIR: bState, CLAUDE_PROJECT_DIR: bCwd });
@@ -154,8 +164,15 @@ t('a restarted server still says who signed what waits in its inbox, and its ins
       assert.ok(!/MARKER-PRIMER|MARKER-OWN/.test(B2.instructions), `no record text in the instructions (audit C-2.12): ${B2.instructions}`);
       assert.match(B2.instructions, /This node's memory holds \d+ record\(s\); sym_recall "" lists the newest, as data\./);
       const r = (await B2.call('sym_receive')).text;
-      assert.match(r, /\[alice·[0-9a-f]{8} →you\] MARKER-PRIMER wait for me across a restart/, r);
-      assert.match((await B2.call('sym_recall', { query: 'MARKER' })).text, /MARKER-PRIMER|MARKER-OWN/, 'memory is read as a tool result, through the policy');
+      // The delivery is durable; its facts are shown only when the entry itself carries them (design D2).
+      // sym at 341dafb does not stamp them yet, so after a restart it is listed by id, never shown.
+      if (/withheld, not verified/.test(r)) {
+        assert.match(r, /\[in\d{4}\] withheld, not verified: it carries no Core Secure provenance/);
+        assert.ok(!/MARKER-PRIMER/.test(r));
+      } else {
+        assert.match(r, /\[alice ⟨…[0-9a-f]{8,}⟩ →you\] "MARKER-PRIMER wait for me across a restart"/);
+      }
+      assert.match((await B2.call('sym_recall', { query: 'MARKER' })).text, /MARKER-OWN/, 'own memory is read as a tool result, through the policy');
     } finally { await B2.close(); }
   } finally { await closeAll(A); }
 });
@@ -172,7 +189,7 @@ t('an invite names its issuer; joining with it pins the issuer\'s key, and the s
     assert.ok(url.includes(`node=${a}`), 'the issuer is in the URL');
     const info = (await B.call('sym_invite_info', { url })).text;
     assert.match(info, new RegExp(`"issuer_node_id": "${a}"`));
-    assert.match(info, /"issuer_key_fingerprint": "[0-9a-f]{16}"/);
+    assert.match(info, /"issuer_key_fingerprint": "[0-9a-f]{64}"/);
     const join = await B.call('sym_join_room', { invite: url });
     assert.strictEqual(join.isError, false, join.text);
     assert.match(join.text, /Moved from room "elsewhere" .* to "e2e-room"/);
@@ -181,7 +198,7 @@ t('an invite names its issuer; joining with it pins the issuer\'s key, and the s
     assert.ok(peered, 'the invitee meets the issuer through the invite\'s relay');
     // The session proved the key the invite pinned: no conflict. (sym 0.14 at 28c0fdb then reports the
     // binding's source as `proven`, where its design D3 keeps the stronger `pinned`: reported upstream.)
-    assert.match(peered, new RegExp(`issuer — nodeId ${a}; key (pinned|proven)`));
+    assert.match(peered, new RegExp(`^issuer ⟨[^⟩]+⟩ — nodeId ${a}; key (pinned|proven)`, 'm'));
     assert.match((await B.call('sym_status')).text, /no key conflicts/);
     assert.match((await B.call('sym_join_room', { room: 'e2e-room', invite: url.replace('e2e-room', 'other-room') })).text, /differ/);
   } finally { await closeAll(A, B); }

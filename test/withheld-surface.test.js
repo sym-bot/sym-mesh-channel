@@ -49,15 +49,16 @@ t('every delivery is accounted for; nothing withheld leaks its text; parts rebui
     assert.ok(notices, `two withheld notices expected: ${JSON.stringify(B.pushes())}`);
     for (const n of notices.filter((p) => p.type === 'delivery-withheld')) {
       assert.ok(!/MARKER/.test(n.text), `a notice carries none of the peer's text: ${n.text}`);
-      assert.match(n.text, /\[in\d{4}\] · sym_receive names it by id$/);
+      assert.match(n.text, /\[in\d{4}\]$/);
+      assert.ok(!n.text.includes('\n'), 'one line');
     }
     const r = await h.until(async () => { const x = (await B.call('sym_receive', { peek: true })).text; return /2 new mesh delivery/.test(x) && x; }, 15000, 300);
     assert.ok(r, 'two shown');
     const got = (await B.call('sym_receive')).text;
     assert.ok(!/MARKER/.test(got), got);
     assert.match(got, /^2 new mesh delivery\(ies\):/);
-    assert.match(got, /Withheld by this node's content policy — delivered, not shown:\n\[in\d{4}\] from sender·[0-9a-f]{8}: its text matched a prompt-injection pattern/);
-    assert.match(got, /\[in\d{4}\] from sender·[0-9a-f]{8}: its payload is 300,002 bytes, over this node's limit of 200,000/);
+    assert.match(got, /Withheld by this node's content policy — delivered, not shown:\n\[in\d{4}\] from sender ⟨…[0-9a-f]{8,}⟩: its text matched a prompt-injection pattern/);
+    assert.match(got, /\[in\d{4}\] from sender ⟨…[0-9a-f]{8,}⟩: its payload is 300,002 bytes, over this node's limit of 200,000/);
     const withheldId = got.split('\n').find((l) => /prompt-injection/.test(l)).match(/\[(in\d{4})\]/)[1];
     const fetched = (await B.call('sym_fetch', { msg_id: withheldId })).text;
     assert.match(fetched, /^Withheld, so not shown: /);
@@ -66,13 +67,15 @@ t('every delivery is accounted for; nothing withheld leaks its text; parts rebui
     let offset = 0, body = '', guard = 0;
     for (;;) {
       const part = (await B.call('sym_fetch', { msg_id: longId, offset })).text;
-      const m = part.match(/---PAYLOAD \(signed application data\)---\n([\s\S]*?)(?:\n\n— characters|$)/);
-      if (offset === 0) body += m ? m[1] : '';
-      else body += part.split('\n\n').slice(1, -1).join('\n\n');
+      // Each part's slice of the signed text sits between that fetch's fence markers.
+      const m = part.match(/----- BEGIN PEER TEXT (in\d{4}) ([0-9a-f]{12}) -----\n([\s\S]*?)\n----- END PEER TEXT \1 \2 -----/);
+      assert.ok(m, `every part is fenced: ${part.slice(0, 300)}`);
+      body += m[3];
       const next = part.match(/"offset": (\d+)\}$/);
       if (!next || ++guard > 10) break;
       offset = Number(next[1]);
     }
+    assert.ok(body.includes('(payload — signed application data)'));
     assert.ok(body.includes(JSON.stringify(long)), 'the parts rebuild the payload exactly');
     assert.match((await B.call('sym_receive')).text, /^Caught up/, 'only now, with nothing new');
     assert.match(B.stderr, /\[sym-security\] WITHHELD surface=push reason=injection-pattern peer=[0-9a-f-]{36} id=in\d{4}/);
@@ -104,7 +107,7 @@ t('a 0.13 inbox entry is withheld as received before Core Secure, on receive and
   try {
     await s.initialize();
     const r = (await s.call('sym_receive')).text;
-    assert.match(r, /Withheld, not verified under Core Secure — never shown:\n\[in0001\] withheld, not verified: it was received before this node ran Core Secure/);
+    assert.match(r, /Withheld, not verified under Core Secure — never shown:\n\[in0001\] withheld, not verified: it carries no Core Secure provenance \(received before this node ran Core Secure/);
     assert.ok(!/MARKER-OLD/.test(r));
     assert.ok(!/Caught up/.test(r));
     const f = (await s.call('sym_fetch', { msg_id: 'in0001' })).text;

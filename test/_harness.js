@@ -5,15 +5,19 @@
  * fake relay that routes envelopes between nodes (so two servers meet through the real Core Secure
  * handshake without touching the LAN), and an in-memory pipe for in-process SymNodes.
  *
- * SANDBOX FIRST. Requiring this file moves HOME, USERPROFILE and SYM_STATE_DIR into a temp dir
- * unless they already are in one (test/run.js sets them for every file), and refuses to go on if
- * they are not: no test may write an identity, a key or a store into the real ~/.sym.
+ * SANDBOX FIRST. Requiring this file refuses to go on when the environment carries an XMesh mind's
+ * or a pinned agent's variables (test/_clean-env.js), then moves HOME, USERPROFILE and SYM_STATE_DIR
+ * into a temp dir unless they already are in one (test/run.js sets them for every file). Every server
+ * a test starts gets an environment built from an allowlist, never the developer's.
  */
 
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
+const { cleanEnv, refuseDangerous } = require('./_clean-env.js');
+
+refuseDangerous(process.env, 'test/_harness.js');
 
 const TMP = fs.realpathSync(os.tmpdir());
 const within = (p) => { try { const r = fs.realpathSync(p); return r === TMP || r.startsWith(TMP + path.sep); } catch { return false; } };
@@ -45,13 +49,12 @@ const SERVER = path.join(__dirname, '..', 'server.js');
  */
 class McpSession {
   constructor({ env = {}, cwd } = {}) {
-    const base = {
-      ...process.env,
+    const base = cleanEnv({
+      HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE,
       SYM_STATE_DIR: env.SYM_STATE_DIR || stateDir('srv'),
-      SYM_RELAY_URL: '', SYM_RELAY_TOKEN: '', SYM_LAN: 'off', SYM_ALLOWED_PEERS: '',
+      SYM_LAN: 'off',
       CLAUDE_PROJECT_DIR: cwd || fs.mkdtempSync(path.join(process.env.HOME, 'proj-')),
-    };
-    delete base.CLAUDE_CODE_SESSION_ID;
+    });
     this.env = { ...base, ...env };
     this.child = spawn(process.execPath, [SERVER], { env: this.env, cwd: this.env.CLAUDE_PROJECT_DIR, stdio: ['pipe', 'pipe', 'pipe'] });
     this.stderr = '';
