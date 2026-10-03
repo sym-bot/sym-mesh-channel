@@ -10,7 +10,7 @@
  */
 
 const sdk = require('@sym-bot/sym');
-const { fingerprint } = require('./key-display.js');
+const { fullFingerprint } = require('./key-display.js');
 
 const { isValidRoom, roomServiceType, serviceTypeToRoom, KEBAB_CASE_RE } = sdk.rooms;
 
@@ -51,9 +51,9 @@ function parseInviteURL(url) {
   return { ...p, serviceType: roomServiceType(p.room) };
 }
 
-/** An identity key's fingerprint, the same one every line identifies a signer by (key-display.js). */
+/** An identity key's full fingerprint (`sha256:<hex>`, as sym gives it), the one every line's suffix ends (key-display.js). */
 function keyFingerprint(key) {
-  return fingerprint(key) || '?';
+  return fullFingerprint(key) || '?';
 }
 
 module.exports = { isCanonicalRoom, roomRefusalReason, parseInviteURL, keyFingerprint, roomServiceType, serviceTypeToRoom };

@@ -5,45 +5,30 @@
  *
  * Only sym 0.14's public host API: the constructor with `nodeId` / `create`, `remember`, `recall`,
  * `peers`, `status`, `canRemix`, `inbox` / `inboxGet` / `inboxAck` / `inboxStatus`, `inviteURL` /
- * `acceptInvite`, `awaitRelayOutcome`, the accessors this round adds when present (`publicKey`,
- * `keyBindings()`, `remix`), and the events `verified-record`, `cmb-accepted`, `message`,
- * `mood-delivered`, `legacy-record`, `peer-joined`, `metric`, `relay-auth-refused` and
- * `identity-collision`.
+ * `acceptInvite`, `awaitRelayOutcome`, `publicKey`, `keyBindings()`, `remix` when present (spec draft
+ * #35), and the events `cmb-accepted`, `message`, `mood-delivered`, `legacy-record`, `peer-joined`,
+ * `metric`, `relay-auth-refused` and `identity-collision`.
  *
- * Deliveries (design D2, D4). Every one is decided by provenance.js from the delivery's own facts:
- *   - `cmb-accepted`   → the SDK has put it in its durable inbox and stamped `inboxId` (its own
- *                        listener runs first). Shown as verified only if the entry passes the gate.
- *   - `message`        → a directed message record; its facts are gated the same way.
- *   - `mood-delivered` → shown only with the record and the proven sender (design D4).
+ * Deliveries (design D2, D4). Every one is decided by provenance.js from the delivery itself:
+ *   - `cmb-accepted`   → the SDK has put it in its durable inbox with its provenance and stamped
+ *                        `inboxId` (its own listener runs first). The inbox item is read and gated;
+ *                        its facts are persisted with it, so a restart decides the same.
+ *   - `message`        → a directed message record. The event names its author, the delivering peer
+ *                        and the record; the keys are the node's own bindings (provenance.eventFacts).
+ *   - `mood-delivered` → shown only with the record and the proven sender (design D4), the same way.
  *   - `legacy-record`  → a Legacy Import record: listed by id, never shown.
  * Messages, moods and legacy records are kept in this host's own feed (an `m` id), in memory.
  */
 
 const EventEmitter = require('events');
 const { createOutbox } = require('./outbox.js');
-const { gate, entryFacts, createInterimJoin } = require('./provenance.js');
+const { gate, entryFacts, eventFacts } = require('./provenance.js');
 const { createKeyBook } = require('./key-display.js');
+const { signedParts } = require('./signed-parts.js');
 const cd = require('./channel-delivery.js');
 
 const FEED_MAX = 200;
 const MOOD_TEXT_MAX = 2000;
-const CAT7 = ['focus', 'issue', 'intent', 'motivation', 'commitment', 'perspective', 'mood'];
-
-/**
- * The signed parts of a record's categories (design D6; spec draft #34): the seven CAT7 categories,
- * each as its text only. A non-CAT7 key, a mood's valence and arousal, and per-category metadata are
- * not part of what was signed, so they are not carried into anything a line can show.
- */
-function signedCategories(cats) {
-  const out = {};
-  if (!cats || typeof cats !== 'object') return out;
-  for (const f of CAT7) {
-    const v = cats[f];
-    const t = typeof v === 'string' ? v : (v && typeof v === 'object' && typeof v.text === 'string' ? v.text : null);
-    if (t !== null) out[f] = { text: t };
-  }
-  return out;
-}
 
 /** The host's own feed, for deliveries the SDK inbox does not hold. In memory. */
 function createLocalFeed(max = FEED_MAX) {
@@ -84,7 +69,6 @@ class NodeHost extends EventEmitter {
     this.node = null;
     this.outbox = null;
     this.feed = createLocalFeed();
-    this.join = createInterimJoin();
     this.keys = createKeyBook({ bindings: () => (this.node && typeof this.node.keyBindings === 'function' ? this.node.keyBindings() : []) });
     this._cfg = null;
   }
@@ -129,16 +113,9 @@ class NodeHost extends EventEmitter {
   }
 
   _wire(node) {
-    node.on('verified-record', (e) => { try { this.join.noteVerified(e); } catch { /* a bad event must not stop verification */ } });
-
     node.on('cmb-accepted', (entry) => {
       try {
         if (!entry || !entry.inboxId) { this._log('a delivery came without an inbox id; it cannot be listed'); return; }
-        const own = entryFacts(entry);
-        // sym 0.14 at 341dafb returns inbox() items with no facts to decide again from, so the verdict
-        // made now, against this entry, is kept for this process. (With design §6 item 1 the item
-        // itself carries them, and nothing is kept.)
-        if (!own) this.join.recordLive(entry.inboxId, gate(entry, this.join.take(entry)));
         const item = node.inboxGet(entry.inboxId);
         if (!item) return;
         this.emit('delivery', this._fromInbox(item));
@@ -148,14 +125,8 @@ class NodeHost extends EventEmitter {
     node.on('message', (fromName, text, meta) => {
       try {
         const m = meta || {};
-        // A message record's facts: on the event (this round), or the interim join, gated against what
-        // the event itself says of its author and the session that delivered it.
-        const pseudo = {
-          verified: true, profile: 'core-secure', assertionId: m.assertionId, verification: m.verification, session: m.session, key: m.key,
-          author: { nodeId: m.from, key: m.authorKey, via: { nodeId: m.via } },
-        };
-        const facts = entryFacts(pseudo) || this.join.take(pseudo);
-        const d = this.feed.add(this._delivery({ kind: 'message', text: typeof text === 'string' ? text : '', categories: {}, payload: null, key: m.key || (facts && facts.key) || null, directed: true, remixed: false }, gate(pseudo, facts)));
+        const verdict = this._eventVerdict({ assertionId: m.assertionId, key: m.key, authorNodeId: m.from, authorLabel: m.fromName, viaNodeId: m.via, audience: 'directed' }, 'no-provenance');
+        const d = this.feed.add(this._delivery({ kind: 'message', text: typeof text === 'string' ? text : '', categories: {}, payload: null, key: typeof m.key === 'string' ? m.key : null, directed: true, remixed: false }, verdict));
         this.emit('delivery', d);
       } catch (err) { this._log(`message bookkeeping failed: ${err && err.message}`); }
     });
@@ -174,8 +145,8 @@ class NodeHost extends EventEmitter {
       catch (err) { this._log(`legacy bookkeeping failed: ${err && err.message}`); }
     });
 
-    // A nodeId becomes known for the outbox only through a Core Secure session (review L4): sym 0.14 at
-    // 341dafb raises peer-joined for a Legacy Import session too, so the session is checked in peers().
+    // A nodeId becomes known for the outbox only through a Core Secure session (review L4): the session
+    // is checked in peers(), since peer-joined does not say which profile the session has.
     node.on('peer-joined', (p) => {
       try {
         if (!p || !p.id) return;
@@ -192,32 +163,52 @@ class NodeHost extends EventEmitter {
   }
 
   /**
+   * The verdict on a delivery sym raises as an event (a message, a mood), from what the event names:
+   * the record's assertion id and key, its proven author and the peer that delivered it. The keys are
+   * the node's own bindings for those nodeIds (design §6, mismatches 3 and 4); a delivering peer whose
+   * session is Legacy Import is quarantined, as its records are.
+   */
+  _eventVerdict({ assertionId, key, authorNodeId, authorLabel, viaNodeId, viaLabel, audience }, missing) {
+    if (typeof assertionId !== 'string' || !assertionId || typeof authorNodeId !== 'string' || !authorNodeId) return { withheld: missing };
+    let peer = null;
+    try { peer = (this.node.peers() || []).find((p) => p.peerId === viaNodeId) || null; } catch { peer = null; }
+    if (peer && (peer.profile === 'legacy-import' || (Array.isArray(peer.sessions) && peer.sessions.some((x) => x.legacy)))) return { withheld: 'legacy-import' };
+    const transport = peer && Array.isArray(peer.sessions) && peer.sessions[0] ? peer.sessions[0].transport : null;
+    const facts = eventFacts({
+      assertionId, key, authorNodeId, authorLabel, delivererNodeId: viaNodeId, delivererLabel: viaLabel ?? (peer ? peer.name : ''),
+      transport, audience, bindingOf: (id) => this.keys.bindingFor(id),
+    });
+    return facts ? { facts } : { withheld: 'no-key-binding' };
+  }
+
+  /**
    * A mood is shown only with the record and the proven sender (design D4, review M1): the event names
-   * the record (key, assertion), says it verified, names the author and the session that delivered it,
-   * and the record's verified facts agree with all of it.
+   * the record (key, assertion), says it verified, and names the author and the session that
+   * delivered it. The author's label is the deliverer's when they are one node; otherwise the event
+   * carries none, and the line names the author by key.
    */
   _moodVerdict(m) {
     const by = m.deliveredBy && typeof m.deliveredBy === 'object' ? m.deliveredBy : null;
     if (m.verified !== true || typeof m.key !== 'string' || typeof m.assertionId !== 'string' || typeof m.authorNodeId !== 'string' || !by || typeof by.nodeId !== 'string') {
       return { withheld: 'mood-unattributed' };
     }
-    const facts = this.join.peek(m.assertionId);
-    if (!facts) return { withheld: 'mood-unattributed' };
-    const v = gate({ verified: true, profile: 'core-secure', author: { nodeId: m.authorNodeId, via: { nodeId: by.nodeId } } }, facts);
-    if (v.facts && v.facts.key !== m.key) return { withheld: 'facts-mismatch' };
-    return v;
+    const same = m.authorNodeId.toLowerCase() === by.nodeId.toLowerCase();
+    return this._eventVerdict({ assertionId: m.assertionId, key: m.key, authorNodeId: m.authorNodeId, authorLabel: same ? by.name : '', viaNodeId: by.nodeId, viaLabel: by.name, audience: 'room' }, 'mood-unattributed');
   }
 
   // ── The delivery feed ──────────────────────────────────────
 
+  /**
+   * An inbox item as every surface reads it: gated on its own provenance (persisted with it), and
+   * only the parts of its signed projection shown (`item.record`, the record as signed), never the
+   * item's own `categories` and `payload` copies.
+   */
   _fromInbox(item) {
-    // The item's own facts when the SDK stamps them (design §6 item 1); otherwise what this process
-    // decided when the delivery arrived; otherwise nothing, and it is not shown as verified.
-    const own = entryFacts(item);
-    const verdict = own ? gate(item, own) : (this.join.live(item.id) || gate(item, null));
+    const verdict = gate(item, entryFacts(item));
+    const parts = verdict.facts ? signedParts(item.record) : { categories: {}, payload: null };
     return this._delivery({
       id: item.id, kind: 'cmb', seq: item.seq, receivedAt: item.receivedAt,
-      categories: signedCategories(item.categories), payload: item.payload ?? null,
+      categories: parts.categories, payload: parts.payload,
       key: item.key || null, directed: !!item.directed, remixed: item.remixed, acked: item.acked === true,
     }, verdict);
   }
@@ -414,4 +405,4 @@ class NodeHost extends EventEmitter {
   awaitRelayOutcome(ms) { return typeof this.node.awaitRelayOutcome === 'function' ? this.node.awaitRelayOutcome(ms) : Promise.resolve(null); }
 }
 
-module.exports = { NodeHost, createLocalFeed, signedCategories };
+module.exports = { NodeHost, createLocalFeed };

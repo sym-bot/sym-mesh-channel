@@ -25,7 +25,7 @@ const { scanClassifierRisk, quarantineHeader, neutralizeSurface } = require('./c
 const { hiddenFieldsTag } = require('./surface-truth.js');
 const { isNodeId } = require('./identity.js');
 const { WITHHELD_REASONS } = require('./provenance.js');
-const { createKeyBook, fingerprint, plainLabel } = require('./key-display.js');
+const { createKeyBook, fullFingerprint, plainLabel } = require('./key-display.js');
 
 // ── Prompt-injection patterns ────────────────────────────────
 // A verified signature proves who wrote a record, not that it is safe to read. A match withholds the
@@ -320,7 +320,7 @@ function pushOf(d, prepared, ctx) {
     delivery_id: d.id,
     kind: d.kind,
     signer_node_id: f.signer.nodeId,
-    signer_key_fingerprint: fingerprint(f.signer.key) || '',
+    signer_key_fingerprint: fullFingerprint(f.signer.key) || '',
     audience: f.audience,
     relayed_by: f.relayed && f.deliverer ? f.deliverer.nodeId : '',
     cmb_key: d.key || f.key || '',
@@ -369,9 +369,9 @@ function fetchHead(d, ctx) {
   const f = d.facts;
   const when = new Date(d.receivedAt || Date.now()).toISOString();
   const lines = [`[${d.id}] ${deliveryTag(d, ctx)} · ${when}`];
-  lines.push(`Signed by: ${displayName(f.signer.label)} — nodeId ${f.signer.nodeId}; key fingerprint ${fingerprint(f.signer.key) || 'unknown'}; the key is ${KEY_SOURCE_SAID[f.signer.keySource] || (f.signer.keySource ? `bound (${f.signer.keySource})` : 'bound')}. The label and the nodeId are the signer's own choice; the key is what this node verified.`);
+  lines.push(`Signed by: ${displayName(f.signer.label)} — nodeId ${f.signer.nodeId}; key fingerprint ${fullFingerprint(f.signer.key) || 'unknown'}; the key is ${KEY_SOURCE_SAID[f.signer.keySource] || (f.signer.keySource ? `bound (${f.signer.keySource})` : 'bound')}. The label and the nodeId are the signer's own choice; the key is what this node verified.`);
   lines.push(f.relayed && f.deliverer
-    ? `Delivered: relayed by ${displayName(f.deliverer.label)} — nodeId ${f.deliverer.nodeId}, key fingerprint ${fingerprint(f.deliverer.key) || 'unknown'}, over ${f.deliverer.transport || 'a session'}. The record's signature is the author's, over the seven CAT7 texts and the signed metadata shown here.`
+    ? `Delivered: relayed by ${displayName(f.deliverer.label)} — nodeId ${f.deliverer.nodeId}, key fingerprint ${fullFingerprint(f.deliverer.key) || 'unknown'}, over ${f.deliverer.transport || 'a session'}. The record's signature is the author's, over the seven CAT7 texts and the signed metadata shown here.`
     : `Delivered: directly by its author's own session${f.deliverer && f.deliverer.transport ? `, over ${f.deliverer.transport}` : ''}.`);
   lines.push(f.audience === 'directed' ? 'Audience: directed to this node (the signed recipient is this node\'s nodeId).' : `Audience: room-bound, room "${displayName(f.room ?? 'default')}".`);
   if (d.kind === 'mood') lines.push('Memory: this node\'s SVAF rejected the record, so it was not stored; only its mood was delivered (MMP §9.3).');

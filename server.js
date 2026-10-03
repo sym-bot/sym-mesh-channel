@@ -53,7 +53,7 @@ const { ageDays, MAX_ITEMS: OUTBOX_MAX_ITEMS } = require('./outbox.js');
 const { NodeHost } = require('./node-host.js');
 const { InteriorHost, readCapability } = require('./interior-host.js');
 const { createToolQueue } = require('./tool-queue.js');
-const { fingerprint } = require('./key-display.js');
+const { fullFingerprint } = require('./key-display.js');
 const push = require('./push-statement.js');
 
 const PKG_VERSION = (() => { try { return require('./package.json').version; } catch { return '0.0.0'; } })();
@@ -425,7 +425,7 @@ const PARENTS_PROP = {
 const PAYLOAD_PROP = {
   description: 'Optional structured data beyond CAT7 (any JSON value). It rides inside the signed record as its application section (MMP §8.8.3), so it is signed with the categories. Receivers read it with sym_fetch.',
 };
-const KIND_PROP = { type: 'string', description: 'The submission kind, one the mission declared (interior mode).' };
+const KIND_PROP = { type: 'string', description: 'The submission kind, one the mission declared (interior mode). The node signs it as the record\'s intent, so leave intent out (or give the kind).' };
 
 function toolList() {
   const interior = MODE === 'interior';
@@ -832,7 +832,7 @@ async function statusTool() {
     const cs = s.coreSecure || {};
     // This node's own public key, from the SDK's accessor (design §6 item 4); never by minting an invite.
     const pub = host.ownKey();
-    lines.push(`Node: ${NODE_NAME} — nodeId ${host.nodeId}, key fingerprint ${pub ? fingerprint(pub) : '(this SDK has no accessor for the node\'s own key)'}`);
+    lines.push(`Node: ${NODE_NAME} — nodeId ${host.nodeId}, key fingerprint ${pub ? fullFingerprint(pub) : '(this SDK has no accessor for the node\'s own key)'}`);
     if (!IDENTITY.nodeId) lines.push(`  Pin this folder's agent so it is never re-minted: add "node_id": "${host.nodeId}" to ${PROJECT_CFG.file || '.sym/node.json'}.`);
     lines.push(`Room: ${ROOM} (${SERVICE_TYPE})${LAN_OFF ? ' — relay only (SYM_LAN=off)' : ''}`);
     lines.push(`Relay: ${relayLine(s.relayStatus) || (s.relayConnected ? 'connected' : (RELAY_URL ? 'disconnected' : 'not configured'))}`);

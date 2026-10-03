@@ -18,19 +18,15 @@
  *   6. the facts' delivering session is entry.author.via.nodeId when both are given
  *                                                              (else 'facts-mismatch')
  *
- * UNTIL THE SDK LANDS (interim). sym 0.14 at 341dafb puts no facts on the entry, so the facts come from
- * `verified-record`, held in memory by assertion id — but they are used only through the same checks
- * against the entry, so a quarantined entry that carries a verified record's assertion id is withheld
- * (review r2). A second `verified-record` for one assertion never replaces the first; the candidate
- * whose session delivered the admitted copy is chosen (r11). Nothing is persisted: after a restart an
- * entry the SDK did not stamp with facts is 'no-provenance'.
+ * MESSAGES AND MOODS. sym raises these as events, not inbox entries, and the events carry no
+ * `verification` or `session` (design §6, mismatches 3 and 4): they name the record (`key`,
+ * `assertionId`), its proven author and the delivering peer by nodeId. `eventFacts` builds the same
+ * facts from those names and the node's own key bindings (`node.keyBindings()`). With no binding for
+ * the author there are no facts, and the delivery is withheld ('no-key-binding'). Nothing is joined
+ * or kept here: the interim build's in-memory join to `verified-record` is gone.
  */
 
 const { NODE_ID_RE } = require('./identity.js');
-
-const PENDING_MAX = 2048;
-const PENDING_TTL_MS = 10 * 60 * 1000;
-const LIVE_MAX = 1000;
 
 /** The reasons a delivery is not shown as verified, in the words every surface uses. Our words only. */
 const WITHHELD_REASONS = Object.freeze({
@@ -38,6 +34,7 @@ const WITHHELD_REASONS = Object.freeze({
   unverified: 'the node did not mark it verified',
   'no-provenance': 'it carries no Core Secure provenance (received before this node ran Core Secure, or from an SDK that does not record it)',
   'facts-mismatch': 'its verification facts do not match the delivery\'s own author, so this node cannot say who signed it',
+  'no-key-binding': 'the node raised it as verified but holds no key for its author now, so this node cannot say which key signed it',
   'mood-unattributed': 'it is a mood with no signed record and proven sender behind it (a mood frame, or a mood the SDK did not attribute)',
 });
 
@@ -48,7 +45,7 @@ const nodeId = (v) => (typeof v === 'string' && NODE_ID_RE.test(v) ? v.toLowerCa
  * The facts a line may show, built from `{ verification, session, record }` (a `verified-record`
  * event, or the same fields on an entry). Plain data. Null without a signer nodeId and an assertion id.
  */
-function factsFrom({ verification, session, record } = {}) {
+function factsFrom({ verification, session, record, key = null } = {}) {
   const v = verification || {};
   const s = session || {};
   const md = (record && record.metadata) || {};
@@ -58,7 +55,7 @@ function factsFrom({ verification, session, record } = {}) {
   const deliverer = nodeId(s.nodeId);
   return {
     assertionId,
-    key: text(md.key, 128),
+    key: text(md.key, 128) || text(key, 128),
     suite: text(v.suite, 64),
     room: text(v.room ?? md.room, 256),
     audience: v.audience === 'directed' ? 'directed' : 'room',
@@ -71,10 +68,41 @@ function factsFrom({ verification, session, record } = {}) {
   };
 }
 
-/** The facts an entry carries itself (the SDK this round), or null. */
+/**
+ * The facts an entry carries itself, or null. An inbox item (`inbox()`, `inboxGet()`) and an interior
+ * delivery item carry `record`, the signed projection; a `cmb-accepted` entry carries `cmb`.
+ */
 function entryFacts(entry) {
   if (!entry || typeof entry !== 'object' || !entry.verification || typeof entry.verification !== 'object') return null;
-  return factsFrom({ verification: entry.verification, session: entry.session, record: entry.cmb || entry.record || { metadata: { key: entry.key, assertionId: entry.assertionId } } });
+  return factsFrom({ verification: entry.verification, session: entry.session, record: entry.record || entry.cmb || { metadata: { assertionId: entry.assertionId } }, key: entry.key });
+}
+
+/**
+ * The facts of a delivery sym raises as an event (a message, a mood): the record's assertion id and
+ * key, its proven author and the peer that delivered it, by nodeId, and the keys this node binds to
+ * them. `bindingOf(nodeId)` → `{ key, source }` or null. Null when the author has no binding here.
+ */
+function eventFacts({ assertionId, key, authorNodeId, authorLabel, delivererNodeId, delivererLabel, transport, audience, bindingOf }) {
+  const signer = nodeId(authorNodeId);
+  const aid = text(assertionId, 128);
+  if (!signer || !aid || typeof bindingOf !== 'function') return null;
+  const sb = bindingOf(signer);
+  if (!sb || typeof sb.key !== 'string' || !sb.key) return null;
+  const deliverer = nodeId(delivererNodeId);
+  const db = deliverer ? bindingOf(deliverer) : null;
+  return {
+    assertionId: aid,
+    key: text(key, 128),
+    suite: null,
+    room: null,
+    audience: audience === 'directed' ? 'directed' : 'room',
+    to: null,
+    signer: { nodeId: signer, label: text(authorLabel, 256) || '', keySource: text(sb.source, 32), key: text(sb.key, 128) },
+    deliverer: deliverer ? { nodeId: deliverer, label: text(delivererLabel, 256) || '', key: db && typeof db.key === 'string' ? text(db.key, 128) : null, transport: transport === 'relay' ? 'relay' : (transport === 'lan' || transport === 'bonjour' ? 'lan' : null) } : null,
+    parents: [],
+    relayed: !!deliverer && deliverer !== signer,
+    anchor: false,
+  };
 }
 
 /** Steps 1-6 above: `{ facts }`, or `{ withheld: reason }`. */
@@ -92,65 +120,4 @@ function gate(entry, facts) {
   return { facts };
 }
 
-/**
- * The interim join (until the SDK puts facts on the entry). `noteVerified` holds a verified record's
- * facts by assertion id, first copy first; `take(entry)` returns the facts for the delivered copy;
- * `live` keeps, for this process only, what was decided for an inbox id, because sym 0.14's inbox()
- * items carry no facts to decide again from.
- */
-function createInterimJoin({ now = Date.now } = {}) {
-  const pending = new Map();   // assertionId → { at, candidates: [facts…], record mood text }
-  const live = new Map();      // inbox id → { facts } | { withheld }
-
-  function sweep(t) {
-    for (const [k, p] of pending) {
-      if (t - p.at <= PENDING_TTL_MS && pending.size <= PENDING_MAX) break;
-      pending.delete(k);
-    }
-  }
-
-  return {
-    noteVerified(event) {
-      const facts = factsFrom(event || {});
-      if (!facts) return null;
-      const t = now();
-      const p = pending.get(facts.assertionId);
-      if (p) {
-        // A second copy (a relay forwarding it, a reconnect replay) never replaces the first (r11).
-        if (!p.candidates.some((c) => c.deliverer && facts.deliverer && c.deliverer.nodeId === facts.deliverer.nodeId)) p.candidates.push(facts);
-        return facts;
-      }
-      pending.set(facts.assertionId, { at: t, candidates: [facts] });
-      sweep(t);
-      return facts;
-    },
-
-    /** The facts for the copy `entry` describes: the candidate its own `author.via` delivered, else the first. */
-    take(entry) {
-      const aid = entry && (entry.assertionId || (entry.cmb && entry.cmb.metadata && entry.cmb.metadata.assertionId));
-      const p = typeof aid === 'string' ? pending.get(aid) : null;
-      if (!p) return null;
-      const via = entry.author && entry.author.via && nodeId(entry.author.via.nodeId);
-      const pick = (via && p.candidates.find((c) => c.deliverer && c.deliverer.nodeId === via)) || p.candidates[0];
-      pending.delete(aid);
-      return pick;
-    },
-
-    /** The facts of a record that was verified and NOT admitted (a rejected record's mood). */
-    peek(assertionId) {
-      const p = typeof assertionId === 'string' ? pending.get(assertionId) : null;
-      return p ? p.candidates[0] : null;
-    },
-
-    recordLive(inboxId, verdict) {
-      if (typeof inboxId !== 'string' || !inboxId) return;
-      live.delete(inboxId);
-      live.set(inboxId, verdict);
-      while (live.size > LIVE_MAX) live.delete(live.keys().next().value);
-    },
-    live(inboxId) { return live.get(inboxId) || null; },
-    pendingSize: () => pending.size,
-  };
-}
-
-module.exports = { factsFrom, entryFacts, gate, createInterimJoin, WITHHELD_REASONS };
+module.exports = { factsFrom, entryFacts, eventFacts, gate, WITHHELD_REASONS };

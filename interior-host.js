@@ -10,17 +10,27 @@
  * sends them. No SymNode starts here.
  *
  * Wire (sym 0.14, lib/interior.js): newline-delimited JSON on a Unix socket; each request carries an
- * `id`, echoed in its reply.
+ * `id`, echoed in its reply, and the capability.
  *   → { id, type:'submit', capability, kind, categories, to?, parents?, payload? }
- *   ← { id, type:'submitted', key, assertionId } | { id, type:'refused', reason }
+ *   ← { id, type:'submitted', key, assertionId, duplicate? } | { id, type:'refused', reason }
  *   → { id, type:'end', capability }  ← { id, type:'ended' }
- * The read side the design builds to (§6 item 8): `mission`, `deliveries`, `subscribe`, `ack`,
- * `recall`. Every request is SERVED, UNSUPPORTED (`unknown-request`) or REFUSED with a reason, and the
- * three are told apart (review L6).
+ * The read side (§6 item 8): `mission`, `deliveries`, `subscribe` (then unsolicited
+ * `{ type:'delivery', item }` lines), `ack`, `recall`. Every request is SERVED, UNSUPPORTED
+ * (`unknown-request`) or REFUSED with a reason, and the three are told apart (review L6).
  *
- * THE CAPABILITY IS BOUND TO ITS CONNECTION (§6 item 8). The channel opens one connection and never
- * reconnects with the capability: when the connection closes, this mind is detached, and every tool
- * says so. Items the node serves are gated by provenance.js exactly as node mode's are.
+ * A delivery item is `{ seq, id, kind: 'directed'|'broadcast', record, verified, profile, assertionId,
+ * verification, session, author, remixed, receivedAt }` (§6, mismatch 2): the inbox item with its
+ * provenance and its signed projection. It is gated by provenance.js exactly as node mode's are, and
+ * only the projection's signed parts are shown.
+ *
+ * THE CAPABILITY IS BOUND TO ITS CONNECTION (§6 item 8). sym binds it to the first connection that
+ * presents it and refuses it on any other (`capability-bound-to-another-connection`). The channel
+ * opens one connection and never reconnects with the capability: when the connection closes, sym ends
+ * the mind, this mind is detached, and every tool says so.
+ *
+ * THE KIND IS SIGNED. sym makes a submission's kind the record's intent category and refuses one
+ * whose intent says otherwise (`intent-is-not-the-kind`). The channel adds no intent of its own; an
+ * intent the agent gives is sent as given, and a refusal is said in those words.
  */
 
 const EventEmitter = require('events');
@@ -28,15 +38,16 @@ const net = require('net');
 const fs = require('fs');
 const { entryFacts, gate } = require('./provenance.js');
 const { createKeyBook } = require('./key-display.js');
+const { signedParts } = require('./signed-parts.js');
 
 const REQUEST_TIMEOUT_MS = 5000;
 const SERVED_MAX = 500;
-const CAT7 = ['focus', 'issue', 'intent', 'motivation', 'commitment', 'perspective', 'mood'];
 
 const REFUSAL_SAID = {
   'no-live-capability': 'this mind\'s capability is not live: the node ended this mind, restarted, or was given another capability',
-  'capability-bound-elsewhere': 'this capability is bound to another connection',
+  'capability-bound-to-another-connection': 'this capability is bound to another connection (sym binds it to the first connection that presents it)',
   'kind-not-declared': 'the mission did not declare that kind of submission',
+  'intent-is-not-the-kind': 'the intent category must be the submission\'s kind (the node signs the kind as the intent); leave intent out',
   'audience-not-allowed': 'the mission\'s allowlist does not include that recipient',
   'not-a-cat7-category': 'a category is not one of the seven CAT7 categories',
   'categories-too-large': 'the categories hold more than 64 KiB of text',
@@ -223,28 +234,31 @@ class InteriorHost extends EventEmitter {
     return { outcome: 'refused', reason, text: said(reason), kind: k };
   }
 
-  /** A served item, gated by provenance.js like any entry (design D2), with only its signed parts. */
+  /**
+   * A served item, gated by provenance.js like any entry (design D2), with only its signed parts. sym
+   * serves only verified Core Secure items; the gate is applied all the same, so an item the node
+   * should not have served is withheld rather than shown.
+   */
   _fromServed(it) {
     if (!it || typeof it !== 'object') return null;
-    const record = it.record || it.cmb || null;
-    const entry = { ...it, cmb: record };
-    const verdict = gate(entry, entryFacts(entry));
+    const verdict = gate(it, entryFacts(it));
     const facts = verdict.facts || null;
     if (facts) {
       this.keys.learn({ key: facts.signer.key, nodeId: facts.signer.nodeId, label: facts.signer.label });
       if (facts.deliverer) this.keys.learn({ key: facts.deliverer.key, nodeId: facts.deliverer.nodeId, label: facts.deliverer.label });
     }
-    const cats = {};
-    const rc = record && record.categories ? record.categories : {};
-    for (const f of CAT7) { const v = rc[f]; const t = typeof v === 'string' ? v : (v && typeof v.text === 'string' ? v.text : null); if (t !== null) cats[f] = { text: t }; }
-    const id = typeof it.id === 'string' && /^(in\d{4,}|m\d{3,})$/.test(it.id) ? it.id : `in${String(Number.isSafeInteger(it.seq) ? it.seq : 0).padStart(4, '0')}`;
-    const kind = it.kind === 'message' || it.kind === 'mood' ? it.kind : 'cmb';
+    const parts = facts ? signedParts(it.record) : { categories: {}, payload: null };
+    const id = typeof it.id === 'string' && /^in\d{4,}$/.test(it.id) ? it.id : `in${String(Number.isSafeInteger(it.seq) ? it.seq : 0).padStart(4, '0')}`;
+    const prior = this._served.get(id);
     const d = {
-      id, kind, seq: it.seq, receivedAt: Number.isFinite(it.receivedAt) ? it.receivedAt : Date.now(),
+      id, kind: 'cmb', seq: it.seq, receivedAt: Number.isFinite(it.receivedAt) ? it.receivedAt : Date.now(),
       facts, withheld: facts ? null : verdict.withheld,
-      text: kind === 'cmb' ? undefined : String(it.text ?? ''), categories: cats, payload: it.payload ?? null,
-      key: (record && record.metadata && record.metadata.key) || null,
-      directed: facts ? facts.audience === 'directed' : false, remixed: it.remixed, acked: it.acked === true,
+      categories: parts.categories, payload: parts.payload,
+      key: (facts && facts.key) || null,
+      // `kind` is the node's word for the audience; the signed `to` (in the facts) is what is shown.
+      directed: facts ? facts.audience === 'directed' : it.kind === 'directed', remixed: it.remixed === true,
+      // sym's items carry no read mark: what this mind acked stays acked here.
+      acked: it.acked === true || !!(prior && prior.acked),
     };
     this._served.delete(d.id);
     this._served.set(d.id, d);
@@ -287,7 +301,10 @@ class InteriorHost extends EventEmitter {
     if (r.refused) return { unsupported: `The node refused the recall: ${said(r.refused)}.` };
     const items = Array.isArray(r.served && r.served.items) ? r.served.items.map((it) => {
       const author = it.author && typeof it.author.nodeId === 'string' ? { name: it.author.name, nodeId: it.author.nodeId.toLowerCase(), key: it.author.key } : null;
-      return { key: it.key, peerId: author ? author.nodeId : 'unattributed', verified: it.verified === true, author, cmb: it.record || null, storedAt: it.storedAt };
+      // `record` is the signed projection; its payload is read from the signed application section.
+      const rec = it.record && typeof it.record === 'object' ? it.record : null;
+      const parts = signedParts(rec);
+      return { key: it.key, peerId: author ? author.nodeId : 'unattributed', verified: it.verified === true, author, cmb: rec ? { categories: parts.categories, metadata: rec.metadata || {}, payload: parts.payload } : null, storedAt: it.storedAt };
     }) : [];
     return { items };
   }
