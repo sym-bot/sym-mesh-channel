@@ -305,3 +305,36 @@ test('the own key and the known bindings come from the SDK\'s accessors when it 
   const bare = fakeHost().host;
   assert.strictEqual(bare.ownKey(), null, 'no accessor: no key, and no invite is minted to find one');
 });
+
+// The inbox-id bug (2026-10): the host's own feed (messages, moods, legacy records) numbered its ids
+// in memory, so a restart or a new host for the node announced m001 again for another delivery, and an
+// id already announced fetched something else or nothing.
+test('the host feed keeps its ids across hosts: an announced m-id fetches what it announced, and is never reused', () => {
+  const { createLocalFeed } = require('../node-host.js');
+  const dir = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'feed-'));
+  try {
+    const file = path.join(dir, 'channel-feed.log');
+    const a = createLocalFeed(3, file);
+    const m1 = a.add({ kind: 'message', text: 'from agent-c' });
+    const m2 = a.add({ kind: 'message', text: 'from agent-d' });
+    a.markRead(m1.id);
+    a.advanceTo(m2.seq);
+    const m3 = a.add({ kind: 'message', text: 'unread when the host went' });
+    // A new host for the same node (a restart, or a host that was never stopped).
+    const b = createLocalFeed(3, file);
+    assert.strictEqual(b.get(m3.id).text, 'unread when the host went', 'the announced id fetches its item');
+    assert.strictEqual(b.isUndrained(m3.id), true, 'still unread');
+    assert.strictEqual(b.isUndrained(m2.id), false, 'the drain held');
+    const m4 = b.add({ kind: 'message', text: 'after' });
+    assert.ok(![m1.id, m2.id, m3.id].includes(m4.id), `a new id: ${m4.id}`);
+    // Unread items are never evicted; past 4 x the bound nothing is announced.
+    const ids = [];
+    for (let i = 0; i < 20; i++) { const d = b.add({ kind: 'message', text: `n${i}` }); if (d) ids.push(d.id); }
+    for (const id of ids) assert.ok(b.get(id), `${id} kept`);
+    assert.strictEqual(b.unread() <= 12, true);
+    const c = createLocalFeed(3, file);
+    for (const id of ids) assert.ok(c.get(id), `${id} kept across hosts`);
+    const after = c.add({ kind: 'message', text: 'x' });
+    assert.strictEqual(after, null, 'past the unread bound, no id is announced');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});

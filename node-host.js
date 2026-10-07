@@ -17,10 +17,15 @@
  *                        and the record; the keys are the node's own bindings (provenance.eventFacts).
  *   - `mood-delivered` → shown only with the record and the proven sender (design D4), the same way.
  *   - `legacy-record`  → a Legacy Import record: listed by id, never shown.
- * Messages, moods and legacy records are kept in this host's own feed (an `m` id), in memory.
+ * Messages, moods and legacy records are kept in this host's own feed (an `m` id), PERSISTED with the
+ * node (`channel-feed.log` in its directory; inbox-id bug, 2026-10): an id is assigned only once the
+ * item is written, is unique for the life of the node's store, and always fetches what it announced,
+ * across a hot-swap or a restart. A read item may be evicted; an unread one never is.
  */
 
 const EventEmitter = require('events');
+const fs = require('fs');
+const path = require('path');
 const { createOutbox } = require('./outbox.js');
 const { gate, entryFacts, eventFacts } = require('./provenance.js');
 const { createKeyBook } = require('./key-display.js');
@@ -30,25 +35,59 @@ const cd = require('./channel-delivery.js');
 const FEED_MAX = 200;
 const MOOD_TEXT_MAX = 2000;
 
-/** The host's own feed, for deliveries the SDK inbox does not hold. In memory. */
-function createLocalFeed(max = FEED_MAX) {
-  const items = [];
+/**
+ * The host's own feed, for deliveries the SDK inbox does not hold. With `file`, every change is
+ * appended to it before it takes effect (an item before its id is announced, a read, the cursor), and
+ * the feed is read back from it, so ids survive the host and are never reused. A read item may go
+ * when the feed is past `max`; an unread one never does: past 4 x `max` unread, `add` returns null
+ * (nothing is announced).
+ */
+function createLocalFeed(max = FEED_MAX, file = null) {
+  let items = [];
   let seq = 0;
   let cursor = 0;
+  const journal = (change) => {
+    if (!file) return true;
+    try { fs.appendFileSync(file, JSON.stringify(change) + '\n', { mode: 0o600 }); return true; } catch { return false; }
+  };
+  if (file) {
+    let lines = [];
+    try { lines = fs.readFileSync(file, 'utf8').split('\n'); } catch { /* none yet */ }
+    for (const line of lines) {
+      if (!line) continue;
+      let o; try { o = JSON.parse(line); } catch { continue; } // a torn last line never took effect
+      if (o.add && Number.isSafeInteger(o.add.seq)) { if (o.add.seq > seq) seq = o.add.seq; items.push(o.add); }
+      else if (typeof o.read === 'string') { const d = items.find((x) => x.id === o.read); if (d) d.acked = true; }
+      else if (Number.isSafeInteger(o.cursor)) { if (o.cursor > cursor) cursor = o.cursor; }
+      else if (Number.isSafeInteger(o.seqFloor) && o.seqFloor > seq) seq = o.seqFloor; // ids taken by evicted items
+    }
+    // Fold: keep what the bound keeps, written back whole, so the file does not grow without end.
+    const read = (d) => d.seq <= cursor || d.acked;
+    while (items.length > max && read(items[0])) items.shift();
+    try {
+      const tmp = `${file}.${process.pid}.tmp`;
+      fs.writeFileSync(tmp, [JSON.stringify({ seqFloor: seq }), JSON.stringify({ cursor }), ...items.map((d) => JSON.stringify({ add: d }))].join('\n') + '\n', { mode: 0o600 });
+      fs.renameSync(tmp, file);
+    } catch { /* the journal as it is still reads back the same */ }
+  }
+  const unread = () => items.filter((d) => d.seq > cursor && !d.acked).length;
   return {
     add(partial) {
-      seq += 1;
-      const d = { ...partial, id: `m${String(seq).padStart(3, '0')}`, seq, receivedAt: Date.now(), acked: false, local: true };
+      if (unread() >= max * 4) return null;
+      const next = seq + 1;
+      const d = { ...partial, id: `m${String(next).padStart(3, '0')}`, seq: next, receivedAt: Date.now(), acked: false, local: true };
+      if (!journal({ add: d })) return null;
+      seq = next;
       items.push(d);
-      while (items.length > max) items.shift();
+      while (items.length > max && (items[0].seq <= cursor || items[0].acked)) items.shift();
       return d;
     },
     peek(limit) { return items.filter((d) => d.seq > cursor).slice(0, limit); },
     pending() { return items.filter((d) => d.seq > cursor).length; },
-    advanceTo(s) { if (s > cursor) cursor = s; },
+    advanceTo(s) { if (s > cursor) { cursor = s; journal({ cursor: s }); } },
     get(id) { return items.find((d) => d.id === id) || null; },
-    markRead(id) { const d = items.find((x) => x.id === id); if (d) d.acked = true; return !!d; },
-    unread() { return items.filter((d) => d.seq > cursor && !d.acked).length; },
+    markRead(id) { const d = items.find((x) => x.id === id); if (d && !d.acked) { d.acked = true; journal({ read: id }); } return !!d; },
+    unread,
     isUndrained(id) { const d = items.find((x) => x.id === id); return !!d && d.seq > cursor && !d.acked; },
   };
 }
@@ -79,6 +118,9 @@ class NodeHost extends EventEmitter {
     this._cfg = { ...cfg, nodeId: node.nodeId, create: false };
     this.node = node;
     this.outbox = createOutbox(this._nodeDir(node.nodeId));
+    // The feed lives with the node, so its ids outlive this host (inbox-id bug, 2026-10).
+    try { this.feed = createLocalFeed(FEED_MAX, path.join(this._nodeDir(node.nodeId), 'channel-feed.log')); }
+    catch { /* the in-memory feed stays */ }
     this._wire(node);
     const own = this.ownKey();
     if (own) this.keys.learn({ key: own, nodeId: node.nodeId, label: node.name });
@@ -127,7 +169,7 @@ class NodeHost extends EventEmitter {
         const m = meta || {};
         const verdict = this._eventVerdict({ assertionId: m.assertionId, key: m.key, authorNodeId: m.from, authorLabel: m.fromName, viaNodeId: m.via, audience: 'directed' }, 'no-provenance');
         const d = this.feed.add(this._delivery({ kind: 'message', text: typeof text === 'string' ? text : '', categories: {}, payload: null, key: typeof m.key === 'string' ? m.key : null, directed: true, remixed: false }, verdict));
-        this.emit('delivery', d);
+        if (d) this.emit('delivery', d); else this._log('the feed is full of unread items (or not writable): a message was not announced');
       } catch (err) { this._log(`message bookkeeping failed: ${err && err.message}`); }
     });
 
@@ -135,13 +177,14 @@ class NodeHost extends EventEmitter {
       try {
         if (!m || typeof m.mood !== 'string' || !m.mood) return;
         const d = this.feed.add(this._delivery({ kind: 'mood', text: m.mood.slice(0, MOOD_TEXT_MAX), categories: {}, payload: null, key: null, directed: false, remixed: false }, this._moodVerdict(m)));
+        if (!d) { this._log('the feed is full of unread items (or not writable): a mood was not announced'); return; }
         if (d.facts) d.key = d.facts.key;
         this.emit('delivery', d);
       } catch (err) { this._log(`mood bookkeeping failed: ${err && err.message}`); }
     });
 
     node.on('legacy-record', () => {
-      try { this.emit('delivery', this.feed.add({ kind: 'cmb', facts: null, withheld: 'legacy-import', categories: {}, payload: null, key: null, directed: false })); }
+      try { const d = this.feed.add({ kind: 'cmb', facts: null, withheld: 'legacy-import', categories: {}, payload: null, key: null, directed: false }); if (d) this.emit('delivery', d); }
       catch (err) { this._log(`legacy bookkeeping failed: ${err && err.message}`); }
     });
 
