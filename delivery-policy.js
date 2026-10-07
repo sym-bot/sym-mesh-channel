@@ -137,31 +137,33 @@ function textSurfaces(p) {
 }
 
 /**
- * The content policy. judge() answers { show: true } or { show: false, reason, detail, excerpt }.
- * `from` is the VERIFIED SIGNER's nodeId. `self` skips only the allowlist.
+ * The content policy. judge() answers { show: true } or { show: false, reason, detail, counts }.
+ * `from` is the VERIFIED SIGNER's nodeId. `self` skips only the allowlist. `reason` is the category a
+ * withheld line names; `detail` is our own words; `counts` holds only numbers of ours (XMesh World,
+ * agent-c: a withheld delivery names why, never the peer's text — not even in the operator's log).
  */
 function createDeliveryPolicy({ allowedPeers = [], failClosed = false, maxPayloadBytes = DEFAULT_MAX_PAYLOAD_BYTES } = {}) {
   const allowed = new Set(allowedPeers.filter(Boolean).map((s) => String(s).toLowerCase()));
   function judge(d, { self = false } = {}) {
     const p = prepare(d);
     if (!self && failClosed) {
-      return { show: false, reason: 'sender-not-allowed', detail: 'SYM_ALLOWED_PEERS is set but lists no nodeId, so it allows nothing (names are labels since 0.11; list nodeIds)', excerpt: '' };
+      return { show: false, reason: 'sender-not-allowed', detail: 'SYM_ALLOWED_PEERS is set but lists no nodeId, so it allows nothing (names are labels since 0.11; list nodeIds)', counts: {} };
     }
     if (!self && allowed.size && !allowed.has(String(p.from || '').toLowerCase())) {
-      return { show: false, reason: 'sender-not-allowed', detail: 'its signer is not in SYM_ALLOWED_PEERS', excerpt: '' };
+      return { show: false, reason: 'sender-not-allowed', detail: 'its signer is not in SYM_ALLOWED_PEERS', counts: {} };
     }
     const bytes = payloadBytes(p);
     if (bytes > maxPayloadBytes) {
       return {
         show: false, reason: 'payload-over-limit',
         detail: `its payload is ${fmt(bytes)} bytes, over this node's limit of ${fmt(maxPayloadBytes)} (SYM_MAX_PAYLOAD_BYTES; raise it and restart to fetch this one from the inbox)`,
-        excerpt: `${bytes}b > ${maxPayloadBytes}b limit`,
+        counts: { bytes, limit: maxPayloadBytes },
       };
     }
     for (const surface of textSurfaces(p)) {
       for (const pattern of INJECTION_PATTERNS) {
         if (pattern.test(surface)) {
-          return { show: false, reason: 'injection-pattern', detail: 'its text matched a prompt-injection pattern, so none of it is shown (the sender can resend it reworded)', excerpt: surface.slice(0, 200) };
+          return { show: false, reason: 'injection-pattern', detail: 'its text matched a prompt-injection pattern, so none of it is shown (the sender can resend it reworded)', counts: {} };
         }
       }
     }
@@ -262,20 +264,33 @@ function deliveryTag(d, ctx) {
   return `[${who} ${audience}${relay}${d.kind === 'message' ? ' message' : ''}]`;
 }
 
+/** A reason category as a line names it: our own word, one token. */
+function reasonWord(reason) {
+  return String(reason || 'withheld').replace(/[^a-z0-9-]/gi, '_').slice(0, 40);
+}
+
+/** The line for a delivery the content policy withholds: its id, the signer, the category and why. */
 function withheldLine(id, who, decision) {
-  return `[${id}] from ${who}: ${decision.detail}`;
+  return `[${id}] from ${who}: withheld · ${reasonWord(decision.reason || 'render-failed')} — ${decision.detail}`;
 }
 
-/** The line for a delivery that is not verified: its id and why, nothing of its text. */
+/** The line for a delivery that is not verified: its id, the category and why, nothing of its text. */
 function unverifiedLine(d) {
-  return `[${d.id}] withheld, not verified: ${WITHHELD_REASONS[d.withheld] || WITHHELD_REASONS.unverified}`;
+  const reason = WITHHELD_REASONS[d.withheld] ? d.withheld : 'unverified';
+  return `[${d.id}] withheld, not verified · ${reason}: ${WITHHELD_REASONS[reason]}`;
 }
 
-/** The operator's stderr line for one withholding. */
-function auditLine(surface, reason, peer, excerpt, id) {
-  const safe = String(excerpt ?? '').replace(/[\u0000-\u001f\u007f-\u009f"]/g, ' ').slice(0, 120);
+/**
+ * The operator's stderr line for one withholding: the surface, the category, the sender and our own
+ * counts (`flagged=2`, `bytes=…`). Never an excerpt of the peer's text: a host may show this log to a
+ * model, and the text is what was withheld (XMesh World, agent-c).
+ */
+function auditLine(surface, reason, peer, counts, id) {
   const who = displayName(peer).replace(/\s/g, '_');
-  return `[sym-security] WITHHELD surface=${surface} reason=${reason} peer=${who}${id ? ` id=${id}` : ''} excerpt="${safe}"\n`;
+  const nums = counts && typeof counts === 'object'
+    ? Object.entries(counts).filter(([k, v]) => /^[a-z]{1,16}$/.test(k) && Number.isSafeInteger(v)).map(([k, v]) => ` ${k}=${v}`).join('')
+    : '';
+  return `[sym-security] WITHHELD surface=${surface} reason=${String(reason || 'withheld').replace(/[^a-z0-9:-]/gi, '_').slice(0, 64)} peer=${who}${id ? ` id=${String(id).replace(/[^a-z0-9]/gi, '').slice(0, 16)}` : ''}${nums}\n`;
 }
 
 function keyTag(d) {
@@ -337,10 +352,10 @@ function receiveLine(d, ctx) {
   const { policy, selfNodeId, now = Date.now(), pushed = false } = ctx;
   try {
     const j = judgeDelivery(d, { policy, selfNodeId });
-    if (j.bucket === 'unverified') return { bucket: 'unverified', line: unverifiedLine(d), audit: [`unverified:${d.withheld || 'unverified'}`, ''] };
+    if (j.bucket === 'unverified') return { bucket: 'unverified', line: unverifiedLine(d), audit: [`unverified:${d.withheld || 'unverified'}`, {}] };
     if (j.bucket === 'own') return { bucket: 'own', id: d.id };
     if (j.bucket === 'not-allowed') return { bucket: 'not-allowed', who: whoOf(d, ctx) };
-    if (j.bucket === 'withheld') return { bucket: 'withheld', line: withheldLine(d.id, whoOf(d, ctx), j.verdict), audit: [j.verdict.reason, j.verdict.excerpt] };
+    if (j.bucket === 'withheld') return { bucket: 'withheld', line: withheldLine(d.id, whoOf(d, ctx), j.verdict), audit: [j.verdict.reason, j.verdict.counts] };
     const age = Math.round((now - (d.receivedAt || now)) / 1000);
     const lead = leadText(d);
     const memTag = (d.directed && d.remixed === false && d.kind === 'cmb' ? ' ·not-stored' : '') + (pushed ? ' ·pushed' : '');
@@ -348,11 +363,11 @@ function receiveLine(d, ctx) {
     const risk = scanClassifierRisk(riskText(lead, signedBody(d, j.prepared)));
     const tag = deliveryTag(d, ctx);
     if (risk.risky) {
-      return { bucket: 'shown', line: `${quarantineHeader(tag.slice(1, -1), '', risk.terms.length, tail)} [${d.id}]${keyTag(d)} (${age}s ago)`, audit: [`classifier-risk:${risk.terms.join(',')}`, lead] };
+      return { bucket: 'shown', line: `${quarantineHeader(tag.slice(1, -1), '', risk.terms.length, tail)} [${d.id}]${keyTag(d)} (${age}s ago)`, audit: ['classifier-risk', { flagged: risk.terms.length }] };
     }
     return { bucket: 'shown', line: `${tag} ${escapeLead(lead, RECEIVE_LEAD_CHARS)}${tail} [${d.id}]${keyTag(d)} (${age}s ago)` };
   } catch {
-    return { bucket: 'withheld', line: withheldLine(d && d.id, 'a sender', { detail: 'this node could not render it' }), audit: ['render-failed', ''] };
+    return { bucket: 'withheld', line: withheldLine(d && d.id, 'a sender', { reason: 'render-failed', detail: 'this node could not render it' }), audit: ['render-failed', {}] };
   }
 }
 
@@ -411,12 +426,12 @@ function recallLine(r, ctx) {
     const focusV = cats && cats.focus;
     const focus = String((focusV && typeof focusV === 'object' ? focusV.text : focusV) ?? '');
     const verdict = policy.judge({ from: own ? null : authorId, categories: cats, payload: r.cmb && r.cmb.payload }, { self: own });
-    if (!verdict.show) return { line: `${head}${key}\n  withheld: ${verdict.detail}`, audit: [verdict.reason, verdict.excerpt] };
+    if (!verdict.show) return { line: `${head}${key}\n  withheld · ${reasonWord(verdict.reason)} — ${verdict.detail}`, audit: [verdict.reason, verdict.counts] };
     const risk = scanClassifierRisk(focus);
-    if (risk.risky) return { line: `${head}${key}\n  ${escapeLead(neutralizeSurface(focus), RECALL_LEAD_CHARS)} [${risk.terms.length} flagged term(s) defanged]`, audit: [`classifier-risk:${risk.terms.join(',')}`, focus] };
+    if (risk.risky) return { line: `${head}${key}\n  ${escapeLead(neutralizeSurface(focus), RECALL_LEAD_CHARS)} [${risk.terms.length} flagged term(s) defanged]`, audit: ['classifier-risk', { flagged: risk.terms.length }] };
     return { line: `${head}${key}\n  ${escapeLead(focus, RECALL_LEAD_CHARS)}` };
   } catch {
-    return { line: `${head}${key}\n  withheld: this node could not render it`, audit: ['render-failed', ''] };
+    return { line: `${head}${key}\n  withheld · render-failed — this node could not render it`, audit: ['render-failed', {}] };
   }
 }
 

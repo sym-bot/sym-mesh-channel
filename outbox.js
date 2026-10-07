@@ -9,7 +9,7 @@
 // KEYED BY NODE ID (design D6). A name is a label the sender chose, so it is never a route: the
 // queue holds only for a nodeId this node has had a Core Secure session with: the node host records a
 // nodeId here from `peer-joined` only when `peers()` shows that nodeId's session as a proven Core
-// Secure one (sym 0.14 at 341dafb raises peer-joined for a Legacy Import session too). An unknown
+// Secure one (peer-joined does not say which profile the session has). An unknown
 // nodeId is refused rather than held, so a typo creates no state.
 //
 // A held item the SDK refuses to send when the peer returns is marked STUCK with the reason, and is

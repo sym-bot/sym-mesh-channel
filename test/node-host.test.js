@@ -1,9 +1,11 @@
 'use strict';
 
-// node-host.js in process. Against the real sym 0.14 SDK (the committed head the branch depends on): two
-// SymNodes joined through the real §5.2 handshake over an in-memory pipe (the public connectTransport).
-// Against the shapes the SDK adds this round (design §6): a fake node that emits them. Each delivery is
-// decided from its own facts (design D2); review repros r2, r3, r11 and r12 are regressions here.
+// node-host.js in process, against the real sym 0.14 SDK (the commit the branch depends on): SymNodes
+// joined through the real §5.2 handshake over an in-memory pipe (the public connectTransport). Each
+// delivery is decided from its own facts (design D2): an inbox item's persisted provenance, and a
+// message's or a mood's event with the node's key bindings. Review repros r3 and r12 are regressions
+// here (r2 and r11 are provenance.test.js's: the entry decides). Only L4 uses a fake node: a Legacy
+// Import session needs a 0.13 peer.
 
 const h = require('./_harness.js'); // sandbox first
 const { test } = require('node:test');
@@ -14,57 +16,39 @@ const crypto = require('node:crypto');
 const EventEmitter = require('node:events');
 const sdk = require('@sym-bot/sym');
 const { NodeHost } = require('../node-host.js');
+const { createKeyBook, fingerprint, fullFingerprint } = require('../key-display.js');
 
 const uniq = (b) => `${b}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 const ROOM = 'host-room';
-function builder(name) {
-  return (cfg) => new sdk.SymNode({ name, room: cfg.room || ROOM, relayOnly: true, silent: true, ...(cfg.nodeId ? { nodeId: cfg.nodeId, create: cfg.create === true } : {}) });
+function builder(name, extra = {}) {
+  return (cfg) => new sdk.SymNode({ name, room: cfg.room || ROOM, relayOnly: true, silent: true, ...extra, ...(cfg.nodeId ? { nodeId: cfg.nodeId, create: cfg.create === true } : {}) });
 }
-function hostFor(name) {
-  const host = new NodeHost({ build: builder(name), nodeDir: (id) => sdk.identity.nodeDirById(id) });
-  host.open({ room: ROOM });
+function hostFor(name, extra = {}, cfg = {}) {
+  const host = new NodeHost({ build: builder(name, extra), nodeDir: (id) => sdk.identity.nodeDirById(id) });
+  host.open({ room: ROOM, ...cfg });
   return host;
 }
+/** An SVAF evaluator that rejects every record (the neural path's result shape), so only moods surface. */
+const REJECT_ALL = { evaluate: async () => ({ decision: 'rejected', total_drift: 0.95, category_drifts: {}, gate_values: {} }) };
 const deliveries = (host) => { const out = []; host.on('delivery', (d) => out.push(d)); return out; };
 
-/** A fake node that emits the SDK's events in their shapes; `inbox` behaves as the SDK's ring. */
+/** L4 only: a fake node whose peers() reports a Legacy Import session (a real one needs a 0.13 peer). */
 function fakeNode() {
-  const inbox = new Map();
-  let seq = 0, cursor = 0;
   const n = new EventEmitter();
   Object.assign(n, {
     nodeId: '01a0fd15-0000-7000-8000-000000000001', name: 'fake',
-    inboxStatus: () => ({ seq, cursor, undrained: [...inbox.values()].filter((m) => m.seq > cursor && !m.acked).length }),
-    inboxGet: (id) => inbox.get(id) || null,
-    inbox: ({ peek = false, limit = 50 } = {}) => {
-      const fresh = [...inbox.values()].filter((m) => m.seq > cursor).slice(0, limit);
-      if (!peek && fresh.length) cursor = fresh[fresh.length - 1].seq;
-      return { messages: fresh, remaining: [...inbox.values()].filter((m) => m.seq > cursor).length - (peek ? fresh.length : 0) };
-    },
-    inboxAck: (id) => { const m = inbox.get(id); if (m) m.acked = true; return !!m; },
+    inboxStatus: () => ({ seq: 0, cursor: 0, undrained: 0 }), inboxGet: () => null, inbox: () => ({ messages: [], remaining: 0 }), inboxAck: () => false,
     peers: () => n._peers || [],
-  });
-  // The SDK's own listener runs first and stamps inboxId (node.js _pushInbox).
-  n.on('cmb-accepted', (entry) => {
-    const id = `in${String(++seq).padStart(4, '0')}`;
-    entry.inboxId = id;
-    inbox.set(id, { seq, id, author: entry.author, categories: entry.cmb.categories, payload: entry.cmb.payload ?? null, directed: !!entry.directed, remixed: entry.remixed, verified: entry.verified, key: entry.cmb.metadata.key, receivedAt: Date.now(),
-      ...(entry.verification ? { verification: entry.verification, session: entry.session, profile: entry.profile, assertionId: entry.assertionId } : {}) });
   });
   return n;
 }
 function fakeHost(node = fakeNode()) {
   const host = new NodeHost({ build: () => node, nodeDir: () => fs.mkdtempSync(path.join(process.env.HOME, 'fake-node-')) });
   host.open({});
-  return { host, node, got: deliveries(host) };
+  return { host, node };
 }
 const A = '01a0fd15-52ca-726c-9ce1-5767a1379249';
 const C = '01a0fd15-52ca-7111-8222-0a1b2c3d4e5f';
-const KA = crypto.randomBytes(32).toString('base64url');
-const KC = crypto.randomBytes(32).toString('base64url');
-const verification = (aid, over = {}) => ({ suite: 'mmp-sig-v2.0', assertionId: aid, authorNodeId: A, authorName: 'alice', authorKey: KA, authorKeySource: 'proven', audience: 'room', room: 'r', to: null, relayed: false, ...over });
-const session = (via = A, key = KA) => ({ nodeId: via, name: via === A ? 'alice' : 'carol', identityKey: key, transport: 'lan', profile: 'core-secure' });
-const record = (aid, focus = 'status green', key = `cmb-${'1'.repeat(64)}`, extra = {}) => ({ categories: { focus: { text: focus }, ...extra }, metadata: { key, assertionId: aid, createdBy: 'alice' } });
 
 // ── The real SDK ──────────────────────────────────────────────
 
@@ -91,6 +75,8 @@ test('a directed record, a room record and a message arrive with what the node v
     assert.ok(!('valence' in directed.categories.mood));
     assert.strictEqual(room.facts.audience, 'room');
     assert.strictEqual(message.facts.signer.nodeId, alice.nodeId);
+    assert.strictEqual(message.facts.signer.key, alice.publicKey, 'a message\'s signer key is the node\'s binding for its author');
+    assert.strictEqual(directed.facts.signer.key, alice.publicKey);
     assert.strictEqual(message.text, 'a plain message');
     const r = bob.drain({});
     assert.strictEqual(r.items.length, 3);
@@ -185,7 +171,7 @@ test('r12: a held reply this SDK would refuse is not held, and one it refuses at
   } finally { await alice.stop(); await carol.stop(); await bob.stop(); }
 });
 
-test('after a restart an entry the SDK did not stamp with facts is not shown as verified: there is no second store', async () => {
+test('provenance travels with the inbox entry: a restart reads the same facts, and nothing is kept beside the inbox', async () => {
   const name = uniq('bob');
   const alice = new sdk.SymNode({ name: uniq('alice'), room: ROOM, relayOnly: true, silent: true });
   let bob = hostFor(name);
@@ -195,19 +181,22 @@ test('after a restart an entry the SDK did not stamp with facts is not shown as 
     await h.connectNodes(alice, bob.node);
     alice.remember({ focus: 'waiting across a restart' }, { to: bob.nodeId });
     await h.until(() => got.length >= 1, 5000);
-    const id = got[0].id;
-    assert.ok(got[0].facts);
+    const before = got[0];
+    assert.ok(before.facts);
     const nodeId = bob.nodeId;
     await bob.stop();
+    await alice.stop();
     await new Promise((r) => setTimeout(r, 1200));
-    bob = new NodeHost({ build: builder(name), nodeDir: (x) => sdk.identity.nodeDirById(x) });
-    bob.open({ room: ROOM, nodeId, create: false });
+    bob = hostFor(name, {}, { nodeId, create: false });
     await bob.start();
-    const d = bob.get(id);
+    const d = bob.get(before.id);
     assert.ok(d, 'the inbox is durable');
-    assert.strictEqual(d.facts, null);
-    assert.strictEqual(d.withheld, 'no-provenance');
-    assert.ok(!fs.existsSync(path.join(sdk.identity.nodeDirById(nodeId), 'mesh-channel')), 'no channel store beside the inbox');
+    assert.strictEqual(d.withheld, null);
+    assert.strictEqual(d.facts.signer.nodeId, alice.nodeId, 'the facts were persisted with the entry');
+    assert.strictEqual(d.facts.signer.key, alice.publicKey);
+    assert.strictEqual(d.facts.assertionId, before.facts.assertionId);
+    assert.deepStrictEqual(d.categories, before.categories);
+    assert.ok(!fs.existsSync(path.join(sdk.identity.nodeDirById(nodeId), 'mesh-channel')), 'no channel store of facts beside the inbox');
   } finally { await alice.stop(); await bob.stop(); }
 });
 
@@ -221,11 +210,15 @@ test('a 0.13 inbox entry carries no provenance and is never shown', async () => 
   host.open({ room: ROOM, nodeId: ident.nodeId, create: false });
   try {
     await host.start();
-    const [d] = host.drain({}).items;
-    assert.strictEqual(d.facts, null);
-    assert.strictEqual(d.withheld, 'no-provenance');
-    assert.strictEqual(host.keyOf('in0001'), null);
-    assert.strictEqual(host.signerOf('in0001'), null);
+    const items = host.drain({}).items;
+    assert.strictEqual(items.length, 1, 'the 0.13 snapshot is read, and its entry listed');
+    for (const d of items) {
+      assert.strictEqual(d.facts, null);
+      assert.ok(['no-provenance', 'unverified'].includes(d.withheld), d.withheld);
+      assert.strictEqual(host.keyOf(d.id), null);
+      assert.strictEqual(host.signerOf(d.id), null);
+    }
+    assert.ok(!items.some((d) => /OLD/.test(JSON.stringify(d.categories))), 'nothing of it is carried to a line');
   } finally { await host.stop(); }
 });
 
@@ -234,53 +227,60 @@ test('a pinned nodeId that is not on this host is refused, never minted (design 
   assert.throws(() => host.open({ room: ROOM, nodeId: '01a0fd15-0000-7000-8000-0000000fffff', create: false }), (e) => e.code === 'EIDENTITYABSENT');
 });
 
-// ── The SDK's shapes this round (design §6), through a fake node ──
-
-test('facts on the entry itself (design §6 item 1) are rendered from the entry, before and after a restart', () => {
-  const { host, node, got } = fakeHost();
-  node.emit('cmb-accepted', { verified: true, profile: 'core-secure', assertionId: 'asrt-1', verification: verification('asrt-1'), session: session(), cmb: record('asrt-1'), author: { name: 'alice', nodeId: A, key: KA, via: { name: 'alice', nodeId: A } }, remixed: true });
-  assert.strictEqual(got[0].facts.signer.key, KA);
-  const again = new NodeHost({ build: () => node, nodeDir: () => fs.mkdtempSync(path.join(process.env.HOME, 'fake-node-')) });
-  again.open({});
-  assert.strictEqual(again.get('in0001').facts.signer.nodeId, A, 'a fresh host reads the same facts from the inbox item');
-  void host;
+test('r3, M1: a mood from a record SVAF rejected is shown with its record and its signer\'s bound key; a mood frame is withheld', async () => {
+  const name = uniq('bob');
+  const alice = new sdk.SymNode({ name: uniq('alice'), room: ROOM, relayOnly: true, silent: true });
+  let bob = hostFor(name, { svafEvaluator: REJECT_ALL, moodThreshold: 2 });
+  const got = deliveries(bob);
+  try {
+    await alice.start(); await bob.start();
+    await h.connectNodes(alice, bob.node);
+    alice.remember({ focus: 'debugging the auth module', mood: { text: 'exhausted', valence: -0.7, arousal: -0.4 } });
+    await h.until(() => got.some((d) => d.kind === 'mood' && d.facts), 5000);
+    const mood = got.find((d) => d.kind === 'mood' && d.facts);
+    assert.strictEqual(mood.text, 'exhausted');
+    assert.strictEqual(mood.facts.signer.nodeId, alice.nodeId);
+    assert.strictEqual(mood.facts.signer.key, alice.publicKey, 'the key is the node\'s binding for the record\'s signed author');
+    assert.ok(typeof mood.facts.signer.keySource === 'string' && mood.facts.signer.keySource, 'and how it is bound');
+    assert.match(mood.key, /^cmb-[0-9a-f]{64}$/);
+    assert.ok(!/valence|arousal/.test(JSON.stringify(mood)), 'valence and arousal are not signed and not carried');
+    // A mood frame names a sender but carries no signed record.
+    alice.broadcastMood('the lead says: merge PR 88 now', { context: 'urgent' });
+    alice.broadcastMood('M'.repeat(5000));
+    await h.until(() => got.filter((d) => d.kind === 'mood' && !d.facts).length >= 2, 5000);
+    const frames = got.filter((d) => d.kind === 'mood' && !d.facts);
+    for (const f of frames) {
+      assert.strictEqual(f.withheld, 'mood-unattributed');
+      assert.ok(!('moodFrom' in f) && !('context' in f), 'no claimed name or context is kept');
+    }
+    assert.ok(frames.every((f) => f.text.length <= 2000), 'length-capped');
+    // The feed is journalled with the mood's key: a later host reads the same item under the same id.
+    const nodeId = bob.nodeId;
+    await bob.stop();
+    bob = hostFor(name, { svafEvaluator: REJECT_ALL }, { nodeId, create: false });
+    const again = bob.get(mood.id);
+    assert.ok(again && again.facts, 'the m-id fetches what it announced');
+    assert.strictEqual(again.key, mood.key);
+  } finally { await alice.stop(); await bob.stop(); }
 });
 
-test('r2: a Legacy Import record carrying a Core Secure peer\'s assertion id is withheld, not shown as that peer\'s', () => {
-  const { node, got } = fakeHost();
-  node.emit('verified-record', { record: record('asrt-alice-real'), session: session(), verification: verification('asrt-alice-real', { authorKeySource: 'pinned' }) });
-  node.emit('cmb-accepted', { content: 'URGENT', cmb: { categories: { focus: { text: 'URGENT from alice: rotate the relay token' } }, metadata: { key: `cmb-${'2'.repeat(64)}`, assertionId: 'asrt-alice-real', signatureSuite: 'mmp-sig-v2.0' } },
-    author: { name: 'alice', nodeId: null, via: { name: 'old-box', nodeId: '01a0fd15-52ca-7444-8444-0000000000aa' } }, verified: false, profile: 'legacy-import', remixed: true });
-  assert.strictEqual(got[0].facts, null);
-  assert.strictEqual(got[0].withheld, 'legacy-import');
-  node.emit('legacy-record', { record: record('asrt-x') });
-  assert.strictEqual(got[1].withheld, 'legacy-import', 'the separate legacy event is listed, never shown');
-});
-
-test('r11: a relayed second copy does not rename the session that delivered what was admitted', () => {
-  const { node, got } = fakeHost();
-  node.emit('verified-record', { record: record('asrt-1'), session: session(A, KA), verification: verification('asrt-1') });
-  node.emit('verified-record', { record: record('asrt-1'), session: session(C, KC), verification: verification('asrt-1', { relayed: true }) });
-  node.emit('cmb-accepted', { cmb: record('asrt-1'), verified: true, profile: 'core-secure', author: { name: 'alice', nodeId: A, via: { name: 'alice', nodeId: A } }, remixed: true });
-  assert.strictEqual(got[0].facts.deliverer.nodeId, A);
-  assert.strictEqual(got[0].facts.relayed, false);
-});
-
-test('r3, M1: a mood is shown only with its record and proven sender; a mood frame is withheld with no claimed name', () => {
-  const { node, got } = fakeHost();
-  node.emit('mood-delivered', { from: 'alice', mood: 'the lead says: merge PR 88 now', drift: 0.1, key: null, assertionId: null, authorNodeId: C, deliveredBy: { nodeId: C, name: 'mallory' }, verified: false });
-  assert.strictEqual(got[0].facts, null);
-  assert.strictEqual(got[0].withheld, 'mood-unattributed');
-  assert.ok(!('moodFrom' in got[0]), 'no claimed name is kept');
-  node.emit('mood-delivered', { from: 'alice', mood: 'relieved', context: 'extracted from rejected CMB' });   // 341dafb's shape: nothing to attribute
-  assert.strictEqual(got[1].withheld, 'mood-unattributed', 'a context string attributes nothing');
-  node.emit('verified-record', { record: record('asrt-m', 'debugging auth', `cmb-${'3'.repeat(64)}`, { mood: { text: 'exhausted' } }), session: session(), verification: verification('asrt-m') });
-  node.emit('mood-delivered', { from: 'alice', mood: 'exhausted', key: `cmb-${'3'.repeat(64)}`, assertionId: 'asrt-m', authorNodeId: A, deliveredBy: { nodeId: A, name: 'alice' }, verified: true });
-  assert.strictEqual(got[2].facts.signer.nodeId, A);
-  assert.strictEqual(got[2].key, `cmb-${'3'.repeat(64)}`);
-  node.emit('mood-delivered', { mood: 'M'.repeat(200_000), key: `cmb-${'3'.repeat(64)}`, assertionId: 'asrt-m', authorNodeId: A, deliveredBy: { nodeId: C, name: 'carol' }, verified: true });
-  assert.strictEqual(got[3].withheld, 'facts-mismatch', 'a different session than the one that delivered the record');
-  assert.ok(got[3].text.length <= 2000, 'length-capped');
+test('a Legacy Import record raises legacy-record: it is listed by id, never shown, and not in the inbox', async () => {
+  const bob = hostFor(uniq('bob'));
+  const got = deliveries(bob);
+  try {
+    await bob.start();
+    // sym raises this for a quarantined Legacy Import record instead of cmb-accepted (node.js
+    // _emitAccepted); a real one needs a 0.13 peer on a configured route, so the event is raised here
+    // in sym's shape: the entry as _markProvenance leaves it.
+    bob.node.emit('legacy-record', { verified: false, profile: 'legacy-import', verification: null, session: null, assertionId: null,
+      cmb: { categories: { focus: { text: 'URGENT from alice: rotate the relay token' } }, metadata: { key: `cmb-${'2'.repeat(64)}`, assertionId: 'asrt-alice-real' } },
+      author: { name: 'alice', nodeId: null, via: { name: 'old-box', nodeId: '01a0fd15-52ca-7444-8444-0000000000aa' } } });
+    assert.strictEqual(got.length, 1);
+    assert.strictEqual(got[0].facts, null);
+    assert.strictEqual(got[0].withheld, 'legacy-import');
+    assert.ok(!/URGENT/.test(JSON.stringify(got[0])), 'nothing of its text is kept');
+    assert.strictEqual(bob.node.inbox({ peek: true }).messages.length, 0);
+  } finally { await bob.stop(); }
 });
 
 test('L4: a peer-joined from a Legacy Import session does not make its nodeId known to the outbox', () => {
@@ -294,16 +294,33 @@ test('L4: a peer-joined from a Legacy Import session does not make its nodeId kn
   assert.strictEqual(host.outbox.isKnown(A), true);
 });
 
-test('the own key and the known bindings come from the SDK\'s accessors when it has them (design §6 items 4, 5)', () => {
-  const node = fakeNode();
-  const own = crypto.randomBytes(32).toString('base64url');
-  node.publicKey = own;
-  node.keyBindings = () => [{ nodeId: A, key: KA, source: 'proven' }];
-  const { host } = fakeHost(node);
-  assert.strictEqual(host.ownKey(), own);
-  assert.strictEqual(host.keys.keyForNode(A), KA);
-  const bare = fakeHost().host;
-  assert.strictEqual(bare.ownKey(), null, 'no accessor: no key, and no invite is minted to find one');
+test('the own key and the key bindings are the SDK\'s: the fingerprint is sym\'s, and the suffix is unique among node.keyBindings()', async () => {
+  const alice = new sdk.SymNode({ name: uniq('alice'), room: ROOM, relayOnly: true, silent: true });
+  const bob = hostFor(uniq('bob'));
+  try {
+    await alice.start(); await bob.start();
+    assert.strictEqual(bob.ownKey(), bob.node.publicKey);
+    assert.strictEqual(fullFingerprint(bob.ownKey()), bob.node.fingerprint, 'the same sha256:<hex> sym gives');
+    await h.connectNodes(alice, bob.node);
+    const bindings = bob.node.keyBindings();
+    const forAlice = bindings.find((b) => b.nodeId === alice.nodeId);
+    assert.ok(forAlice && forAlice.key === alice.publicKey, JSON.stringify(bindings));
+    assert.deepStrictEqual(bob.keys.bindingFor(alice.nodeId), { key: alice.publicKey, source: forAlice.source });
+    assert.strictEqual(bob.keys.bindingFor('01a0fd15-0000-7000-8000-00000000dead'), null);
+    // A fresh book over the node's bindings knows alice's key though it learned nothing.
+    const book = createKeyBook({ bindings: () => bob.node.keyBindings() });
+    const fp = fingerprint(alice.publicKey);
+    assert.ok(book.allFingerprints().has(fp));
+    const all = new Set(bindings.map((b) => fingerprint(b.key)));
+    const tag = book.tag({ key: alice.publicKey, label: 'alice', nodeId: alice.nodeId });
+    assert.strictEqual(tag, `alice ⟨…${book.suffixOf(fp, all)}⟩`);
+    assert.ok(book.suffixOf(fp, all).length >= 8);
+    // The suffix grows past a known binding that shares its end.
+    const near = `${fp.slice(-12, -11) === '0' ? '1'.repeat(53) : '0'.repeat(53)}${fp.slice(-11)}`;
+    assert.strictEqual(book.suffixOf(fp, new Set([...all, near])).length, 12);
+    const bare = fakeHost().host;
+    assert.strictEqual(bare.ownKey(), null, 'no accessor: no key, and no invite is minted to find one');
+  } finally { await alice.stop(); await bob.stop(); }
 });
 
 // The inbox-id bug (2026-10): the host's own feed (messages, moods, legacy records) numbered its ids

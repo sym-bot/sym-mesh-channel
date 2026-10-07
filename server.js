@@ -57,6 +57,14 @@ const { fullFingerprint } = require('./key-display.js');
 const push = require('./push-statement.js');
 
 const PKG_VERSION = (() => { try { return require('./package.json').version; } catch { return '0.0.0'; } })();
+// The @sym-bot/sym this process loaded. The node's own word for its version (`node.version`) is read
+// when the SDK gives one; until then, the loaded package's.
+const SDK_PKG_VERSION = (() => { try { return require('@sym-bot/sym/package.json').version; } catch { return null; } })();
+function sdkVersion(node) {
+  let v = null;
+  try { v = node ? (typeof node.version === 'function' ? node.version() : node.version) : null; } catch { v = null; }
+  return typeof v === 'string' && v ? v : (SDK_PKG_VERSION || 'unknown');
+}
 
 // ── Rooms and invites: the SDK's one grammar (room-names.js) ──
 const { isCanonicalRoom, roomRefusalReason, parseInviteURL, keyFingerprint, roomServiceType, serviceTypeToRoom } = require('./room-names.js');
@@ -279,8 +287,8 @@ const RATE = deliveryPolicy.readRateLimit(process.env.SYM_RATE_LIMIT);
 if (RATE.invalid !== undefined) stderrLog(`SYM_RATE_LIMIT=${JSON.stringify(RATE.invalid)} is not a whole number of pushes per minute; using the default of ${deliveryPolicy.DEFAULT_RATE_LIMIT}.`);
 const pushRate = deliveryPolicy.createRateLimiter({ limit: RATE.limit });
 
-function securityAudit(surface, reason, peer, excerpt, id) {
-  process.stderr.write(deliveryPolicy.auditLine(surface, reason, peer, excerpt, id));
+function securityAudit(surface, reason, peer, counts, id) {
+  process.stderr.write(deliveryPolicy.auditLine(surface, reason, peer, counts, id));
 }
 
 // ── The push statement (design D5) ───────────────────────────
@@ -291,8 +299,7 @@ const pushesInFlight = new Set();
 // ── Advisories, in band ──────────────────────────────────────
 // Some hosts show none of a child's stderr, and a wrong room starts perfectly well, so the warnings
 // travel where the agent reads: the instructions, and the tools it calls when the mesh is quiet.
-let daemonRoomSaid = null;   // the room pair last said, so the daemon advisory is said once per change
-function roomAdvisory({ remember = true } = {}) {
+function roomAdvisory() {
   if (MODE !== 'node') return [];
   const lines = [];
   // The file's own values and key names are not repeated here (review L8): this text reaches the
@@ -320,16 +327,38 @@ function roomAdvisory({ remember = true } = {}) {
       `${ALLOWED.ignored.length === 1 ? 'is' : 'are'} not a nodeId, ignored: names are labels, not identities.` +
       (ALLOWED.failClosed ? ' It lists no nodeId, so it allows nothing until it does (sym_peers shows nodeIds).' : ''));
   }
+  return lines;
+}
+
+/**
+ * The sym daemon in another room (XMesh World, agent-c): `{ pair, line }`, or null. It is said ONCE
+ * per session in a tool answer (and again only when the pair changes, after sym_join_room), never on
+ * every call and not in the instructions, which a host may show again with every turn. sym_status
+ * always says it.
+ */
+function daemonRoomAdvisory() {
+  if (MODE !== 'node') return null;
   try {
     const daemonRoom = fs.readFileSync(path.join(process.env.SYM_STATE_DIR || path.join(os.homedir(), '.sym'), 'room'), 'utf8').trim();
-    const pair = `${daemonRoom}|${ROOM}`;
-    if (daemonRoom && daemonRoom !== ROOM && (!remember || daemonRoomSaid !== pair)) {
-      if (remember) daemonRoomSaid = pair;
-      lines.push(`MESH ROOM ADVISORY: the sym daemon is in room '${daemonRoom}' but this node resolved '${ROOM}' from ${ROOM_SOURCE}. ` +
-        `They cannot see each other. Call sym_join_room with room="${daemonRoom}", or fix the config to match.`);
-    }
-  } catch { /* no daemon room file: the normal single-node case */ }
-  return lines;
+    if (!daemonRoom || daemonRoom === ROOM) return null;
+    return {
+      pair: `${daemonRoom}|${ROOM}`,
+      line: isCanonicalRoom(daemonRoom)
+        ? `MESH ROOM ADVISORY: the sym daemon is in room '${daemonRoom}' but this node resolved '${ROOM}' from ${ROOM_SOURCE}. ` +
+          `They cannot see each other. Call sym_join_room with room="${daemonRoom}", or fix the config to match. (Said once per session; sym_status repeats it.)`
+        : `MESH ROOM ADVISORY: the sym daemon's room file names a room that is not a room name, so this node ('${ROOM}', from ${ROOM_SOURCE}) cannot be in it. (Said once per session; sym_status repeats it.)`,
+    };
+  } catch { return null; /* no daemon room file: the normal single-node case */ }
+}
+let daemonRoomSaid = null;   // the room pair said in this session
+function withDaemonRoomAdvisory(result, toolName) {
+  const a = daemonRoomAdvisory();
+  if (!a || daemonRoomSaid === a.pair) return result;
+  daemonRoomSaid = a.pair;
+  if (toolName === 'sym_status' || !result || !Array.isArray(result.content)) return result; // status says it itself
+  const last = result.content[result.content.length - 1];
+  if (last && last.type === 'text') return { ...result, content: [...result.content.slice(0, -1), { ...last, text: `${last.text}\n\n${a.line}` }] };
+  return { ...result, content: [...result.content, { type: 'text', text: a.line }] };
 }
 
 // ONE AGENT, ONE NODE. The plugin's .mcp.json sets SYM_CHANNEL_HOST=plugin, so this server knows which it is.
@@ -365,7 +394,7 @@ function dualNodeAdvisory() {
 }
 
 let startupAdvisory = [];
-try { startupAdvisory = [...roomAdvisory({ remember: false }), ...dualNodeAdvisory()]; }
+try { startupAdvisory = [...roomAdvisory(), ...dualNodeAdvisory()]; }
 catch (e) { stderrLog(`startup advisory skipped: ${e?.message || e}`); }
 
 // ── The instructions: who this node is and how the tools work. No record text (design D8). ──
@@ -394,7 +423,10 @@ function instructions() {
     return `You are the mind of ${who}, attached to its interior (interior mode). You have no mesh identity of your own: ` +
       'sym_send and sym_publish submit drafts to the node, which checks them against its mission, signs them as itself and sends them. ' +
       `${host && host.kinds().length ? `The mission's submission kinds: ${host.kinds().join(', ')}. ` : 'Name the kind of each submission (kind). '}` +
-      (reads ? common : 'This node\'s interior does not serve its deliveries (sym 0.14\'s interior socket takes submit and end only), so you can submit but not read what the node admits; sym_receive says so. ' +
+      'The node signs the kind as the record\'s intent, so leave intent out. ' +
+      (reads ? 'You read what the node gives this mission: deliveries that arrived since this mind started (a directed one only from a nodeId the mission may address), ' +
+        'recall within them, your own submissions and the mission\'s context; you may cite only those. ' + common
+        : 'This node\'s interior does not serve its deliveries (it answered unknown-request), so you can submit but not read what the node admits; sym_receive says so. ' +
         'Lineage: cite what a submission builds on in parents, as CMB keys of records the node holds (MMP §14.3). Only the categories you give are sent.');
   }
   return `You are a peer node on the SYM mesh: node '${NODE_NAME}', nodeId ${selfNodeId}. Peers' records reach you only after this ` +
@@ -485,7 +517,7 @@ function toolList() {
       name: 'sym_status',
       description: interior
         ? 'Interior status: the node and mission this mind is attached to, the socket, what the node serves, submissions and refusals, and the push statement.'
-        : 'Node status: identity (nodeId, key fingerprint), room, relay state with the fix when refused, Core Secure sessions and key conflicts, peers, memory, and the push statement.',
+        : 'Node status: identity (nodeId, key fingerprint), the loaded @sym-bot/mesh-channel and @sym-bot/sym versions, room, relay state with the fix when refused, Core Secure sessions and key conflicts, peers, memory, and the push statement.',
       inputSchema: { type: 'object', properties: {} },
     },
   ];
@@ -560,7 +592,7 @@ function withInboxAdvisory(result) {
 // for at most 60 s from when it STARTED, so one hung call costs order, not every later call (tool-queue.js).
 const enqueueTool = createToolQueue({ holdMs: 60_000 });
 function onToolCall(request) {
-  return enqueueTool(async () => withInboxAdvisory(await dispatchTool(request)));
+  return enqueueTool(async () => withDaemonRoomAdvisory(withInboxAdvisory(await dispatchTool(request)), request && request.params && request.params.name));
 }
 
 /** Wait (at most 2 s) for pushes still being written, so their credit is settled before a drain. */
@@ -775,12 +807,12 @@ async function fetchTool(args) {
   if (!d) return text(`Delivery ${rawId} not found (expired, unknown, or not served by this node's interior).`);
   const j = deliveryPolicy.judgeDelivery(d, { policy, selfNodeId });
   if (j.bucket === 'unverified') {
-    securityAudit('fetch', `unverified:${d.withheld}`, 'unverified', '', rawId);
+    securityAudit('fetch', `unverified:${d.withheld}`, 'unverified', {}, rawId);
     return text(`Withheld, so not shown: ${deliveryPolicy.unverifiedLine(d)}.`);
   }
   const ctx = { keys: host.keys };
   if (j.bucket === 'withheld' || j.bucket === 'not-allowed') {
-    securityAudit('fetch', j.verdict.reason, d.facts.signer.nodeId, j.verdict.excerpt, rawId);
+    securityAudit('fetch', j.verdict.reason, d.facts.signer.nodeId, j.verdict.counts, rawId);
     return text(`Withheld, so not shown: ${deliveryPolicy.withheldLine(rawId, host.keys.tag({ key: d.facts.signer.key, label: d.facts.signer.label, nodeId: d.facts.signer.nodeId }), j.verdict)}.`);
   }
   const fence = deliveryPolicy.newFence(rawId);
@@ -820,6 +852,8 @@ async function statusTool() {
   if (MODE === 'interior') {
     const m = host.mission;
     lines.push(`Mode: interior — this session is the mind of ${host.name || 'a node'}${host.nodeId ? ` (${host.nodeId})` : ''}; it has no mesh identity of its own.`);
+    lines.push(`Versions: @sym-bot/mesh-channel ${PKG_VERSION}; @sym-bot/sym ${sdkVersion(null)} loaded by this server` +
+      (m && typeof m.version === 'string' ? `, ${m.version} in the node` : ' (the node runs its own, which its interior does not report)'));
     lines.push(`Interior socket: ${host.socketPath}${host.detached ? ` — DETACHED: ${host.detached}` : ' — attached (the capability is bound to this one connection)'}`);
     lines.push(m ? `Mission: ${m.missionId || '?'} (mind ${m.mindId || '?'}); kinds ${Array.isArray(m.kinds) ? m.kinds.join(', ') : '?'}; allowlist ${Array.isArray(m.allowTo) && m.allowTo.length ? m.allowTo.join(', ') : 'room only'}`
       : `Mission: not described by the node${host.kinds().length ? `; kinds from SYM_INTERIOR_KINDS: ${host.kinds().join(', ')}` : ''}${host.defaultKind ? `; default kind ${host.defaultKind}` : ''}`);
@@ -833,6 +867,7 @@ async function statusTool() {
     // This node's own public key, from the SDK's accessor (design §6 item 4); never by minting an invite.
     const pub = host.ownKey();
     lines.push(`Node: ${NODE_NAME} — nodeId ${host.nodeId}, key fingerprint ${pub ? fullFingerprint(pub) : '(this SDK has no accessor for the node\'s own key)'}`);
+    lines.push(`Versions: @sym-bot/mesh-channel ${PKG_VERSION}; @sym-bot/sym ${sdkVersion(host.node)}`);
     if (!IDENTITY.nodeId) lines.push(`  Pin this folder's agent so it is never re-minted: add "node_id": "${host.nodeId}" to ${PROJECT_CFG.file || '.sym/node.json'}.`);
     lines.push(`Room: ${ROOM} (${SERVICE_TYPE})${LAN_OFF ? ' — relay only (SYM_LAN=off)' : ''}`);
     lines.push(`Relay: ${relayLine(s.relayStatus) || (s.relayConnected ? 'connected' : (RELAY_URL ? 'disconnected' : 'not configured'))}`);
@@ -847,7 +882,8 @@ async function statusTool() {
   if (ALLOWED.set) lines.push(`Allowlist: ${ALLOWED.nodeIds.length} nodeId(s)${ALLOWED.ignored.length ? `; ${ALLOWED.ignored.length} entr(ies) ignored (not nodeIds)` : ''}${ALLOWED.failClosed ? ' — it allows nothing until it lists nodeIds' : ''}`);
   lines.push(push.statusLine(pushState));
   for (const l of startupAdvisory.filter((x) => x.startsWith('MESH NODE ADVISORY'))) lines.push(l);
-  for (const l of roomAdvisory().filter((x) => x.includes('sym daemon'))) lines.push(l);
+  const daemon = daemonRoomAdvisory();
+  if (daemon) lines.push(daemon.line);
   if (internalErrors) lines.push(`Internal errors survived: ${internalErrors} (last: ${lastInternalError}; stack on stderr)`);
   return text(lines.join('\n'));
 }
@@ -1046,25 +1082,26 @@ function pushChannel(eventType, data, meta = {}) {
 function onDelivery(d) {
   try {
     const j = deliveryPolicy.judgeDelivery(d, { policy, selfNodeId });
-    if (j.bucket === 'own') { securityAudit('push', 'own-record', 'self', '', d.id); return; }
+    if (j.bucket === 'own') { securityAudit('push', 'own-record', 'self', {}, d.id); return; }
     // One rate bucket per PROVEN sender: the session that delivered it (design D4, review M1). A delivery
     // with no proven sender shares one bucket, so no claimed name can open new ones.
     const rateKey = d.facts ? (d.facts.deliverer ? d.facts.deliverer.nodeId : d.facts.signer.nodeId) : 'unverified';
     if (j.bucket === 'unverified') {
-      securityAudit('push', `unverified:${d.withheld}`, 'unverified', '', d.id);
-      if (pushRate.admit(rateKey)) pushChannel('delivery-withheld', `\u26a0 delivery withheld, not verified [${d.id}] · sym_receive names it with the reason`, { delivery_id: d.id, reason: d.withheld || 'unverified' });
+      securityAudit('push', `unverified:${d.withheld}`, 'unverified', {}, d.id);
+      if (pushRate.admit(rateKey)) pushChannel('delivery-withheld', `\u26a0 delivery withheld, not verified · ${d.withheld || 'unverified'} [${d.id}] · sym_receive names it with the reason`, { delivery_id: d.id, reason: d.withheld || 'unverified' });
       return;
     }
     const action = deliveryPolicy.pushAction(j.verdict, pushRate, rateKey);
     const who = d.facts.signer.nodeId;
     if (action !== 'push') {
-      if (action === 'rate-held') securityAudit('push', 'rate-limit', who, `over ${pushRate.limit}/min from this session; push held, the delivery waits in the inbox`, d.id);
-      else if (action !== 'silent') securityAudit('push', j.verdict.reason, who, j.verdict.excerpt, d.id);
-      if (action === 'notice') pushChannel('delivery-withheld', `${deliveryPolicy.deliveryTag(d, { keys: host.keys })} \u26a0 delivery withheld · ${j.verdict.detail} [${d.id}]`, { delivery_id: d.id, reason: j.verdict.reason });
+      // Over the rate the push is held; the delivery waits in the inbox.
+      if (action === 'rate-held') securityAudit('push', 'rate-limit', who, { limit: pushRate.limit }, d.id);
+      else if (action !== 'silent') securityAudit('push', j.verdict.reason, who, j.verdict.counts, d.id);
+      if (action === 'notice') pushChannel('delivery-withheld', `${deliveryPolicy.deliveryTag(d, { keys: host.keys })} \u26a0 delivery withheld · ${j.verdict.reason} — ${j.verdict.detail} [${d.id}]`, { delivery_id: d.id, reason: j.verdict.reason });
       return;
     }
-    const { text: line, meta, risk, lead } = deliveryPolicy.pushOf(d, j.prepared, { keys: host.keys });
-    if (risk && risk.risky) securityAudit('push', `classifier-risk:${risk.terms.join(',')}`, who, lead, d.id);
+    const { text: line, meta, risk } = deliveryPolicy.pushOf(d, j.prepared, { keys: host.keys });
+    if (risk && risk.risky) securityAudit('push', 'classifier-risk', who, { flagged: risk.terms.length }, d.id);
     const sent = pushChannel(d.kind === 'mood' ? 'mood' : 'cmb', line, meta);
     sent.then((ok) => { if (ok) { pushedIds.add(d.id); if (pushedIds.size > 2000) pushedIds.delete(pushedIds.values().next().value); } });
   } catch (err) { stderrLog(`push failed for ${d && d.id}: ${err && err.message}`); }

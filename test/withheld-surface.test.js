@@ -57,8 +57,8 @@ t('every delivery is accounted for; nothing withheld leaks its text; parts rebui
     const got = (await B.call('sym_receive')).text;
     assert.ok(!/MARKER/.test(got), got);
     assert.match(got, /^2 new mesh delivery\(ies\):/);
-    assert.match(got, /Withheld by this node's content policy — delivered, not shown:\n\[in\d{4}\] from sender ⟨…[0-9a-f]{8,}⟩: its text matched a prompt-injection pattern/);
-    assert.match(got, /\[in\d{4}\] from sender ⟨…[0-9a-f]{8,}⟩: its payload is 300,002 bytes, over this node's limit of 200,000/);
+    assert.match(got, /Withheld by this node's content policy — delivered, not shown:\n\[in\d{4}\] from sender ⟨…[0-9a-f]{8,}⟩: withheld · injection-pattern — its text matched a prompt-injection pattern/);
+    assert.match(got, /\[in\d{4}\] from sender ⟨…[0-9a-f]{8,}⟩: withheld · payload-over-limit — its payload is 300,002 bytes, over this node's limit of 200,000/);
     const withheldId = got.split('\n').find((l) => /prompt-injection/.test(l)).match(/\[(in\d{4})\]/)[1];
     const fetched = (await B.call('sym_fetch', { msg_id: withheldId })).text;
     assert.match(fetched, /^Withheld, so not shown: /);
@@ -107,7 +107,7 @@ t('a 0.13 inbox entry is withheld as received before Core Secure, on receive and
   try {
     await s.initialize();
     const r = (await s.call('sym_receive')).text;
-    assert.match(r, /Withheld, not verified under Core Secure — never shown:\n\[in0001\] withheld, not verified: it carries no Core Secure provenance \(received before this node ran Core Secure/);
+    assert.match(r, /Withheld, not verified under Core Secure — never shown:\n\[in0001\] withheld, not verified · no-provenance: it carries no Core Secure provenance \(received before this node ran Core Secure/);
     assert.ok(!/MARKER-OLD/.test(r));
     assert.ok(!/Caught up/.test(r));
     const f = (await s.call('sym_fetch', { msg_id: 'in0001' })).text;

@@ -19,9 +19,13 @@
  * (`unknown-request`) or REFUSED with a reason, and the three are told apart (review L6).
  *
  * A delivery item is `{ seq, id, kind: 'directed'|'broadcast', record, verified, profile, assertionId,
- * verification, session, author, remixed, receivedAt }` (§6, mismatch 2): the inbox item with its
- * provenance and its signed projection. It is gated by provenance.js exactly as node mode's are, and
- * only the projection's signed parts are shown.
+ * verification, session, author, remixed, receivedAt, acked }` (§6, mismatch 2): the inbox item with
+ * its provenance and its signed projection. It is gated by provenance.js exactly as node mode's are,
+ * and only the projection's signed parts are shown.
+ *
+ * THE READ SIDE IS THE MISSION'S (sym ruling C). The node gives a mind only what arrived while it runs
+ * (a directed delivery only from a nodeId the mission may address), its own cursor and acks, recall
+ * within that scope, and `parents` within it. The channel shows what is served and says the rest.
  *
  * THE CAPABILITY IS BOUND TO ITS CONNECTION (§6 item 8). sym binds it to the first connection that
  * presents it and refuses it on any other (`capability-bound-to-another-connection`). The channel
@@ -52,8 +56,10 @@ const REFUSAL_SAID = {
   'not-a-cat7-category': 'a category is not one of the seven CAT7 categories',
   'categories-too-large': 'the categories hold more than 64 KiB of text',
   'application-too-large': 'the payload is over 512 KiB',
-  'parent-not-in-store': 'a parent is not a record the node holds; cite only records in its store',
-  rate: 'the mission\'s submission rate is used up; wait and submit again',
+  'parent-not-in-store': 'a parent is not a record this mind may cite: only a delivery it was given while it ran, a record it submitted, or one in the mission\'s context',
+  'not-in-view': 'that delivery is not in this mind\'s view (it arrived before the mind started, or for another mission)',
+  rate: 'the mission\'s rate is used up (submissions, or reads); wait and try again',
+  failed: 'the node failed to answer the request',
   malformed: 'the node could not read the submission',
   'not-minted': 'the node did not mint a record for it',
   'emit-failed': 'the node could not sign or send it',

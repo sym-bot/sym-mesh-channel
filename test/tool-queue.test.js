@@ -61,5 +61,5 @@ test('the server runs every tool call through this queue', () => {
   // The one structural fact the behaviour above depends on: server.js has no second path to a tool.
   const src = require('node:fs').readFileSync(require.resolve('../server.js'), 'utf8');
   assert.match(src, /server\.setRequestHandler\(CallToolRequestSchema, onToolCall\)/);
-  assert.match(src, /return enqueueTool\(async \(\) => withInboxAdvisory\(await dispatchTool\(request\)\)\)/);
+  assert.match(src, /return enqueueTool\(async \(\) => withDaemonRoomAdvisory\(withInboxAdvisory\(await dispatchTool\(request\)\), /);
 });

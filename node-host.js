@@ -176,9 +176,11 @@ class NodeHost extends EventEmitter {
     node.on('mood-delivered', (m) => {
       try {
         if (!m || typeof m.mood !== 'string' || !m.mood) return;
-        const d = this.feed.add(this._delivery({ kind: 'mood', text: m.mood.slice(0, MOOD_TEXT_MAX), categories: {}, payload: null, key: null, directed: false, remixed: false }, this._moodVerdict(m)));
+        const item = this._delivery({ kind: 'mood', text: m.mood.slice(0, MOOD_TEXT_MAX), categories: {}, payload: null, key: null, directed: false, remixed: false }, this._moodVerdict(m));
+        // The key is set before the item is journalled, so a later host reads the same item.
+        if (item.facts) item.key = item.facts.key;
+        const d = this.feed.add(item);
         if (!d) { this._log('the feed is full of unread items (or not writable): a mood was not announced'); return; }
-        if (d.facts) d.key = d.facts.key;
         this.emit('delivery', d);
       } catch (err) { this._log(`mood bookkeeping failed: ${err && err.message}`); }
     });

@@ -62,14 +62,36 @@ t('a pinned node_id that is on this host is loaded as itself, and status says so
     await s.initialize();
     assert.match(s.instructions, new RegExp(`node 'pinned-real', nodeId ${id}`));
     const st = (await s.call('sym_status')).text;
-    assert.match(st, new RegExp(`^Node: pinned-real — nodeId ${id}, key fingerprint ([0-9a-f]{64}|\\(this SDK has no accessor for the node's own key\\))`), 'from the SDK accessor, never a minted invite');
+    assert.match(st, new RegExp(`^Node: pinned-real — nodeId ${id}, key fingerprint (sha256:[0-9a-f]{64}|\\(this SDK has no accessor for the node's own key\\))`), 'from the SDK accessor, never a minted invite');
     assert.ok(!/Pin this folder's agent/.test(st), 'already pinned');
+    // The versions loaded (XMesh World, agent-c): the channel's package, and sym's own word (node.version).
+    const v = (n) => require(`${n}/package.json`).version;
+    assert.match(st, new RegExp(`^Versions: @sym-bot/mesh-channel ${v('../').replace(/\./g, '\\.')}; @sym-bot/sym ${v('@sym-bot/sym').replace(/\./g, '\\.')}$`, 'm'));
   } finally { await s.close(); }
   const u = new h.McpSession({ env: { SYM_NODE_NAME: 'unpinned' } });
   try {
     await u.initialize();
     assert.match((await u.call('sym_status')).text, /Pin this folder's agent so it is never re-minted: add "node_id": "[0-9a-f-]{36}" to /);
   } finally { await u.close(); }
+});
+
+t('the sym daemon in another room is said once per session, not on every call; sym_status always says it (XMesh World)', async () => {
+  const state = h.stateDir('daemon');
+  fs.writeFileSync(path.join(state, 'room'), 'daemon-room\n');
+  const s = new h.McpSession({ env: { SYM_STATE_DIR: state, SYM_ROOM: 'other-room' } });
+  const ADV = /MESH ROOM ADVISORY: the sym daemon is in room 'daemon-room' but this node resolved 'other-room'/g;
+  const count = (x) => (x.match(ADV) || []).length;
+  try {
+    await s.initialize();
+    assert.strictEqual(count(s.instructions), 0, 'not in the instructions, which a host may show again each turn');
+    assert.strictEqual(count((await s.call('sym_receive')).text), 1, 'said once, in the first answer');
+    assert.strictEqual(count((await s.call('sym_receive')).text), 0);
+    assert.strictEqual(count((await s.call('sym_peers')).text), 0);
+    assert.strictEqual(count((await s.call('sym_recall', { query: '' })).text), 0);
+    assert.strictEqual(count((await s.call('sym_status')).text), 1, 'status says it');
+    assert.strictEqual(count((await s.call('sym_status')).text), 1, 'every time');
+    assert.match((await s.call('sym_status')).text, /Call sym_join_room with room="daemon-room"/);
+  } finally { await s.close(); }
 });
 
 t.run();
