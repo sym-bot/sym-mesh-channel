@@ -120,7 +120,7 @@ Fourteen MCP tools exposed to Claude Code, namespaced under `mcp__claude-sym-mes
 | `sym_recall` | Search this node's memory (its own records, and peers' records verified when admitted). |
 | `sym_push_confirm` | State, first-hand, that this server's `<channel>` pushes reach you, with the code from a push check. |
 | `sym_peers` | Peers with a proven session: label and key fingerprint, nodeId, key source, sessions; and the outbox, stuck items included. |
-| `sym_status` | Node identity (nodeId, key fingerprint), room, relay state, Core Secure sessions and key conflicts, memory, push statement. |
+| `sym_status` | Node identity (nodeId, key fingerprint), the loaded `@sym-bot/mesh-channel` and `@sym-bot/sym` versions, room, relay state, Core Secure sessions and key conflicts, memory, push statement, and the daemon-room advisory when it applies. |
 | `sym_room_info` | Report the mesh room this node is in, with service type and peer roster scoped to the room. |
 | `sym_invite_create` | Generate an invite URL for a named room, naming this node as its issuer. LAN-only or cross-network flavour. |
 | `sym_invite_info` | Parse an invite URL: room, relay, and the issuer's nodeId and key fingerprint. |
@@ -136,8 +136,15 @@ this node knows (at least 8 hex; `alice (2 keys)` when two known keys use the la
 CMB addressed to this node or `→room` for one bound to the room (admitted by this node's SVAF),
 `via label ⟨…⟩` when a relay session carried it, a quoted and escaped excerpt of the signed focus, the
 delivery id and the CMB key. A push carries the same line, and the facts as structured meta.
-`sym_fetch` gives the full nodeId and fingerprint and the signed text, fenced. A delivery whose own
-facts do not make it verified is listed by id and reason only. To answer it with lineage:
+`sym_fetch` gives the full nodeId and fingerprint (`sha256:<hex>`) and the signed text, fenced. A
+delivery whose own facts do not make it verified is listed by id and reason only, and one the
+content policy withholds names its category: `[in0042] from alice ⟨…⟩: withheld · injection-pattern
+— …`. A record whose wording may trip the model's own classifier is quarantined: its line says
+`classifier-risk (2 flagged terms)` and no text, and `sym_fetch` shows it on request.
+
+**The daemon in another room.** When the sym daemon on this machine is in a different room, the
+first tool answer of the session says so once (again only if the rooms change); `sym_status` always
+does. To answer it with lineage:
 `sym_send {"to": "in0042", "parents": ["in0042"], "focus": "…"}`.
 
 **Push, stated first-hand.** The server cannot see whether its notifications reach the model, so it
@@ -358,7 +365,7 @@ Clear-eyed about what's not there yet:
 - **One mesh identity per process.** Two Claude Code sessions on the same machine with the same node name collide. The second one's server starts without a mesh node, and every mesh tool says which name is held and how to fix it. Use one folder per agent (`start` names the node after the folder), or `--name`.
 - **First contact is trust on first proven use.** A peer you have never met is bound to the key its first session proves; an invite pins the issuer's key out of band. See [SECURITY.md](../SECURITY.md#layer-1-transport-and-peer-identity-mmp-v20-core-secure-sym-014).
 - **0.13 peers are not heard.** sym 0.14 speaks only Core Secure; a 0.13 node is reached only through a Legacy Import route on the sym side, and what it delivers is withheld here as unverified.
-- **Messages and moods are kept in memory.** They are not in the SDK's durable inbox, so a restart loses those that were not read.
+- **Messages and moods are kept in the channel's own feed**, journalled in the node's directory, not in the SDK's inbox. Their `m` ids survive a restart and are never reused. A mind attached through a node's interior sees neither.
 - **A cited reply can be refused on an SDK before spec draft #35**, which applies MMP §15.7's remix guard to every record with a peer parent. The answer says so and keeps the lineage: publish an observation of your own, then send again with the same parents. With #35 a cited reply is never gated.
 
 ## Troubleshooting
@@ -492,16 +499,19 @@ SYM_INTERIOR_CAPABILITY_FILE=/path/to/capability   # yours, 0600, or it is refus
 SYM_INTERIOR_KIND=observe                           # the default submission kind
 ```
 
-- `sym_send` and `sym_publish` submit; a refusal (a kind the mission did not declare, a recipient
-  outside its allowlist, a parent the node does not hold, the rate) is said in plain words.
+- `sym_send` and `sym_publish` submit; a refusal (a kind the mission did not declare, an intent
+  that is not the kind, a recipient outside its allowlist, a parent outside the mind's scope, the
+  rate) is said in plain words. The node signs the kind as the record's intent, so leave intent out.
 - `sym_peers`, `sym_join_room`, the invite tools and the outbox are not available: the node owns
   its room and its peers.
-- The mind reads the node's deliveries through the interior when the node serves them
-  ([DESIGN-0.11.0.md §6](DESIGN-0.11.0.md)), gated exactly as in node mode. A node that does not
-  serve them (sym at 341dafb serves submit and end only) is reported as such; a request the node
-  refuses is reported as a refusal, not as unsupported.
-- The capability is bound to the one connection the channel opens: when that connection closes,
-  this mind is detached and says so, and the channel never reconnects with it.
+- The mind reads the node's deliveries through the interior ([DESIGN-0.11.0.md §6](DESIGN-0.11.0.md)),
+  gated exactly as in node mode. The node gives it only what arrived for its mission while it runs
+  (a directed delivery only from a nodeId the mission may address); recall and `parents` are limited
+  to those, its own submissions and the mission's context. A node that serves no read side is
+  reported as such; a request the node refuses is reported as a refusal, not as unsupported.
+- The capability is bound to the one connection the channel opens; the node refuses it on any other
+  (`capability-bound-to-another-connection`). When that connection closes, this mind is detached and
+  says so, and the channel never reconnects with it.
 - When the host's stdin closes, the channel ends the mind, which revokes its capability.
   `SYM_INTERIOR_END_ON_EXIT=0` leaves it running.
 

@@ -29,15 +29,19 @@ to the key its first session proves. Join with an invite from someone you trust 
   says so: marked verified, on a Core Secure session, with facts whose author nodeId and key match the
   entry's author and whose delivering session matches the one that delivered it. Anything else — a
   Legacy Import record, an entry with no Core Secure provenance, facts that do not match — is listed
-  by id and reason and never shown, on every surface. The channel keeps no second store of facts.
+  by id and reason and never shown, on every surface. sym persists the facts with the inbox item, and
+  the channel keeps no second store of them. A message or a mood, which sym raises as an event, is
+  shown as verified only when the event names its verified author and the node binds a key to that
+  author (`node.keyBindings()`); a mood frame, which carries no signed record, never is.
 - **A signer is identified by its key, never by a truncated label or nodeId.** A label is chosen by
   its sender, and so is a nodeId (a UUID v7 a node picks, not one derived from its key): anyone can
   mint a nodeId whose last characters equal another node's. A line shows the signer's label and the
   shortest suffix of its key fingerprint (SHA-256 of the public key) that is unique among the key
   bindings this node knows, at least 8 hex characters. When two known keys use the same label, the
   line says so ("alice (2 keys)") and shows the longer suffix that tells them apart; when one key is
-  seen under two nodeIds, it says that ("one key, 2 nodeIds"). `sym_fetch` shows the full nodeId and
-  the full fingerprint.
+  seen or bound under two nodeIds, it says that ("one key, 2 nodeIds"). `sym_fetch` shows the full
+  nodeId and the full fingerprint, `sha256:<hex>` as sym gives it. A first-contact peer's key is held
+  for its session only until a verified record from it is admitted, and the fetch account says so.
 - Names are labels. `to`, the allowlist, the own-record check and the outbox key on nodeIds; the
   push rate counts per proven sender.
 
@@ -107,18 +111,26 @@ session: the real-time channel push, `sym_receive`, `sym_fetch` and
   "ignore previous instructions" and the like).
 
 A delivery that fails a check is **withheld**: the session sees its id, the
-sender's name and the reason, and none of the message. It is never left out of
+sender's name and the reason, named by its category (`injection-pattern`,
+`payload-over-limit`, `no-provenance`, and so on), and none of the message. It is never left out of
 the count. `sym_receive` lists each withheld delivery (deliveries from senders
 outside the allowlist are counted by sender), `sym_fetch` on its id answers with
-the reason, and an audit line goes to stderr. The delivery stays in the node's
-inbox, which keeps the newest 500 deliveries across restarts, so raising
-`SYM_MAX_PAYLOAD_BYTES` and restarting makes an over-limit message readable
-while it is still there. A message (a directed record of sym's message schema) and a mood are kept
-in the channel's own memory, not the durable inbox, so a restart loses those that were not read.
+the reason, and an audit line goes to stderr. The audit line carries the category and this server's
+own counts (`flagged=2`, `bytes=…`), never an excerpt of the peer's text, because a host may show
+that log to a model. The delivery stays in the node's inbox, which never evicts an unread delivery,
+so raising `SYM_MAX_PAYLOAD_BYTES` and restarting makes an over-limit message readable while it is
+still there. A message (a directed record of sym's message schema) and a mood are kept in the
+channel's own feed, journalled in the node's directory (`channel-feed.log`, 0600), so their ids
+survive a restart and are never reused.
+
+A record whose wording may trip the model's own safety classifier (offensive-security or
+policy-adjacent terms) is **quarantined** rather than withheld: its push and its `sym_receive` line
+name the category and how many terms were flagged (`classifier-risk (2 flagged terms)`), never its
+text, and `sym_fetch` shows it on request.
 
 A sender chooses its own label, so every line prints it with line breaks,
-brackets, control characters and this server's own line markers replaced, and the audit line drops
-control characters and quotes from its excerpt. A record signed by this node's own nodeId is not
+brackets, control characters and this server's own line markers replaced, and so does the audit
+line. A record signed by this node's own nodeId is not
 shown in `sym_receive`; its id is listed.
 
 A payload within the limit is announced on the header with its size and read on
@@ -156,19 +168,21 @@ SYM_ALLOWED_PEERS=01a0fd15-52ca-726c-9ce1-5767a1379249,01a0fd15-52ca-77cd-bc1c-8
 ## Interior mode
 
 With `SYM_INTERIOR_SOCKET` set, the channel is a node's mind (sym design D8, D9.3): it holds no key
-and no store, and submits drafts the node checks (audience, size, rate, declared kinds, parents in
-its store) and signs as itself.
+and no store, and submits drafts the node checks (audience, size, rate, declared kinds, the kind as
+the record's signed intent, parents in the mind's scope) and signs as itself.
 
 - The capability is a bearer token for one mission. Prefer `SYM_INTERIOR_CAPABILITY_FILE`: the file
   must be a regular file owned by this user and readable by no one else, or it is refused. A
   capability given in `SYM_INTERIOR_CAPABILITY` is removed from the server's environment once read,
   so nothing the server starts inherits it.
-- The capability is bound to the one connection the channel opens. When that connection closes,
-  the mind is detached and every tool says so; the channel never presents the capability again.
+- The capability is bound to the one connection the channel opens; sym refuses it on any other
+  (`capability-bound-to-another-connection`). When that connection closes, the mind is detached and
+  every tool says so; the channel never presents the capability again.
   When the host's stdin closes, the channel ends the mind, which revokes the capability.
 - Deliveries the node serves through its interior are gated exactly as in node mode: shown as
-  verified only when their own facts make them so. A node that does not serve its deliveries is
-  reported as such, never as an empty inbox.
+  verified only when their own facts make them so. The node serves a mind only what arrived for its
+  mission while it runs (sym ruling C). A node that does not serve its deliveries is reported as
+  such, never as an empty inbox.
 
 ## Token Handling
 

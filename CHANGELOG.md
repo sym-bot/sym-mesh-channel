@@ -13,18 +13,28 @@ rebuilt around that: it shows what the node verified, and nothing else. Design:
   says so: marked verified, on a Core Secure session, with facts whose author nodeId and key match
   the entry's author and whose delivering session matches. Anything else is listed by id and reason
   and never shown, on every surface: a Legacy Import record, an entry with no Core Secure provenance
-  (a 0.13 inbox entry), facts that do not match. The channel keeps no second store of facts.
+  (a 0.13 inbox entry), facts that do not match. The SDK persists the facts with the inbox item, so a
+  restart decides the same; the channel keeps no second store of them and joins nothing.
+- **A message or a mood** is decided from what sym's event names (the record, its verified author,
+  the delivering peer) and the key the node binds to that author (`node.keyBindings()`). No binding,
+  or a Legacy Import deliverer, and it is withheld.
 - **A signer is identified by its key.** A line shows the signer's label and the shortest suffix of
   its key fingerprint that is unique among the keys this node knows (at least 8 hex characters), and
-  says "(2 keys)" when two known keys use one label. Labels and nodeIds are both chosen by their
-  owner, so neither is ever truncated to identify anyone. `sym_fetch` gives the full nodeId and
-  fingerprint, where the key came from (an invite, a proven session, a grant), the assertion, the
+  says "(2 keys)" when two known keys use one label, "(one key, 2 nodeIds)" when one key is bound
+  under two. The known keys are the node's own bindings plus those learned from verified facts.
+  Labels and nodeIds are both chosen by their owner, so neither is ever truncated to identify anyone.
+  `sym_fetch` gives the full nodeId and fingerprint (`sha256:<hex>`, the form sym gives), where the key came from (an invite, a proven session, a grant), the assertion, the
   room, the record's own lineage, and whether it was stored.
 - **Peer text is data.** A push is one line: the tag, a quoted and escaped excerpt of at most 100
   characters, and the id; the facts travel as structured notification meta. `sym_receive` escapes the
   same way. The full signed text is shown only by `sym_fetch`, between fence markers carrying a nonce.
-- **Only the signed parts are shown:** the seven CAT7 texts and the signed application data. A key
-  outside CAT7, a mood's valence and arousal, and the SDK's rendered content string are never shown.
+- **Only the signed parts are shown:** the seven CAT7 texts and the signed application data, read from
+  the record's signed projection that sym keeps with each item. A key outside CAT7, a mood's valence
+  and arousal, and the SDK's rendered content string are never shown.
+- **A withheld delivery names its category, never its text** (XMesh World): `withheld ·
+  injection-pattern — …`, `withheld, not verified · no-provenance: …`, `quarantined delivery ·
+  classifier-risk (2 flagged terms)`. The operator's `[sym-security]` line on stderr carries the
+  category and our own counts, and no excerpt of the peer's text. The content policy is unchanged.
 - **Moods** (MMP §9.3) reach the session only when the SDK ties the mood to its verified record and
   the proven session that delivered it; any other mood, a mood frame included, is listed by id with
   the reason. No name a frame claims is printed, and moods are rate-limited per proven sender.
@@ -93,8 +103,12 @@ rebuilt around that: it shows what the node verified, and nothing else. Design:
   by no one else, or it is refused) or `SYM_INTERIOR_CAPABILITY` (removed from the environment once
   read). It is bound to the one connection the channel opens: when that closes, the mind is detached
   and says so. When the host's stdin closes, the mind is ended and its capability revoked.
-- The node's deliveries are read through the interior when it serves them, gated as in node mode; a
-  node that does not serve them, and a request it refuses, are each reported as what they are.
+- The node's deliveries are read through the interior, gated as in node mode. The node gives a mind
+  only what arrived for its mission while it runs, and lets it cite only those, its own submissions
+  and the mission's context (sym ruling C). The node signs the kind as the record's intent and refuses
+  a differing intent. A capability presented on a second connection is refused
+  (`capability-bound-to-another-connection`). A node that serves no read side, and a request it
+  refuses, are each reported as what they are.
 
 ### Changed — identity and invites
 
@@ -103,8 +117,12 @@ rebuilt around that: it shows what the node verified, and nothing else. Design:
 - **A pinned identity is never re-minted.** `node_id` in `.sym/node.json`, or `SYM_NODE_ID`, loads the
   folder's agent with `create: false`; one that is missing or tombstoned leaves the server running
   without a node, saying why on every tool.
-- `sym_status` reports the node's key fingerprint (from the SDK's accessor, where it has one), its
-  Core Secure sessions and any key conflicts. `SYM_LAN=off` runs a relay-only node.
+- `sym_status` reports the node's key fingerprint (from the SDK's accessor), the loaded
+  `@sym-bot/mesh-channel` and `@sym-bot/sym` versions (sym's `node.version`), its Core Secure
+  sessions and any key conflicts. `SYM_LAN=off` runs a relay-only node.
+- The advisory that the sym daemon is in another room is said once per session, in the first tool
+  answer (again only if the rooms change), not on every call and not in the instructions. `sym_status`
+  always says it.
 
 ### Changed — the SDK boundary and the tool queue
 
@@ -119,8 +137,10 @@ rebuilt around that: it shows what the node verified, and nothing else. Design:
 - Deliveries from authors this node never proved, and that no invite or grant vouches, no longer
   arrive (sym D4, MMP §18.3.1). A 0.13 peer is heard only through a Legacy Import route on the sym
   side, and what it delivers is withheld here.
-- Messages and moods are kept in the server's memory, not the SDK's durable inbox; a restart loses
-  those that were not read. A delivery's facts are durable when the SDK puts them on the inbox entry.
+- Messages, moods and Legacy Import listings are kept in the host's own feed, journalled in the node's
+  directory (`channel-feed.log`): their `m` ids survive a restart or a new host and are never reused.
+  CMB deliveries are in sym's durable inbox with their facts.
+- Full key fingerprints are printed as `sha256:<hex>` (sym's form), where 0.10 printed none.
 
 ### Docs
 
@@ -134,8 +154,9 @@ rebuilt around that: it shows what the node verified, and nothing else. Design:
   suite refuses to start under an XMesh mind's or a pinned agent's variables, and its last file checks
   that the real `~/.sym` and `~/.claude` were not touched.
 - New: two servers meeting through a loopback relay by the real Core Secure handshake; interior mode
-  against a real sym 0.14 node and against a stub of the read side; the node host in process and
-  against the SDK shapes this round adds; provenance, key display, the tool queue (behavioural), the
+  against a real sym 0.14 node's interior, read side included; the node host in process against real
+  nodes (provenance across a restart, messages and SVAF-rejected moods with bound keys, the feed's ids
+  across hosts, the key-binding suffix); provenance, key display, the tool queue (behavioural), the
   unread footer (behavioural), the SDK boundary (behavioural); each review repro as a regression.
 - The release gate refuses a `file:` dependency, runs from an allowlisted sandbox environment, seeds
   its outbox case from a child process with that environment, and checks the real `~/.sym` after.
