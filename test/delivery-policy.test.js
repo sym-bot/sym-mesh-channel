@@ -230,7 +230,7 @@ test('r4: peer text never starts a line — the push and the receive line are on
 test('the push carries the facts as structured meta', () => {
   const d = delivery({ facts: facts({ relayed: true, deliverer: { nodeId: C, label: 'carol', key: KC } }) });
   const { meta } = p.pushOf(d, p.judgeDelivery(d, { policy, selfNodeId: SELF }).prepared, ctx());
-  assert.deepStrictEqual(meta, { delivery_id: 'in0001', kind: 'cmb', signer_node_id: A, signer_key_fingerprint: `sha256:${fingerprint(KA)}`, audience: 'directed', relayed_by: C, cmb_key: KEY, assertion_id: 'asrt-1' });
+  assert.deepStrictEqual(meta, { delivery_id: 'in0001', kind: 'cmb', signer_node_id: A, signer_key_fingerprint: `sha256:${fingerprint(KA)}`, audience: 'directed', relayed_by: C, cmb_key: KEY, assertion_id: 'asrt-1', signed: 'yes' });
 });
 
 test('r8: only the signed parts are rendered — the seven CAT7 texts and the signed application data', () => {
@@ -289,6 +289,21 @@ test('r10: a mood (the rejected record\'s) is said as such in the fetch account'
   const head = p.fetchHead(mood, ctx());
   assert.match(head, /Memory: this node's SVAF rejected the record, so it was not stored; only its mood was delivered \(MMP §9\.3\)/);
   assert.ok(!/admitted/.test(head), head);
+});
+
+test('a mood frame is attributed to its session\'s proven peer and said to be unsigned on every surface', () => {
+  const sessionOnly = { signed: false, assertionId: null, key: null, suite: null, room: 'team', audience: 'room', to: null,
+    signer: { nodeId: A, label: 'alice', keySource: 'session', key: KA }, deliverer: { nodeId: A, label: 'alice', key: KA, transport: 'lan' }, parents: [], relayed: false, anchor: false };
+  const mood = delivery({ kind: 'mood', id: 'm002', text: 'relieved', categories: {}, key: null, directed: false, remixed: false, facts: sessionOnly });
+  assert.match(p.receiveLine(mood, ctx()).line, /^\[alice ⟨…[0-9a-f]{8}⟩ mood, unsigned\] "relieved" \[m002\]/);
+  const pushed = p.pushOf(mood, p.prepare({ categories: {} }), ctx());
+  assert.match(pushed.text, /^\[alice ⟨…[0-9a-f]{8}⟩ mood, unsigned\] "relieved" \[m002\]$/);
+  assert.strictEqual(pushed.meta.signed, 'no');
+  assert.strictEqual(pushed.meta.assertion_id, '');
+  const head = p.fetchHead(mood, ctx());
+  assert.match(head, new RegExp(`Sent by: alice — nodeId ${A}; key fingerprint sha256:${fingerprint(KA)}, the key its Core Secure session proved`));
+  assert.match(head, /Unsigned: a mood frame carries no signed record/);
+  assert.ok(!/Signed by|Cite it|assertion/.test(head), head);
 });
 
 test('receive quarantines on the same text the push scans, the payload included', () => {

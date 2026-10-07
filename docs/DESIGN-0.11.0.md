@@ -1,7 +1,7 @@
 # mesh-channel 0.11.0: the channel shows what the node verified, and nothing else
 
 **Date:** 2026-10-02, updated 2026-10-07 · **Author:** agent-a (core libs) · **Status:** v2, built on
-sym 595a651. The independent review of v1's implementation (d972837) was BLOCK, with repros r1-r12
+sym 569cad5. The independent review of v1's implementation (d972837) was BLOCK, with repros r1-r12
 and ten mutation checks. Section 3 is rewritten on the design assumptions the review round decided;
 §4 lists what changed from v1 and which finding each change answers. §6 records where sym differs
 from what this design asked for, and D13 adds the XMesh World requests of 2026-10-07.
@@ -42,7 +42,10 @@ The channel in 0.10 was built for the opposite world:
    line identifies a signer by its key, never by a truncated label or id.
 3. **Peer text is data, never markup.** It never starts a line of the channel's own markup, it is
    bounded and escaped where the channel summarises it, and it is shown whole only inside a fence.
-4. **Only the signed parts are rendered:** the seven CAT7 texts and the signed metadata.
+4. **Only the signed parts are rendered:** the seven CAT7 texts and the signed metadata. One
+   exception, written down on 2026-10-07: a mood frame (MMP §9.3) has no signed part at all. Its text
+   is shown as the word of the session's proven peer and labelled unsigned on every surface, never
+   presented as a signed record (D4).
 5. **The session speaks for itself.** Whether pushes reach the model is stated by the model, with
    evidence only a received push carries.
 6. **Lineage is never dropped.** The channel never advises sending without `parents`.
@@ -55,8 +58,9 @@ The channel in 0.10 was built for the opposite world:
 ### D1. The SDK move
 
 - `@sym-bot/sym` `^0.14.0`, Node.js `>=20`. Until 0.14.0 is on npm the branch depends on a tarball
-  of the sym 0.14 branch at a named commit (now `feat/0.14.0-core-secure` at 595a651, with the
-  delivery ledger and `node.version`, packed from the commit as `0.14.0-dev.595a651` into the
+  of the sym 0.14 branch at a named commit (now `feat/0.14.0-core-secure` at 569cad5, with the
+  delivery ledger, `node.version` and the facts on the `message` and `mood-delivered` events, packed
+  from the commit as `0.14.0-dev.569cad5` into the
   git-ignored `.sdk/`). **The release switches to `^0.14.0` from npm**; the release gate refuses a
   `file:` dependency.
 - Only the public host API. The behavioural boundary test runs the node host against a real SymNode
@@ -90,12 +94,12 @@ only when all of these hold; otherwise it is withheld, named by id with the firs
 5. the facts' delivering session equals `entry.author.via.nodeId` when both are present
    (`facts-mismatch`).
 
-**As built (sym 595a651).** sym puts these fields on every inbox item and persists them with the
+**As built (sym 569cad5).** sym puts these fields on every inbox item and persists them with the
 inbox, together with `record`, the record's signed projection. The channel reads the item, gates it,
 and shows only the projection's parts. The interim build's in-memory join to `verified-record` is
 deleted, so there is one path. After a restart an item decides the same as before it, because its
 facts are persisted with it. A delivery sym raises as an event rather than an inbox item (a message,
-a mood) is decided from the event's names and the node's key bindings (D4).
+a mood) carries the same frozen facts by the same names, and is gated by the same rule (D4).
 
 ### D3. Identity display (review H2)
 
@@ -118,17 +122,26 @@ a mood) is decided from the event's names and the node's key bindings (D4).
 
 ### D4. Deliveries other than CMBs
 
-- **Messages** (`message` event): a directed record of sym's message schema. The event names the
-  record (`assertionId`, `key`), its verified author (`from`) and the delivering peer (`via`), but
-  carries no `verification` or `session` (§6, difference 3). The channel takes the author's key and
-  its source from `node.keyBindings()`. No binding means no facts, and the message is withheld
-  (`no-key-binding`). A delivering peer whose session is Legacy Import is quarantined.
-- **Moods (review M1).** A mood is shown only when `mood-delivered` carries the record and the proven
-  sender: `verified === true`, `key`, `assertionId`, `authorNodeId` and `deliveredBy.nodeId`. The key
-  is the node's binding for `authorNodeId`, as for a message. Anything else, a mood frame included, is
-  withheld by id with the reason (a mood frame carries no signed record). The channel prints no name a frame claims, reads no `context`, rate-limits per proven
-  sender, caps the text, and the fetch account says SVAF rejected the record and only its mood was
-  delivered (§9.3). Valence and arousal are unsigned (spec draft #34) and never shown.
+- **Messages** (`message` event): a directed record of sym's message schema. The event's meta carries
+  `verified`, `profile`, `verification` and `session`, frozen, by the inbox entry's names (sym
+  569cad5), and is gated by D2's rule with `from` as the author and `via` as the delivering session.
+  Nothing is looked up: the key is the one the facts name.
+- **Moods (review M1)** come two ways, and the line says which:
+  - *From a record SVAF rejected* (§9.3): the event carries the record's `key`, `assertionId`,
+    `authorNodeId`, `deliveredBy` and the same frozen facts, gated by D2's rule; the facts' assertion
+    must be the event's. The fetch account says SVAF rejected the record and only its mood was
+    delivered.
+  - *A mood frame* carries no record, so nothing in it is signed. sym gives it `verification: null`
+    and the facts of the Core Secure session it travelled sealed on, which means "this session's
+    proven peer sent it". The channel attributes it to that peer, by the key the session proved, and
+    labels it unsigned on every surface: `[alice ⟨…7f3a91c2⟩ mood, unsigned]`, `signed: "no"` in the
+    push meta, "Unsigned: …" in the fetch account. It has no key to cite.
+  - Anything else (no facts, a sender that is not the session's peer, a Legacy Import session) is
+    withheld by id with the reason.
+  The channel prints no name a frame claims beyond the session's label, reads no `context`,
+  rate-limits per proven sender and caps the text. Valence and arousal are unsigned (spec draft #34)
+  and never shown.
+- `node.keyBindings()` is read only for display: the shortest unique fingerprint suffix (D3).
 - Messages, moods and Legacy Import records are kept in the host's own feed (an `m` id), journalled
   in the node's directory (`channel-feed.log`, 0600). An id is assigned only once its item is
   written, is never reused, and fetches what it announced across a restart or a new host. A read item
@@ -279,11 +292,12 @@ hung call releases only the next call after 60 s, and calls behind it still run 
    - `{type:'recall', query, limit?}` → `{items:[{key, record, verified, storedAt, author}]}`;
    - the capability is bound to the first connection that presents it.
 
-**Status at sym 595a651:** every item above is in sym. The defect reported upstream at 341dafb (a
+**Status at sym 569cad5:** every item above is in sym. The defect reported upstream at 341dafb (a
 pinned key's source became `proven` once a session proved it) is fixed: `pinned` now outranks
 `proven`.
 
-**Where sym differs from this section** (1-8 found at 72daeb6, 9-12 at 914d264 and 595a651) (recorded, not adapted to silently; the channel takes
+**Where sym differs from this section** (1-8 found at 72daeb6, 9-12 at 914d264 and 595a651; 3 and
+4 resolved at 569cad5) (recorded, not adapted to silently; the channel takes
 sym's names, one name and no aliases):
 
 1. **The interior refusal name** is `capability-bound-to-another-connection` (this design said
@@ -293,12 +307,13 @@ sym's names, one name and no aliases):
    audience, not cmb/message/mood: the interior serves inbox items (CMBs) only, never messages or
    moods. `record` is the signed projection. Items carry no `payload` (it is in
    `record.metadata.application`). Since 914d264 they carry the mind's own `acked`.
-3. **The `message` event** carries `{ from, fromName, content, timestamp, key, assertionId, via }`:
-   no `verification` and no `session`. The channel builds the facts from the event's names and
-   `node.keyBindings()`. Asked of sym: the entry's `verification` and `session` on this event too.
-4. **`mood-delivered`** carries the author's nodeId but not the author's key or label. The key and
-   its source come from `node.keyBindings()`, and the label is the deliverer's when author and
-   deliverer are one node. Asked of sym: the same as 3.
+3. **The `message` event** carried no `verification` and no `session` at 72daeb6, so the channel
+   resolved the author's key through `node.keyBindings()`. *Resolved at 569cad5:* the meta carries
+   `verified`, `profile`, `verification` and `session` by the inbox entry's names; the channel
+   decides from them, and the key lookup and its reason (`no-key-binding`) are gone.
+4. **`mood-delivered`** carried the author's nodeId but not the author's key. *Resolved at 569cad5*
+   the same way. A mood frame carries `verification: null` with the session's facts, which the
+   channel shows as the session peer's unsigned mood (D4).
 5. **The fingerprint form.** `node.fingerprint` is `sha256:<hex>`, and the channel printed bare hex
    of the same hash. The channel now prints sym's form wherever it prints a full fingerprint; the
    suffix in a tag is the end of the same hex.
@@ -315,7 +330,7 @@ sym's names, one name and no aliases):
 10. **A first-contact peer's key source is `session`** until an admitted verified record earns it a
    binding (`proven`). `sym_peers` and the fetch account say `session` until then.
 11. **`node.version`** (595a651) is the version of the loaded package. It reads 0.13.17 on the branch
-   until the release bump; the tarball packed here says `0.14.0-dev.595a651`. `sym_status` shows it.
+   until the release bump; the tarball packed here says `0.14.0-dev.569cad5`. `sym_status` shows it.
 12. **The inbox is journalled** (`inbox.log`), with durable de-duplication and ids that are never
    reused. `inbox.json` is still read as the snapshot, so a 0.13 inbox entry is still listed, and
    withheld.
@@ -324,11 +339,12 @@ sym's names, one name and no aliases):
 
 - Every test file runs from a clean, allowlisted environment in a sandbox; the last file checks the
   real home was not touched.
-- **Against the real SDK (595a651), everywhere it can be:**
+- **Against the real SDK (569cad5), everywhere it can be:**
   - two servers through a loopback relay by the real handshake;
   - the node host in process: provenance on the inbox entry, and the same after a restart; a message
     and a mood (from a record a rejecting SVAF evaluator turned away) with their keys from
-    `node.keyBindings()`; mood frames withheld; the feed's ids across hosts; the own key and
+    the facts their events carry; mood frames attributed to the session's peer, unsigned; the feed's
+    ids across hosts; the own key and
     fingerprint (`node.publicKey`, `node.fingerprint`); the tag suffix from `node.keyBindings()`;
   - interior mode against a real node's interior: the mission, the scoped read view, push, fetch,
     citing a delivery, recall, the kind as the intent, the refusals, sym's
@@ -361,17 +377,18 @@ Parked on 2026-10-02 with the move onto sym 72daeb6 half done (WIP 56f992d). It 
 2026-10-07 with the founder's go-ahead and merged with `fix/0.11.0-feed-ids` (9340d31, the journalled
 feed). Every step of the parked list is done:
 
-1. The tests are on the new code: the provenance tests have no join, and test `eventFacts` and
-   `no-key-binding`; the interior tests use sym's names and item shape; full fingerprints are
+1. The tests are on the new code: the provenance tests have no join, and test the event facts and
+   the session-only mood; the interior tests use sym's names and item shape; full fingerprints are
    `sha256:<hex>`.
 2. The fake-node tests in `node-host.test.js` are real-SDK tests (§7). These were the four that failed
    at 56f992d: the restart test, r2, r11 and r3.
 3. Interior mode runs against a real node's interior (§7).
 4. The invite issuer's key is asserted as `pinned`.
 5. §7, the CHANGELOG, SECURITY and the reference name the build and its behaviour.
-6. The ten mutations were re-run, then the full suite under the heavy lock.
+6. The ten mutations were re-run (21 checks in all now), then the full suite under the heavy lock.
+7. On sym 569cad5 (2026-10-07), messages and moods decide from their events' facts; the key lookup
+   is gone, and a mood frame is its session peer's, unsigned.
 
 **Still waiting on others:**
 - spec drafts #34 and #35 to merge;
-- sym 0.14.0 on npm, for the `^0.14.0` switch and the release gate;
-- sym adding `verification` and `session` to `message` and `mood-delivered` (§6, 3 and 4).
+- sym 0.14.0 on npm, for the `^0.14.0` switch and the release gate.

@@ -15,9 +15,9 @@ rebuilt around that: it shows what the node verified, and nothing else. Design:
   and never shown, on every surface: a Legacy Import record, an entry with no Core Secure provenance
   (a 0.13 inbox entry), facts that do not match. The SDK persists the facts with the inbox item, so a
   restart decides the same; the channel keeps no second store of them and joins nothing.
-- **A message or a mood** is decided from what sym's event names (the record, its verified author,
-  the delivering peer) and the key the node binds to that author (`node.keyBindings()`). No binding,
-  or a Legacy Import deliverer, and it is withheld.
+- **A message or a record's mood** is decided by the same rule, from the frozen facts sym's event
+  carries by the inbox entry's names (`verified`, `profile`, `verification`, `session`). Nothing is
+  looked up.
 - **A signer is identified by its key.** A line shows the signer's label and the shortest suffix of
   its key fingerprint that is unique among the keys this node knows (at least 8 hex characters), and
   says "(2 keys)" when two known keys use one label, "(one key, 2 nodeIds)" when one key is bound
@@ -35,9 +35,11 @@ rebuilt around that: it shows what the node verified, and nothing else. Design:
   injection-pattern — …`, `withheld, not verified · no-provenance: …`, `quarantined delivery ·
   classifier-risk (2 flagged terms)`. The operator's `[sym-security]` line on stderr carries the
   category and our own counts, and no excerpt of the peer's text. The content policy is unchanged.
-- **Moods** (MMP §9.3) reach the session only when the SDK ties the mood to its verified record and
-  the proven session that delivered it; any other mood, a mood frame included, is listed by id with
-  the reason. No name a frame claims is printed, and moods are rate-limited per proven sender.
+- **Moods** (MMP §9.3): a mood from a record SVAF rejected is shown with that record's verified facts.
+  A mood frame carries no record, so nothing in it is signed: it is shown as the word of the proven
+  peer of the session it came on, labelled unsigned on every surface (`[alice ⟨…⟩ mood, unsigned]`),
+  with nothing to cite. Any other mood is listed by id with the reason. No other name a frame claims
+  is printed, and moods are rate-limited per proven sender.
 - `sym_recall` shows this node's own records (by its proven nodeId) and peers' records verified when
   admitted, and counts the rest.
 

@@ -9,7 +9,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const crypto = require('node:crypto');
-const { gate, entryFacts, eventFacts, factsFrom, WITHHELD_REASONS } = require('../provenance.js');
+const { gate, entryFacts, gateSessionMood, factsFrom, WITHHELD_REASONS } = require('../provenance.js');
 
 const A = '01a0fd15-52ca-726c-9ce1-5767a1379249';
 const C = '01a0fd15-52ca-7111-8222-0a1b2c3d4e5f';
@@ -73,19 +73,33 @@ test('r11: the admitted copy names its own delivering session; a relayed copy\'s
   assert.deepStrictEqual(gate(fromAlice, entryFacts(viaCarol)), { withheld: 'facts-mismatch' });
 });
 
-test('a message\'s or a mood\'s facts are built from the event and the node\'s key bindings; no binding, no facts', () => {
-  const bindings = new Map([[A, { key: KA, source: 'pinned' }], [C, { key: KC, source: 'session' }]]);
-  const bindingOf = (id) => bindings.get(id) || null;
-  const f = eventFacts({ assertionId: 'asrt-m', key: KEY, authorNodeId: A, authorLabel: 'alice', delivererNodeId: C, delivererLabel: 'carol', transport: 'relay', audience: 'directed', bindingOf });
-  assert.deepStrictEqual(f.signer, { nodeId: A, label: 'alice', keySource: 'pinned', key: KA });
-  assert.deepStrictEqual(f.deliverer, { nodeId: C, label: 'carol', key: KC, transport: 'relay' });
-  assert.strictEqual(f.relayed, true);
-  assert.strictEqual(f.audience, 'directed');
-  assert.strictEqual(f.key, KEY);
-  assert.strictEqual(eventFacts({ assertionId: 'asrt-m', authorNodeId: L, bindingOf }), null, 'an author this node binds no key to');
-  assert.strictEqual(eventFacts({ assertionId: null, authorNodeId: A, bindingOf }), null, 'no assertion: nothing names the record');
-  assert.strictEqual(eventFacts({ assertionId: 'asrt-m', authorNodeId: 'alice', bindingOf }), null, 'a label is not a nodeId');
-  assert.ok(WITHHELD_REASONS['no-key-binding']);
+test('a message or a record\'s mood is gated on the facts its event carries, by the inbox entry\'s names', () => {
+  // sym 569cad5: the event meta carries verified, profile, verification and session.
+  const ev1 = ev({ aid: 'asrt-m', via: C, viaKey: KC });
+  const event = { verified: true, profile: 'core-secure', verification: ev1.verification, session: ev1.session, assertionId: 'asrt-m', key: KEY, author: { nodeId: A, via: { nodeId: C } } };
+  const v = gate(event, entryFacts(event));
+  assert.strictEqual(v.facts.signer.key, KA, 'the key is the one the facts name: nothing is looked up');
+  assert.strictEqual(v.facts.signed, true);
+  assert.strictEqual(v.facts.deliverer.nodeId, C);
+  assert.deepStrictEqual(gate({ ...event, author: { nodeId: A, via: { nodeId: A } } }, entryFacts(event)), { withheld: 'facts-mismatch' }, 'the via the event names is the session that delivered it');
+  assert.deepStrictEqual(gate({ ...event, verification: null, session: null, verified: undefined, profile: undefined }, null), { withheld: 'no-provenance' }, 'an SDK whose event carries no facts');
+  assert.ok(!('no-key-binding' in WITHHELD_REASONS), 'no key lookup, so no reason for a failed one');
+});
+
+test('a mood frame is attributed to the proven peer of the session it came on, unsigned; anything less is withheld', () => {
+  const sess = { nodeId: A, name: 'alice', identityKey: KA, transport: 'relay', profile: 'core-secure', room: 'r' };
+  const frame = { mood: 'relieved', key: null, assertionId: null, authorNodeId: A, deliveredBy: { nodeId: A, name: 'alice' }, verified: false, profile: 'core-secure', verification: null, session: sess };
+  const v = gateSessionMood(frame);
+  assert.strictEqual(v.facts.signed, false);
+  assert.deepStrictEqual(v.facts.signer, { nodeId: A, label: 'alice', keySource: 'session', key: KA });
+  assert.strictEqual(v.facts.assertionId, null);
+  assert.strictEqual(v.facts.deliverer.transport, 'relay');
+  assert.deepStrictEqual(gateSessionMood({ ...frame, session: null }), { withheld: 'mood-unattributed' }, 'no session facts: nothing proves who sent it');
+  assert.deepStrictEqual(gateSessionMood({ ...frame, profile: 'legacy-import', session: { ...sess, profile: 'legacy-import' } }), { withheld: 'legacy-import' });
+  assert.deepStrictEqual(gateSessionMood({ ...frame, verification: {} }), { withheld: 'mood-unattributed' }, 'a record\'s mood is not gated as a frame');
+  assert.deepStrictEqual(gateSessionMood({ ...frame, authorNodeId: C }), { withheld: 'mood-unattributed' }, 'its sender is its session\'s peer');
+  assert.deepStrictEqual(gateSessionMood({ ...frame, deliveredBy: { nodeId: C } }), { withheld: 'mood-unattributed' });
+  assert.deepStrictEqual(gateSessionMood({ ...frame, session: { ...sess, identityKey: null } }), { withheld: 'mood-unattributed' }, 'no proven key, no attribution');
 });
 
 test('there is no join and no second store', () => {

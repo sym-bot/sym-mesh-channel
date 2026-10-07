@@ -31,8 +31,10 @@ to the key its first session proves. Join with an invite from someone you trust 
   Legacy Import record, an entry with no Core Secure provenance, facts that do not match — is listed
   by id and reason and never shown, on every surface. sym persists the facts with the inbox item, and
   the channel keeps no second store of them. A message or a mood, which sym raises as an event, is
-  shown as verified only when the event names its verified author and the node binds a key to that
-  author (`node.keyBindings()`); a mood frame, which carries no signed record, never is.
+  shown as verified only when the frozen facts its event carries (by the inbox entry's names) pass the
+  same rule. A mood frame carries no signed record, so it is never shown as verified: it is shown as
+  the word of the proven peer of the Core Secure session it came on, labelled unsigned, and anything
+  less is withheld.
 - **A signer is identified by its key, never by a truncated label or nodeId.** A label is chosen by
   its sender, and so is a nodeId (a UUID v7 a node picks, not one derived from its key): anyone can
   mint a nodeId whose last characters equal another node's. A line shows the signer's label and the

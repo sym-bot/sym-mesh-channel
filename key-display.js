@@ -130,13 +130,7 @@ function createKeyBook({ bindings = () => [] } = {}) {
     return `${name}${shared > 1 ? ` (${shared} keys)` : ''}${ids > 1 ? ` (one key, ${ids} nodeIds)` : ''} ⟨…${suffixOf(fp, allFingerprints(list))}⟩`;
   }
 
-  /** The SDK's binding for a nodeId, `{ key, source }`, or null. Only the SDK's: never one learned here. */
-  function bindingFor(nodeId) {
-    const id = typeof nodeId === 'string' ? nodeId.toLowerCase() : '';
-    if (!id) return null;
-    const b = sdkBindings().find((x) => x.nodeId.toLowerCase() === id);
-    return b ? { key: b.key, source: typeof b.source === 'string' ? b.source : null } : null;
-  }
+
 
   /** The key bound to a nodeId, from the SDK's bindings or what this book learned; null when unknown. */
   function keyForNode(nodeId) {
@@ -147,7 +141,7 @@ function createKeyBook({ bindings = () => [] } = {}) {
     return null;
   }
 
-  return { learn, tag, suffixOf, fingerprint, allFingerprints, nodeIdsOf, keysWithLabel, keyForNode, bindingFor, size: () => byFp.size };
+  return { learn, tag, suffixOf, fingerprint, allFingerprints, nodeIdsOf, keysWithLabel, keyForNode, size: () => byFp.size };
 }
 
 module.exports = { createKeyBook, fingerprint, fullFingerprint, plainLabel, MIN_SUFFIX };

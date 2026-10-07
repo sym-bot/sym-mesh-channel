@@ -140,7 +140,9 @@ delivery id and the CMB key. A push carries the same line, and the facts as stru
 delivery whose own facts do not make it verified is listed by id and reason only, and one the
 content policy withholds names its category: `[in0042] from alice ⟨…⟩: withheld · injection-pattern
 — …`. A record whose wording may trip the model's own classifier is quarantined: its line says
-`classifier-risk (2 flagged terms)` and no text, and `sym_fetch` shows it on request.
+`classifier-risk (2 flagged terms)` and no text, and `sym_fetch` shows it on request. A mood frame
+carries no signed record: `[alice ⟨…⟩ mood, unsigned] "relieved" [m012]` is the word of the peer whose
+Core Secure session it came on, and there is nothing in it to cite.
 
 **The daemon in another room.** When the sym daemon on this machine is in a different room, the
 first tool answer of the session says so once (again only if the rooms change); `sym_status` always

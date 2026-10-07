@@ -18,12 +18,16 @@
  *   6. the facts' delivering session is entry.author.via.nodeId when both are given
  *                                                              (else 'facts-mismatch')
  *
- * MESSAGES AND MOODS. sym raises these as events, not inbox entries, and the events carry no
- * `verification` or `session` (design §6, mismatches 3 and 4): they name the record (`key`,
- * `assertionId`), its proven author and the delivering peer by nodeId. `eventFacts` builds the same
- * facts from those names and the node's own key bindings (`node.keyBindings()`). With no binding for
- * the author there are no facts, and the delivery is withheld ('no-key-binding'). Nothing is joined
- * or kept here: the interim build's in-memory join to `verified-record` is gone.
+ * MESSAGES AND MOODS. sym raises these as events, not inbox entries, and since 569cad5 each event
+ * carries the same frozen `verified`, `profile`, `verification` and `session` facts as an inbox entry,
+ * by the same names. A message, and a mood from a record that verified, are gated by the rule above,
+ * as an entry is. Nothing is joined or looked up: the key is the one the facts name.
+ *
+ * A MOOD FRAME is not a record: nothing in it is signed. sym gives it `verification: null` and the
+ * facts of the Core Secure session it travelled sealed on, which means "this session's proven peer
+ * sent it". `gateSessionMood` attributes it to that peer, by the key the session proved, and marks
+ * the facts `signed: false`; every surface says it is unsigned. A mood frame without those facts, or
+ * on a Legacy Import session, is withheld.
  */
 
 const { NODE_ID_RE } = require('./identity.js');
@@ -34,8 +38,7 @@ const WITHHELD_REASONS = Object.freeze({
   unverified: 'the node did not mark it verified',
   'no-provenance': 'it carries no Core Secure provenance (received before this node ran Core Secure, or from an SDK that does not record it)',
   'facts-mismatch': 'its verification facts do not match the delivery\'s own author, so this node cannot say who signed it',
-  'no-key-binding': 'the node raised it as verified but holds no key for its author now, so this node cannot say which key signed it',
-  'mood-unattributed': 'it is a mood with no signed record and proven sender behind it (a mood frame, or a mood the SDK did not attribute)',
+  'mood-unattributed': 'it is a mood with neither a signed record nor a proven session behind it, so this node cannot say who sent it',
 });
 
 const text = (v, max = 256) => (typeof v === 'string' ? v.slice(0, max) : null);
@@ -54,6 +57,7 @@ function factsFrom({ verification, session, record, key = null } = {}) {
   if (!signer || !assertionId) return null;
   const deliverer = nodeId(s.nodeId);
   return {
+    signed: true,
     assertionId,
     key: text(md.key, 128) || text(key, 128),
     suite: text(v.suite, 64),
@@ -77,34 +81,6 @@ function entryFacts(entry) {
   return factsFrom({ verification: entry.verification, session: entry.session, record: entry.record || entry.cmb || { metadata: { assertionId: entry.assertionId } }, key: entry.key });
 }
 
-/**
- * The facts of a delivery sym raises as an event (a message, a mood): the record's assertion id and
- * key, its proven author and the peer that delivered it, by nodeId, and the keys this node binds to
- * them. `bindingOf(nodeId)` → `{ key, source }` or null. Null when the author has no binding here.
- */
-function eventFacts({ assertionId, key, authorNodeId, authorLabel, delivererNodeId, delivererLabel, transport, audience, bindingOf }) {
-  const signer = nodeId(authorNodeId);
-  const aid = text(assertionId, 128);
-  if (!signer || !aid || typeof bindingOf !== 'function') return null;
-  const sb = bindingOf(signer);
-  if (!sb || typeof sb.key !== 'string' || !sb.key) return null;
-  const deliverer = nodeId(delivererNodeId);
-  const db = deliverer ? bindingOf(deliverer) : null;
-  return {
-    assertionId: aid,
-    key: text(key, 128),
-    suite: null,
-    room: null,
-    audience: audience === 'directed' ? 'directed' : 'room',
-    to: null,
-    signer: { nodeId: signer, label: text(authorLabel, 256) || '', keySource: text(sb.source, 32), key: text(sb.key, 128) },
-    deliverer: deliverer ? { nodeId: deliverer, label: text(delivererLabel, 256) || '', key: db && typeof db.key === 'string' ? text(db.key, 128) : null, transport: transport === 'relay' ? 'relay' : (transport === 'lan' || transport === 'bonjour' ? 'lan' : null) } : null,
-    parents: [],
-    relayed: !!deliverer && deliverer !== signer,
-    anchor: false,
-  };
-}
-
 /** Steps 1-6 above: `{ facts }`, or `{ withheld: reason }`. */
 function gate(entry, facts) {
   if (!entry || typeof entry !== 'object') return { withheld: 'unverified' };
@@ -120,4 +96,30 @@ function gate(entry, facts) {
   return { facts };
 }
 
-module.exports = { factsFrom, entryFacts, eventFacts, gate, WITHHELD_REASONS };
+/**
+ * A mood frame (no record): `{ facts }` with `signed: false`, attributed to the proven peer of the
+ * session it travelled sealed on, or `{ withheld }`. The event must say it is not a verified record
+ * (`verified: false`, `verification: null`), carry the session's facts on Core Secure, and name that
+ * session's peer as its sender and deliverer.
+ */
+function gateSessionMood(m) {
+  if (!m || typeof m !== 'object') return { withheld: 'mood-unattributed' };
+  const sess = m.session && typeof m.session === 'object' ? m.session : null;
+  if (m.profile === 'legacy-import' || (sess && sess.profile === 'legacy-import')) return { withheld: 'legacy-import' };
+  if (m.verified !== false || m.verification !== null || !sess || m.profile !== 'core-secure' || sess.profile !== 'core-secure') return { withheld: 'mood-unattributed' };
+  const peer = nodeId(sess.nodeId);
+  const key = text(sess.identityKey, 128);
+  const by = m.deliveredBy && typeof m.deliveredBy === 'object' ? nodeId(m.deliveredBy.nodeId) : null;
+  if (!peer || !key || nodeId(m.authorNodeId) !== peer || by !== peer) return { withheld: 'mood-unattributed' };
+  const who = { nodeId: peer, label: text(sess.name, 256) || '', keySource: 'session', key };
+  return {
+    facts: {
+      signed: false, assertionId: null, key: null, suite: null, room: text(sess.room, 256), audience: 'room', to: null,
+      signer: who,
+      deliverer: { nodeId: peer, label: who.label, key, transport: sess.transport === 'relay' ? 'relay' : (sess.transport === 'lan' ? 'lan' : text(sess.transport, 16)) },
+      parents: [], relayed: false, anchor: false,
+    },
+  };
+}
+
+module.exports = { factsFrom, entryFacts, gate, gateSessionMood, WITHHELD_REASONS };

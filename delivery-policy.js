@@ -258,7 +258,8 @@ function deliveryTag(d, ctx) {
   const keys = keyBook(ctx);
   const f = d.facts;
   const who = keys.tag({ key: f.signer.key, label: f.signer.label, nodeId: f.signer.nodeId });
-  if (d.kind === 'mood') return `[${who} mood]`;
+  // A mood frame carries no signed record: it is its session's proven peer's word, and said to be unsigned.
+  if (d.kind === 'mood') return `[${who} mood${f.signed === false ? ', unsigned' : ''}]`;
   const audience = f.audience === 'directed' ? '→you' : '→room';
   const relay = f.relayed && f.deliverer ? ` via ${keys.tag({ key: f.deliverer.key, label: f.deliverer.label, nodeId: f.deliverer.nodeId })}` : '';
   return `[${who} ${audience}${relay}${d.kind === 'message' ? ' message' : ''}]`;
@@ -339,7 +340,8 @@ function pushOf(d, prepared, ctx) {
     audience: f.audience,
     relayed_by: f.relayed && f.deliverer ? f.deliverer.nodeId : '',
     cmb_key: d.key || f.key || '',
-    assertion_id: f.assertionId,
+    assertion_id: f.assertionId || '',
+    signed: f.signed === false ? 'no' : 'yes',
   };
   return { text, meta, risk, lead };
 }
@@ -384,6 +386,13 @@ function fetchHead(d, ctx) {
   const f = d.facts;
   const when = new Date(d.receivedAt || Date.now()).toISOString();
   const lines = [`[${d.id}] ${deliveryTag(d, ctx)} · ${when}`];
+  if (f.signed === false) {
+    // A mood frame (MMP §9.3): no record, nothing signed. Its session proved who sent it.
+    lines.push(`Sent by: ${displayName(f.signer.label)} — nodeId ${f.signer.nodeId}; key fingerprint ${fullFingerprint(f.signer.key) || 'unknown'}, the key its Core Secure session proved. The label and the nodeId are the sender's own choice; the key is what this node verified.`);
+    lines.push(`Unsigned: a mood frame carries no signed record, so nothing in it is a signature. It came sealed on that peer's own session${f.deliverer && f.deliverer.transport ? `, over ${f.deliverer.transport}` : ''}, which is what attributes it.`);
+    lines.push('Memory: a mood frame — delivered, never stored, nothing to cite.');
+    return lines.join('\n');
+  }
   lines.push(`Signed by: ${displayName(f.signer.label)} — nodeId ${f.signer.nodeId}; key fingerprint ${fullFingerprint(f.signer.key) || 'unknown'}; the key is ${KEY_SOURCE_SAID[f.signer.keySource] || (f.signer.keySource ? `bound (${f.signer.keySource})` : 'bound')}. The label and the nodeId are the signer's own choice; the key is what this node verified.`);
   lines.push(f.relayed && f.deliverer
     ? `Delivered: relayed by ${displayName(f.deliverer.label)} — nodeId ${f.deliverer.nodeId}, key fingerprint ${fullFingerprint(f.deliverer.key) || 'unknown'}, over ${f.deliverer.transport || 'a session'}. The record's signature is the author's, over the seven CAT7 texts and the signed metadata shown here.`

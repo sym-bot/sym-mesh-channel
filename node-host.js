@@ -13,9 +13,11 @@
  *   - `cmb-accepted`   → the SDK has put it in its durable inbox with its provenance and stamped
  *                        `inboxId` (its own listener runs first). The inbox item is read and gated;
  *                        its facts are persisted with it, so a restart decides the same.
- *   - `message`        → a directed message record. The event names its author, the delivering peer
- *                        and the record; the keys are the node's own bindings (provenance.eventFacts).
- *   - `mood-delivered` → shown only with the record and the proven sender (design D4), the same way.
+ *   - `message`        → a directed message record. The event carries the entry's frozen facts
+ *                        (`verified`, `profile`, `verification`, `session`) and is gated the same way.
+ *   - `mood-delivered` → from a verified record: gated the same way. A mood frame (no record) is
+ *                        attributed to the proven peer of the session it came on, marked unsigned.
+ * `node.keyBindings()` is read only for display: the shortest unique key suffix (key-display.js).
  *   - `legacy-record`  → a Legacy Import record: listed by id, never shown.
  * Messages, moods and legacy records are kept in this host's own feed (an `m` id), PERSISTED with the
  * node (`channel-feed.log` in its directory; inbox-id bug, 2026-10): an id is assigned only once the
@@ -27,7 +29,7 @@ const EventEmitter = require('events');
 const fs = require('fs');
 const path = require('path');
 const { createOutbox } = require('./outbox.js');
-const { gate, entryFacts, eventFacts } = require('./provenance.js');
+const { gate, entryFacts, gateSessionMood } = require('./provenance.js');
 const { createKeyBook } = require('./key-display.js');
 const { signedParts } = require('./signed-parts.js');
 const cd = require('./channel-delivery.js');
@@ -167,7 +169,9 @@ class NodeHost extends EventEmitter {
     node.on('message', (fromName, text, meta) => {
       try {
         const m = meta || {};
-        const verdict = this._eventVerdict({ assertionId: m.assertionId, key: m.key, authorNodeId: m.from, authorLabel: m.fromName, viaNodeId: m.via, audience: 'directed' }, 'no-provenance');
+        // The event carries the inbox entry's frozen facts by the same names (sym 569cad5): one rule.
+        const entry = { verified: m.verified, profile: m.profile, verification: m.verification, session: m.session, assertionId: m.assertionId, key: m.key, author: { nodeId: m.from, via: { nodeId: m.via } } };
+        const verdict = gate(entry, entryFacts(entry));
         const d = this.feed.add(this._delivery({ kind: 'message', text: typeof text === 'string' ? text : '', categories: {}, payload: null, key: typeof m.key === 'string' ? m.key : null, directed: true, remixed: false }, verdict));
         if (d) this.emit('delivery', d); else this._log('the feed is full of unread items (or not writable): a message was not announced');
       } catch (err) { this._log(`message bookkeeping failed: ${err && err.message}`); }
@@ -208,37 +212,23 @@ class NodeHost extends EventEmitter {
   }
 
   /**
-   * The verdict on a delivery sym raises as an event (a message, a mood), from what the event names:
-   * the record's assertion id and key, its proven author and the peer that delivered it. The keys are
-   * the node's own bindings for those nodeIds (design §6, mismatches 3 and 4); a delivering peer whose
-   * session is Legacy Import is quarantined, as its records are.
-   */
-  _eventVerdict({ assertionId, key, authorNodeId, authorLabel, viaNodeId, viaLabel, audience }, missing) {
-    if (typeof assertionId !== 'string' || !assertionId || typeof authorNodeId !== 'string' || !authorNodeId) return { withheld: missing };
-    let peer = null;
-    try { peer = (this.node.peers() || []).find((p) => p.peerId === viaNodeId) || null; } catch { peer = null; }
-    if (peer && (peer.profile === 'legacy-import' || (Array.isArray(peer.sessions) && peer.sessions.some((x) => x.legacy)))) return { withheld: 'legacy-import' };
-    const transport = peer && Array.isArray(peer.sessions) && peer.sessions[0] ? peer.sessions[0].transport : null;
-    const facts = eventFacts({
-      assertionId, key, authorNodeId, authorLabel, delivererNodeId: viaNodeId, delivererLabel: viaLabel ?? (peer ? peer.name : ''),
-      transport, audience, bindingOf: (id) => this.keys.bindingFor(id),
-    });
-    return facts ? { facts } : { withheld: 'no-key-binding' };
-  }
-
-  /**
-   * A mood is shown only with the record and the proven sender (design D4, review M1): the event names
-   * the record (key, assertion), says it verified, and names the author and the session that
-   * delivered it. The author's label is the deliverer's when they are one node; otherwise the event
-   * carries none, and the line names the author by key.
+   * A mood (design D4, review M1), from the event's own facts (sym 569cad5):
+   *   - from a record that verified: `verification` and `session` as an inbox entry has them, gated by
+   *     the same rule, and the record's key and assertion must be the ones the facts name;
+   *   - a mood frame: no record, so `verification: null` and the facts of the session it travelled
+   *     sealed on. It is attributed to that session's proven peer and marked unsigned.
+   * Anything else is withheld by id with the reason.
    */
   _moodVerdict(m) {
+    if (!(m.verification && typeof m.verification === 'object')) return gateSessionMood(m);
     const by = m.deliveredBy && typeof m.deliveredBy === 'object' ? m.deliveredBy : null;
     if (m.verified !== true || typeof m.key !== 'string' || typeof m.assertionId !== 'string' || typeof m.authorNodeId !== 'string' || !by || typeof by.nodeId !== 'string') {
       return { withheld: 'mood-unattributed' };
     }
-    const same = m.authorNodeId.toLowerCase() === by.nodeId.toLowerCase();
-    return this._eventVerdict({ assertionId: m.assertionId, key: m.key, authorNodeId: m.authorNodeId, authorLabel: same ? by.name : '', viaNodeId: by.nodeId, viaLabel: by.name, audience: 'room' }, 'mood-unattributed');
+    const entry = { verified: m.verified, profile: m.profile, verification: m.verification, session: m.session, assertionId: m.assertionId, key: m.key, author: { nodeId: m.authorNodeId, via: { nodeId: by.nodeId } } };
+    const v = gate(entry, entryFacts(entry));
+    if (v.facts && v.facts.assertionId !== m.assertionId) return { withheld: 'facts-mismatch' };
+    return v;
   }
 
   // ── The delivery feed ──────────────────────────────────────
@@ -312,13 +302,13 @@ class NodeHost extends EventEmitter {
     } catch { return false; }
   }
 
-  /** The CMB key of a VERIFIED delivery, for `parents`. */
+  /** The CMB key of a VERIFIED delivery, for `parents` (an unsigned mood frame has none). */
   keyOf(id) {
     const d = this.get(id);
     return d && d.facts ? (d.key || d.facts.key || null) : null;
   }
 
-  /** The verified signer of a delivery, for `to`. */
+  /** The proven sender of a delivery, for `to`: its verified signer, or an unsigned mood frame's session peer. */
   signerOf(id) {
     const d = this.get(id);
     return d && d.facts ? d.facts.signer.nodeId : null;

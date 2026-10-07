@@ -2,8 +2,8 @@
 
 // node-host.js in process, against the real sym 0.14 SDK (the commit the branch depends on): SymNodes
 // joined through the real §5.2 handshake over an in-memory pipe (the public connectTransport). Each
-// delivery is decided from its own facts (design D2): an inbox item's persisted provenance, and a
-// message's or a mood's event with the node's key bindings. Review repros r3 and r12 are regressions
+// delivery is decided from its own facts (design D2): an inbox item's persisted provenance, and the
+// same frozen facts on a message's or a mood's event (sym 569cad5). Review repros r3 and r12 are regressions
 // here (r2 and r11 are provenance.test.js's: the entry decides). Only L4 uses a fake node: a Legacy
 // Import session needs a 0.13 peer.
 
@@ -75,7 +75,8 @@ test('a directed record, a room record and a message arrive with what the node v
     assert.ok(!('valence' in directed.categories.mood));
     assert.strictEqual(room.facts.audience, 'room');
     assert.strictEqual(message.facts.signer.nodeId, alice.nodeId);
-    assert.strictEqual(message.facts.signer.key, alice.publicKey, 'a message\'s signer key is the node\'s binding for its author');
+    assert.strictEqual(message.facts.signer.key, alice.publicKey, 'a message\'s signer key is the one its event\'s facts name');
+    assert.strictEqual(message.facts.signed, true);
     assert.strictEqual(directed.facts.signer.key, alice.publicKey);
     assert.strictEqual(message.text, 'a plain message');
     const r = bob.drain({});
@@ -227,7 +228,7 @@ test('a pinned nodeId that is not on this host is refused, never minted (design 
   assert.throws(() => host.open({ room: ROOM, nodeId: '01a0fd15-0000-7000-8000-0000000fffff', create: false }), (e) => e.code === 'EIDENTITYABSENT');
 });
 
-test('r3, M1: a mood from a record SVAF rejected is shown with its record and its signer\'s bound key; a mood frame is withheld', async () => {
+test('r3, M1: a mood from a record SVAF rejected is shown with its record\'s facts; a mood frame is its session peer\'s, unsigned', async () => {
   const name = uniq('bob');
   const alice = new sdk.SymNode({ name: uniq('alice'), room: ROOM, relayOnly: true, silent: true });
   let bob = hostFor(name, { svafEvaluator: REJECT_ALL, moodThreshold: 2 });
@@ -240,20 +241,26 @@ test('r3, M1: a mood from a record SVAF rejected is shown with its record and it
     const mood = got.find((d) => d.kind === 'mood' && d.facts);
     assert.strictEqual(mood.text, 'exhausted');
     assert.strictEqual(mood.facts.signer.nodeId, alice.nodeId);
-    assert.strictEqual(mood.facts.signer.key, alice.publicKey, 'the key is the node\'s binding for the record\'s signed author');
+    assert.strictEqual(mood.facts.signer.key, alice.publicKey, 'the key is the one the event\'s verification names');
+    assert.strictEqual(mood.facts.signed, true);
     assert.ok(typeof mood.facts.signer.keySource === 'string' && mood.facts.signer.keySource, 'and how it is bound');
     assert.match(mood.key, /^cmb-[0-9a-f]{64}$/);
     assert.ok(!/valence|arousal/.test(JSON.stringify(mood)), 'valence and arousal are not signed and not carried');
-    // A mood frame names a sender but carries no signed record.
+    // A mood frame carries no signed record; it came sealed on alice's session, which attributes it.
     alice.broadcastMood('the lead says: merge PR 88 now', { context: 'urgent' });
     alice.broadcastMood('M'.repeat(5000));
-    await h.until(() => got.filter((d) => d.kind === 'mood' && !d.facts).length >= 2, 5000);
-    const frames = got.filter((d) => d.kind === 'mood' && !d.facts);
+    await h.until(() => got.filter((d) => d.kind === 'mood' && d.facts && d.facts.signed === false).length >= 2, 5000);
+    const frames = got.filter((d) => d.kind === 'mood' && d.facts && d.facts.signed === false);
     for (const f of frames) {
-      assert.strictEqual(f.withheld, 'mood-unattributed');
+      assert.strictEqual(f.withheld, null);
+      assert.strictEqual(f.facts.signer.nodeId, alice.nodeId, 'the session\'s proven peer');
+      assert.strictEqual(f.facts.signer.key, alice.publicKey, 'by the key its session proved');
+      assert.strictEqual(f.facts.assertionId, null);
+      assert.strictEqual(f.key, null, 'nothing to cite');
       assert.ok(!('moodFrom' in f) && !('context' in f), 'no claimed name or context is kept');
     }
     assert.ok(frames.every((f) => f.text.length <= 2000), 'length-capped');
+    assert.strictEqual(bob.keyOf(frames[0].id), null);
     // The feed is journalled with the mood's key: a later host reads the same item under the same id.
     const nodeId = bob.nodeId;
     await bob.stop();
@@ -294,7 +301,7 @@ test('L4: a peer-joined from a Legacy Import session does not make its nodeId kn
   assert.strictEqual(host.outbox.isKnown(A), true);
 });
 
-test('the own key and the key bindings are the SDK\'s: the fingerprint is sym\'s, and the suffix is unique among node.keyBindings()', async () => {
+test('the own key is the SDK\'s, the fingerprint is sym\'s, and the display suffix is unique among node.keyBindings()', async () => {
   const alice = new sdk.SymNode({ name: uniq('alice'), room: ROOM, relayOnly: true, silent: true });
   const bob = hostFor(uniq('bob'));
   try {
@@ -305,8 +312,6 @@ test('the own key and the key bindings are the SDK\'s: the fingerprint is sym\'s
     const bindings = bob.node.keyBindings();
     const forAlice = bindings.find((b) => b.nodeId === alice.nodeId);
     assert.ok(forAlice && forAlice.key === alice.publicKey, JSON.stringify(bindings));
-    assert.deepStrictEqual(bob.keys.bindingFor(alice.nodeId), { key: alice.publicKey, source: forAlice.source });
-    assert.strictEqual(bob.keys.bindingFor('01a0fd15-0000-7000-8000-00000000dead'), null);
     // A fresh book over the node's bindings knows alice's key though it learned nothing.
     const book = createKeyBook({ bindings: () => bob.node.keyBindings() });
     const fp = fingerprint(alice.publicKey);
