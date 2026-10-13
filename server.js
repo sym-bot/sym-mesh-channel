@@ -163,7 +163,7 @@ let { url: RELAY_URL, token: RELAY_TOKEN, source: RELAY_SOURCE } = resolveRelay(
 
 const HOSTED_RELAY_URL = process.env.SYM_HOSTED_RELAY_URL || 'wss://sym-relay.onrender.com';
 const HOSTED_RELAY_MIN_TOKEN = 32;
-// SYM_LAN=off: a relay-only node (no Bonjour, no loopback discovery).
+// SYM_LAN=off: a relay-only node (no mDNS, no loopback discovery).
 const LAN_OFF = /^(off|0|false|no)$/i.test(String(process.env.SYM_LAN || '').trim());
 // What the SDK advertises a node on, whatever its room (MMP 2.0 update 1, §5.1): the room is in the TXT.
 const LAN_SERVICE = '_sym._tcp';
@@ -567,7 +567,7 @@ function toolList() {
         },
       },
     },
-    { name: 'sym_rooms_discover', description: 'SYM rooms advertising on the local network now (Bonjour / mDNS). Observation only.', inputSchema: { type: 'object', properties: {} } },
+    { name: 'sym_rooms_discover', description: 'The rooms other SYM nodes are advertising on the local network now (mDNS: _sym._tcp with TXT room), with how many nodes each has. Observation only; nothing a peer chose is shown but a room name.', inputSchema: { type: 'object', properties: {} } },
   );
   return tools;
 }

@@ -384,3 +384,13 @@ test('an id taken by an item the feed evicted is never given again, however many
     assert.strictEqual(next.id, 'm004', 'the ids of evicted items are not reused');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('deliveries that got no inbox id are the node\'s count to give (sym 0.14 inboxStatus().dropped), and a node that cannot say counts none', () => {
+  const { host, node } = fakeHost();
+  node.inboxStatus = () => ({ seq: 0, cursor: 0, undrained: 0, dropped: 3 });
+  assert.strictEqual(host.inboxDropped(), 3);
+  node.inboxStatus = () => ({ seq: 0, cursor: 0, undrained: 0 });
+  assert.strictEqual(host.inboxDropped(), 0);
+  node.inboxStatus = () => { throw new Error('closed'); };
+  assert.strictEqual(host.inboxDropped(), 0);
+});
