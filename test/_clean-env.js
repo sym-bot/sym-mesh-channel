@@ -46,7 +46,7 @@ function realHome() {
 }
 
 /** Node names and rooms this suite uses: what a leak into the real home would be called. */
-const TEST_NAME_RE = /^(alice|bob|carol|issuer|invitee|sender|receiver|upgraded|pinned-real|pinned-ghost|unpinned|outbox-e2e|fetch-surface-test|relay-surface-test|packgate-probe|cog|probe-[ab]|smoke-a|ghost)(-[0-9a-z]+)*$/;
+const TEST_NAME_RE = /^(alice|bob|carol|issuer|invitee|sender|receiver|upgraded|pinned-real|pinned-ghost|unpinned|outbox-e2e|fetch-surface-test|relay-surface-test|packgate-probe|cog|probe-[ab]|smoke-a|ghost|rooms-surface|badroom|anchor-holder|moody-sender|lan|peek)(-[0-9a-z]+)*$/;
 
 /**
  * What this run left in the real home since `since` (ms): node directories or name-index entries under
@@ -64,7 +64,7 @@ function realHomeTraces(since) {
     const name = decodeURIComponent(f.replace(/\.json$/, ''));
     if (TEST_NAME_RE.test(name) && newer(path.join(sym, 'nodes', 'by-name', f))) traces.push(`~/.sym/nodes/by-name/${f}`);
   }
-  for (const f of list(path.join(sym, 'relays'))) if (/(e2e|relay-surface|withheld|packgate|outbox|upgraded|cog|smoke)/.test(f) && newer(path.join(sym, 'relays', f))) traces.push(`~/.sym/relays/${f}`);
+  for (const f of list(path.join(sym, 'relays'))) if (/(e2e|relay-surface|withheld|packgate|outbox|upgraded|cog|smoke|redelivery)/.test(f) && newer(path.join(sym, 'relays', f))) traces.push(`~/.sym/relays/${f}`);
   try {
     const cj = fs.readFileSync(path.join(home, '.claude.json'), 'utf8');
     if (/mesh-channel-(run|test)-[A-Za-z0-9]{6}/.test(cj)) traces.push('~/.claude.json mentions a test sandbox');

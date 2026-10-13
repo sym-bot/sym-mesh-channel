@@ -19,8 +19,10 @@ const { spawnSync } = require('child_process');
 // commit that removes one, so the removal is on the record. 0.11.0: 27 (removed channel-reliability,
 // restart-survival and receive-withheld-surface, whose cases moved to node-host, core-secure-e2e and
 // withheld-surface; review round 2 removed delivery-facts with its module and added provenance,
-// key-display, tool-queue, sandbox, release-gate and zz-real-home-untouched).
-const MIN_FILES = 27;
+// key-display, tool-queue, sandbox, release-gate and zz-real-home-untouched). The move onto the published
+// sym 0.14.0 added relay-store, room-discovery, rooms-surface, redelivery-e2e and lan-discovery (which is
+// opt-in and skips itself): 32.
+const MIN_FILES = 32;
 
 // EVERY FILE RUNS SANDBOXED. HOME, USERPROFILE and SYM_STATE_DIR point into a temp dir made for that
 // file, so no test can write an identity, a key or a store into the real ~/.sym, or read the real
