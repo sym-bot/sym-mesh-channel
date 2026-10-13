@@ -6,9 +6,17 @@ signal reaches Claude's conversation context.
 
 ## Layer 1: Transport and peer identity (MMP v2.0 Core Secure, sym 0.14)
 
-- **A peer is a proven session.** Peers meet over loopback, Bonjour on the LAN, or a relay, and a
+- **A peer is a proven session.** Peers meet over loopback, mDNS on the LAN, or a relay, and a
   peer exists only after the §5.2 handshake has proven its nodeId and identity key on that session.
-  Nothing per-peer exists before that proof, and a failed handshake keeps no state.
+  Nothing per-peer exists before that proof, and a failed handshake keeps no state. On the LAN a node
+  advertises on `_sym._tcp` with its room in the TXT `room` key and `mmp=2.0`, and dials only an
+  advertisement whose TXT room is its own and whose `mmp` list contains 2.0 (MMP 2.0 update 1, §5.1).
+  An advertisement is a claim by whoever sent it: it decides who is dialled, never who is admitted,
+  and a room name is not a trust boundary.
+- **0.13 and older peers cannot form sessions with this node** on the LAN or over a relay (sym 0.14
+  speaks only Core Secure; a 0.13.17 node advertises no `mmp`, and the Core Secure handshake with it
+  over a relay never completes). They are reached only through a Legacy Import route configured on
+  the sym side, and what such a route delivers is withheld here as unverified.
 - **Every record is signed and verified.** A record is a signed `mmp-sig-v2.0` record; the
   receiving node resolves the author's key by its signed `createdByNodeId` and verifies the
   signature, the application bytes, the assertion identity and the audience (§8.8.5) before the
@@ -22,6 +30,15 @@ signal reaches Claude's conversation context.
 
 **Trust on first proven use.** With no invite, anchor or grant, a peer you have never met is bound
 to the key its first session proves. Join with an invite from someone you trust to remove that risk.
+
+**Authority is sym's, and this channel decides nothing from it.** sym 0.14 implements MMP §6.6: roles
+(admin, validator, issuer) are a function of hash-linked signed statements rooted at an anchor pinned out
+of band. This server passes no pin of its own; sym reads `SYM_FOUNDER_ANCHOR` from this server's
+environment, and a pin that does not parse stops the node (the server then starts without one and says
+why on every tool). `.sym/node.json` cannot set a pin: a file in a repository would choose its own root
+of trust. With no pin nothing is in force and every peer resolves as a participant; role grants signed by
+sym 0.13 confer nothing until they are re-issued under §6.6. `sym_status` prints what the store says
+(pinned or not, statements in force, this node's roles); the channel's allowlist is nodeIds, not roles.
 
 **What the channel adds (design D2, D3, D8).**
 
@@ -46,6 +63,15 @@ to the key its first session proves. Join with an invite from someone you trust 
   for its session only until a verified record from it is admitted, and the fetch account says so.
 - Names are labels. `to`, the allowlist, the own-record check and the outbox key on nodeIds; the
   push rate counts per proven sender.
+- **A room is an MMP §5.8 identifier, refused rather than repaired.** A room configured in
+  `SYM_ROOM` or `.sym/node.json` that is not one (1 to 64 characters from `a-z0-9._-`, and not the
+  reserved `sym`) stops the node from being built: nothing falls back to `default`, which is the global
+  mesh, and no identity is minted. The message names the source and never repeats the value, which may
+  come from a file in a repository. `sym_rooms_discover` prints a room only if it is one, counts the
+  rest, and prints no node name, key or other TXT of an advertisement.
+- **A mood frame is the session peer's word** (sym 0.14.0): `{type, mood, context, timestamp}` with the
+  mood at most 1,024 characters and no sender in it. The label is the name the session proved, never one
+  the frame carries, and the frame's `context` is never read.
 
 **Known limits (sym design §5).** `relay-auth` is not yet proven, so whoever holds a relay token can
 evict a node from that relay (it then re-handshakes, and the evicting party gets no session). There

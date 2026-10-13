@@ -2,10 +2,19 @@
 
 ## 0.11.0
 
-Requires `@sym-bot/sym` `^0.14.0`, MMP v2.0 Core Secure, and Node.js 20 or later. A peer is now a
-proven session, and every record is signed and verified before the channel sees it. The channel is
-rebuilt around that: it shows what the node verified, and nothing else. Design:
-[docs/DESIGN-0.11.0.md](docs/DESIGN-0.11.0.md). This release supersedes the unreleased 0.10.2 branch.
+Requires `@sym-bot/sym` `^0.14.0` (published 2026-10-13, npm tag `next`), MMP v2.0 Core Secure, and
+Node.js 20 or later. A peer is now a proven session, and every record is signed and verified before
+the channel sees it. The channel is rebuilt around that: it shows what the node verified, and nothing
+else. Design: [docs/DESIGN-0.11.0.md](docs/DESIGN-0.11.0.md). This release supersedes the unreleased
+0.10.2 branch.
+
+**Breaking: it cannot mesh with 0.13.17 or older peers on a LAN, nor with a 0.10 channel.** sym 0.14
+speaks only Core Secure. A 0.13.17 node advertises no `mmp`, so a 0.14 node never dials it as Core
+Secure; over a relay the Core Secure handshake with it never completes. A 0.13 node is heard only
+through a Legacy Import route configured on the sym side, and what it delivers is withheld here as
+unverified. Upgrade every node of a room together. Also breaking: a room must be an MMP §5.8
+identifier (below), and role grants signed by sym 0.13 confer nothing under sym's MMP §6.6 authority
+until they are re-issued.
 
 ### Changed — every delivery says who signed it, by key
 
@@ -47,10 +56,70 @@ rebuilt around that: it shows what the node verified, and nothing else. Design:
 
 - `sym_send` and `sym_publish` take `parents`: CMB keys, or delivery ids that the server resolves to
   their keys. MMP §14.3: a response to mesh signals carries its lineage. The instructions say so.
-- On an SDK before spec draft #35, which gates a record citing a peer's (MMP §15.7), a refused reply
-  says so and how to send it with the same parents. The channel never advises dropping them.
-- A held reply the SDK refuses at flush is reported in `sym_peers` as STUCK, with the reason, not as
-  waiting; it is tried again after the agent publishes an observation of its own.
+- sym 0.14.0 never gates a record on the parents it cites: MMP §15.7 belongs to `remix()`, which is
+  now asynchronous and §15.8-tethered and which this channel does not call. A cited reply is the agent's
+  own record through `remember()`, so the pre-0.14 paths that answered a gated reply (the `remix-refused`
+  outcome, the `canRemix` check at hold time) are gone, and the channel never advises dropping parents.
+- A held reply the SDK refuses at flush (it throws: a category over its 256 KiB bound, a key that
+  cannot sign) is reported in `sym_peers` as STUCK, with sym's own reason, not as waiting; it is tried
+  again after the agent publishes.
+
+### Changed — rooms are MMP §5.8 identifiers, and discovery is `_sym._tcp` with TXT room
+
+- **A room is a name, not a service type.** sym 0.14 (MMP 2.0 update 1, §5.1) advertises every node on
+  `_sym._tcp` with its room in the TXT `room` key and `mmp=2.0`, and a node dials only an advertisement
+  whose TXT room is its own and whose `mmp` list contains 2.0. The channel no longer passes
+  `discoveryServiceType` (a per-room type would make it invisible to every 0.14 node), builds no
+  `_<room>._tcp`, and prints no service type: `sym_status`, `sym_room_info`, `sym_join_room` and
+  `sym_invite_info` say the room and, where useful, the `_sym._tcp` + TXT advertisement.
+- **A room is 1 to 64 characters from `a-z0-9._-`** (`acme.prod` is a room; so is
+  `x-review--team-02779b950c3d8d7378fd11d6`), `default`, and never `sym`. The channel asks the SDK
+  (`rooms.isValidRoom`) and keeps no grammar of its own. Two copies of the old kebab-case grammar are
+  gone: `relay-store.js` (a dotted room's relay credential was never remembered, and `sym_join_room`
+  said the relays directory was not writable) and `bin/install.js` (which refused `--room acme.prod`;
+  it keeps a last-resort mirror, pinned to the SDK by a test on a table of names).
+- **A configured room that is not a room stops the node from being built**, with the cause on every
+  tool: sym 0.14 throws `EBADROOM` for it, building a node mints an identity, and falling back to
+  `default` would put the agent in the global mesh. The value is not repeated (it may come from a file in
+  a repository). A free-form name used before 0.11 is a different room from any identifier you map it to,
+  because the room is signed into every record: choose the identifier once and keep it.
+- **`sym_rooms_discover` browses `_sym._tcp`** (pure-JS mDNS, as the SDK does; no `dns-sd` or `avahi-browse`)
+  and groups what it hears by TXT room, counting distinct nodes. It prints a room only if it is a room,
+  counts the rest, prints no node name or key, bounds its answer, and says which nodes list no `mmp`
+  2.0. A relay-only node (`SYM_LAN=off`) browses nothing and says so.
+- `SYM_SERVICE_TYPE` is read only as a room name, and only when neither `SYM_ROOM` nor `.sym/node.json`
+  names one; an advisory says so. The `_symrooms._tcp` beacon that `sym rooms` lists is kept, now with the
+  mDNS error handler the sym daemon's own beacon lacked.
+
+### Changed — against sym 0.14.0 as published
+
+- **A mood frame is `{type, mood ≤ 1024, context ≤ 4096 | null, timestamp}` with no sender.** The label is
+  the name the session proved; the frame's `context` is never read. A mood over its bound is refused by
+  the sender's node (`EMOODFRAME`), so the channel's own cap only bounds moods that arrive as a record's
+  mood text.
+- **`remember()` returning null is a store that could not write**, not "already in memory" (0.13 returned
+  null for a duplicate; 0.14 returns `{ key, duplicate: true }`). The answer is "Not sent: this node's
+  store could not write the record", and nothing is held.
+- **`sym_status` shows sym's authority store** (MMP §6.6): whether an anchor is pinned, the statements in
+  force, this node's roles. The pin is `SYM_FOUNDER_ANCHOR` in the server's environment; `.sym/node.json`
+  cannot set one, and a pin that does not parse stops the node, with the cause on every tool. The channel
+  decides nothing from roles. It also shows deliveries that got no inbox id because the inbox held too
+  many unread ones (`inboxStatus().dropped`).
+- The words for a key's source follow 0.14 (`pinned`: an accepted invite, a Legacy Import route or an
+  operator's resolution; `anchor`: the configured pin; `grant`: a grant in force under the anchor).
+
+### Fixed — a delivery is surfaced once, and inbox ids are never reused (sym 0.14.0)
+
+The field report: after a restart or a room move, records already received came back as new deliveries
+under new ids, and an id announced to the agent could later be given to another record. sym 0.14.0
+fixes both (a delivery ledger written before a delivery is announced; an inbox journalled before an id
+is announced, with ids never reused), and a channel test now shows it end to end:
+`test/redelivery-e2e.test.js`. Two spawned servers, a sender restarted again and again so its anchor
+replay reaches the receiver each time (the relay tap counts the sealed frames), then the receiver
+restarted and moved to another room and back (`sym_join_room`): nothing is surfaced again, every id
+still fetches what it announced, and the next delivery takes the next id. A second case leaves only the
+ledger (the receiver's stored records removed): the ledger alone keeps the record from coming back, and
+with the ledger removed too the same case fails with the field bug.
 
 ### Changed — names are labels, never routes
 
@@ -134,6 +203,12 @@ rebuilt around that: it shows what the node verified, and nothing else. Design:
 
 ### Upgrade notes
 
+- **Upgrade every node of a room together.** A 0.11 channel cannot mesh with a 0.10 channel or a sym
+  0.13.17 node on a LAN or a relay (see the top of this entry).
+- **Check your room name.** `SYM_ROOM` and `.sym/node.json` `room` must be an MMP §5.8 identifier;
+  `sym-mesh-channel init --room` accepts the same. A name that is not one stops the node and says why.
+- Role grants signed by sym 0.13 confer nothing until re-issued under §6.6 (sym's
+  `docs/AUTHORITY-OPERATOR.md`); a pin is set with `SYM_FOUNDER_ANCHOR`.
 - Set `SYM_ALLOWED_PEERS` to nodeIds; a list of names now allows nothing.
 - Address `to` by nodeId (from `sym_peers`) or by a delivery id.
 - Deliveries from authors this node never proved, and that no invite or grant vouches, no longer
@@ -161,7 +236,25 @@ rebuilt around that: it shows what the node verified, and nothing else. Design:
   across hosts, the key-binding suffix); provenance, key display, the tool queue (behavioural), the
   unread footer (behavioural), the SDK boundary (behavioural); each review repro as a regression.
 - The release gate refuses a `file:` dependency, runs from an allowlisted sandbox environment, seeds
-  its outbox case from a child process with that environment, and checks the real `~/.sym` after.
+  its outbox case from a child process with that environment, and checks the real `~/.sym` after. The
+  package now depends on the published `@sym-bot/sym` `^0.14.0`, with a lockfile that resolves it from
+  the registry; the vendored development snapshot (`.sdk/`) is gone, and a test pins all of this.
+- Ported to the shapes of the published 0.14.0: the mood frame (a mood over its bound is refused by
+  the sender), a cited held reply (held, flushed with its lineage; what the SDK refuses at flush is
+  stuck), the outcome of `remember()`, rooms and invites without service types.
+- **Mutation checks are in the repository** (`npm run mutation`, `test/mutation-checks.mjs`): 31 edits,
+  each breaking one production decision on a copy of the tree, each required to fail a named test file
+  (the earlier 21 were run by hand and their list was not kept). The first full run found a survivor, the
+  host feed's floor for ids taken by evicted items, which now has a test.
+- **The release gate can run to completion**, which it could not while the dependency was a `file:` path.
+  It then found its own bug: it looked for `package.json.js` in the installed package for
+  `require('./package.json')` and failed a correct tarball. Fixed, with a test.
+- New: `relay-store` (credentials for every §5.8 room, no path escape), `room-discovery` (TXT parsing,
+  grouping, hostile advertisements, bounds, the browser and the beacon as stand-ins), `rooms-surface`
+  (bad rooms, bad pins, the pin line, `SYM_SERVICE_TYPE`, join and invite on §5.8 rooms),
+  `redelivery-e2e` (above), a mood frame end to end through a spawned server, and `lan-discovery`
+  (opt in with `MESH_CHANNEL_LAN_PROOF=1`: it advertises a made-up room on the real LAN; three servers,
+  two in one room meet by `_sym._tcp` + TXT room and exchange records, the third is not dialled).
 
 ## 0.10.1
 

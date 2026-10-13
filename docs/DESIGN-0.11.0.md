@@ -1,10 +1,12 @@
 # mesh-channel 0.11.0: the channel shows what the node verified, and nothing else
 
-**Date:** 2026-10-02, updated 2026-10-07 · **Author:** agent-a (core libs) · **Status:** v2, built on
-sym 569cad5. The independent review of v1's implementation (d972837) was BLOCK, with repros r1-r12
+**Date:** 2026-10-02, updated 2026-10-13 · **Author:** agent-a (core libs) · **Status:** v2, built on
+the published `@sym-bot/sym` 0.14.0 (it was built on development snapshots, the last 569cad5, until
+2026-10-13). The independent review of v1's implementation (d972837) was BLOCK, with repros r1-r12
 and ten mutation checks. Section 3 is rewritten on the design assumptions the review round decided;
 §4 lists what changed from v1 and which finding each change answers. §6 records where sym differs
-from what this design asked for, and D13 adds the XMesh World requests of 2026-10-07.
+from what this design asked for, D13 adds the XMesh World requests of 2026-10-07, and D14 what moving
+from the snapshot onto 0.14.0 as published changed.
 **Target:** `@sym-bot/mesh-channel` 0.11.0 on `@sym-bot/sym` 0.14.0 Core Secure.
 **Builds on:**
 - the sym design `docs/DESIGN-core-secure-identity.md` (D1, D3, D5, D8, D9.3);
@@ -57,12 +59,12 @@ The channel in 0.10 was built for the opposite world:
 
 ### D1. The SDK move
 
-- `@sym-bot/sym` `^0.14.0`, Node.js `>=20`. Until 0.14.0 is on npm the branch depends on a tarball
-  of the sym 0.14 branch at a named commit (now `feat/0.14.0-core-secure` at 569cad5, with the
-  delivery ledger, `node.version` and the facts on the `message` and `mood-delivered` events, packed
-  from the commit as `0.14.0-dev.569cad5` into the
-  git-ignored `.sdk/`). **The release switches to `^0.14.0` from npm**; the release gate refuses a
-  `file:` dependency.
+- `@sym-bot/sym` `^0.14.0` from npm, Node.js `>=20`. sym 0.14.0 was published on 2026-10-13 (npm tag
+  `next`; `latest` stays 0.13.17; the range resolves because the version exists). Until then the branch
+  depended on a tarball of the sym 0.14 branch at a named commit (last 569cad5) in a git-ignored
+  `.sdk/`; that directory, its ignore line and every reference are gone, and the lockfile resolves from
+  the registry. The release gate refuses a `file:` dependency, and a test pins the dependency, the
+  lockfile and the absence of `.sdk/`.
 - Only the public host API. The behavioural boundary test runs the node host against a real SymNode
   wrapped so that any channel read of an underscore member fails the test.
 
@@ -94,7 +96,7 @@ only when all of these hold; otherwise it is withheld, named by id with the firs
 5. the facts' delivering session equals `entry.author.via.nodeId` when both are present
    (`facts-mismatch`).
 
-**As built (sym 569cad5).** sym puts these fields on every inbox item and persists them with the
+**As built (sym 0.14.0).** sym puts these fields on every inbox item and persists them with the
 inbox, together with `record`, the record's signed projection. The channel reads the item, gates it,
 and shows only the projection's parts. The interim build's in-memory join to `verified-record` is
 deleted, so there is one path. After a restart an item decides the same as before it, because its
@@ -124,16 +126,18 @@ a mood) carries the same frozen facts by the same names, and is gated by the sam
 
 - **Messages** (`message` event): a directed record of sym's message schema. The event's meta carries
   `verified`, `profile`, `verification` and `session`, frozen, by the inbox entry's names (sym
-  569cad5), and is gated by D2's rule with `from` as the author and `via` as the delivering session.
+  0.14.0), and is gated by D2's rule with `from` as the author and `via` as the delivering session.
   Nothing is looked up: the key is the one the facts name.
 - **Moods (review M1)** come two ways, and the line says which:
   - *From a record SVAF rejected* (§9.3): the event carries the record's `key`, `assertionId`,
     `authorNodeId`, `deliveredBy` and the same frozen facts, gated by D2's rule; the facts' assertion
     must be the event's. The fetch account says SVAF rejected the record and only its mood was
     delivered.
-  - *A mood frame* carries no record, so nothing in it is signed. sym gives it `verification: null`
-    and the facts of the Core Secure session it travelled sealed on, which means "this session's
-    proven peer sent it". The channel attributes it to that peer, by the key the session proved, and
+  - *A mood frame* carries no record, so nothing in it is signed. Since sym 0.14.0 the frame is
+    `{type, mood ≤ 1024, context ≤ 4096 | null, timestamp}` and names no sender (a frame carrying `from`
+    or `fromName` is refused); the receiver labels it with the session's proven name. sym gives it
+    `verification: null` and the facts of the Core Secure session it travelled sealed on, which means
+    "this session's proven peer sent it". The channel attributes it to that peer, by the key the session proved, and
     labels it unsigned on every surface: `[alice ⟨…7f3a91c2⟩ mood, unsigned]`, `signed: "no"` in the
     push meta, "Unsigned: …" in the fetch account. It has no key to cite.
   - Anything else (no facts, a sender that is not the session's peer, a Legacy Import session) is
@@ -239,6 +243,24 @@ hung call releases only the next call after 60 s, and calls behind it still run 
   carries the category and our own counts (`flagged=2`, `bytes=…`) and no excerpt, because a host
   may show that log to a model. The content policy itself is unchanged.
 
+### D14. Moving from the snapshot onto sym 0.14.0 as published (2026-10-13)
+
+sym 0.14.0 changed a good deal after 569cad5: it aligned with MMP 2.0 update 1 (the drafts the earlier
+rounds waited on, #34 and #35 among them, are folded into it) and dropped a pile of 0.13 behaviour. What
+touches a channel, and what the channel does about each:
+
+| sym 0.14.0 | The channel |
+|---|---|
+| The sealed mood frame is `{type, mood ≤ 1024, context ≤ 4096 \| null, timestamp}` with no `from` or `fromName`; a frame carrying them is refused; the receiver labels it with the session's proven peer and name | Unchanged in kind: the label was always the session's. A mood over its bound is refused by the *sender's* node (`EMOODFRAME`), so the node-host test no longer sends one; the channel's 2,000-character cap now only bounds moods that arrive as a record's mood text. The frame's `context` is never read. |
+| `cmb-fetch` names one `key` and has no `from`; `cmb-fetch-result` has no `timestamp`; `fetchCMB()` returns a verified record or only its categories with `verified: false` | The channel never calls `fetchCMB()` and sends no `cmb-fetch`: `sym_fetch` reads the node's own inbox by delivery id. Nothing to port. |
+| A room is an MMP §5.8 identifier (`[a-z0-9._-]`, 1 to 64); `SymNode` throws `EBADROOM` otherwise; `sym` is refused | The channel asks the SDK and keeps no grammar of its own. Two copies of the kebab-case one are gone (`relay-store.js`, `bin/install.js`). A configured room that is not a room stops the node before it is built (building mints an identity; a fallback to `default` is the global mesh), with the cause on every tool and the value not repeated. |
+| Discovery: every node advertises on `_sym._tcp` with TXT `room` and `mmp=2.0`, and dials only advertisements whose TXT room is its own and whose `mmp` lists 2.0; `_<room>._tcp` is the legacy mapping | The channel built a per-room service type in three places. `buildNode` no longer passes `discoveryServiceType` (a per-room type would make the node invisible to every 0.14 node); `sym_rooms_discover` browses `_sym._tcp` and groups by TXT room instead of scanning service types with `dns-sd` or `avahi-browse`; the status, room-info, join and invite answers carry no service type. The `_symrooms._tcp` beacon that `sym rooms` lists is kept. `SYM_SERVICE_TYPE` is read only as a room name, and said. |
+| `remix()` is asynchronous and §15.8-tethered; `remember(fields, parents)` is never gated (MMP §15.7 is `remix()`'s) | No caller exists in the channel. The pre-0.14 gating paths (`remixGated`, the `canRemix` check at hold time, the `remix-refused` outcome) were dead against 0.14 and are deleted. `remember()` returning null now means the store could not write (0.13 returned null for a duplicate; 0.14 returns `{ key, duplicate: true }`), and the answer is "Not sent: … could not write", not "already in memory". |
+| A delivery ledger (`cmbs/.delivered-marks`, written before a delivery is announced) and a journalled inbox: an id is assigned only once durable and never reused; nothing is surfaced twice | Nothing to build; shown end to end by `test/redelivery-e2e.test.js` (§7). The inbox's new `dropped` count (a delivery got no id because the inbox was full of unread ones) is shown by `sym_status`. |
+| `message` and `mood-delivered` carry `verified`, `profile`, `verification` and `session`; `node.version` exists | Already the channel's basis (D2, D4, D13). |
+| Authority is the §6.6 store: an anchor pin (the node's `anchor` option or `SYM_FOUNDER_ANCHOR`), `node.authorityStatus()`; 0.13 role grants confer nothing until re-issued; a pin that does not parse stops the node | The channel passes no pin and decides nothing from roles. The pin is the operator's, in this server's environment; `.sym/node.json` cannot set one, since a file in a repository would choose its own root of trust. `sym_status` prints what the store says. A pin that does not parse stops the node, with the cause on every tool. |
+| 0.13.17 peers cannot form Core Secure sessions on the LAN (Legacy Import routes only) | Documented as the breaking change it is (CHANGELOG, README, SECURITY): upgrade every node of a room together. |
+
 ## 4. What v2 changes, by finding
 
 | Finding | Change |
@@ -292,12 +314,12 @@ hung call releases only the next call after 60 s, and calls behind it still run 
    - `{type:'recall', query, limit?}` → `{items:[{key, record, verified, storedAt, author}]}`;
    - the capability is bound to the first connection that presents it.
 
-**Status at sym 569cad5:** every item above is in sym. The defect reported upstream at 341dafb (a
+**Status at sym 0.14.0:** every item above is in sym. The defect reported upstream at 341dafb (a
 pinned key's source became `proven` once a session proved it) is fixed: `pinned` now outranks
-`proven`.
+`proven`. Item 7 holds as written, with one change to `remix()`: it is asynchronous and §15.8-tethered.
 
 **Where sym differs from this section** (1-8 found at 72daeb6, 9-12 at 914d264 and 595a651; 3 and
-4 resolved at 569cad5) (recorded, not adapted to silently; the channel takes
+4 resolved at 569cad5; all of it as published in 0.14.0) (recorded, not adapted to silently; the channel takes
 sym's names, one name and no aliases):
 
 1. **The interior refusal name** is `capability-bound-to-another-connection` (this design said
@@ -329,8 +351,8 @@ sym's names, one name and no aliases):
    `not-in-view`. The channel says each in plain words (D9).
 10. **A first-contact peer's key source is `session`** until an admitted verified record earns it a
    binding (`proven`). `sym_peers` and the fetch account say `session` until then.
-11. **`node.version`** (595a651) is the version of the loaded package. It reads 0.13.17 on the branch
-   until the release bump; the tarball packed here says `0.14.0-dev.569cad5`. `sym_status` shows it.
+11. **`node.version`** is the `version` of the package loaded with the node (also `status().version` and
+   `require('@sym-bot/sym').version`): `0.14.0` with the published package. `sym_status` shows it.
 12. **The inbox is journalled** (`inbox.log`), with durable de-duplication and ids that are never
    reused. `inbox.json` is still read as the snapshot, so a 0.13 inbox entry is still listed, and
    withheld.
@@ -339,7 +361,7 @@ sym's names, one name and no aliases):
 
 - Every test file runs from a clean, allowlisted environment in a sandbox; the last file checks the
   real home was not touched.
-- **Against the real SDK (569cad5), everywhere it can be:**
+- **Against the real SDK (`@sym-bot/sym` 0.14.0 from npm), everywhere it can be:**
   - two servers through a loopback relay by the real handshake;
   - the node host in process: provenance on the inbox entry, and the same after a restart; a message
     and a mood (from a record a rejecting SVAF evaluator turned away) with their keys from
@@ -353,17 +375,56 @@ sym's names, one name and no aliases):
 - **Two small stand-ins remain, where no real path exists:** a fake node for L4, since a Legacy
   Import session needs a 0.13 peer, and a raised `legacy-record` event in sym's shape on a real node;
   and a stub interior that serves no read side, so "unsupported" is told from "refused".
+- **Added with the move onto the published 0.14.0:**
+  - `redelivery-e2e`: two spawned servers over a loopback relay; the sender is restarted, then the
+    receiver, then the receiver is moved to another room and back (`sym_join_room`), each followed by a
+    restart of the sender so its anchor replay reaches the new session (the relay's tap counts the
+    sealed record frames). Nothing is surfaced again, every id fetches what it announced, and the next
+    delivery takes the next id. A second case removes the receiver's stored records and leaves only
+    sym's ledger; with the ledger removed too it fails with the field bug (the record comes back as a
+    new id);
+  - a mood frame end to end through a spawned server, from a real `SymNode` peer;
+  - `rooms-surface`: bad rooms and bad pins stop the node (and mint nothing), §5.8 rooms start it,
+    `SYM_SERVICE_TYPE`, join and invite on dotted rooms, the pin line, `sym_rooms_discover` on a
+    relay-only node;
+  - `room-discovery` and `relay-store`: no network, hostile advertisements, bounds, §5.8 credentials;
+  - `lan-discovery` (opt in, `MESH_CHANNEL_LAN_PROOF=1`, since it advertises a made-up room on the real
+    LAN): three servers, the pair in one room meet by `_sym._tcp` + TXT room (the loopback registration
+    and an mDNS browse show `serviceType: _sym._tcp`, `room`, `mmp: 2.0`) and exchange records both
+    ways; the third, in another room, is not dialled.
 - **Each review repro r1-r12 is a regression test.** r2 and r11 are now provenance tests, because
-  the entry decides. The ten mutation checks are re-run against the new code locations.
+  the entry decides. The mutation checks are in `test/mutation-checks.mjs` (§7a).
+
+### 7a. Mutation checks
+
+`npm run mutation` (`test/mutation-checks.mjs`, a heavy job: it runs the test files it names, each twice,
+and the full run takes about three minutes) breaks one production decision at a time on a throw-away copy
+of the tree and requires the named test file to fail; a check whose target has moved fails loudly, and a
+test file that fails unmutated invalidates its checks. There are 31: the review's findings (H1, H2, r2-r12
+and the like, M01 to M15), the host and outbox (M16, M17, M20, M21, M30), and what the move onto 0.14.0
+added (M18, M19, M22 to M29, M31). The 21 checks the earlier rounds spoke of were run by hand and their
+list was not kept; these were rebuilt from the review's findings, and the first full run found one
+survivor, M20 (the host feed's floor for ids taken by evicted items), which had no test and now has one.
 
 ## 8. Release
 
 - Order (sym D6): sym 0.14.0 and sym-relay 0.6.0, then this release on `^0.14.0` from npm, then XMesh.
-- Before publishing: `^0.14.0`, a fresh lockfile, the release gate, and the full suite against the
-  published SDK, with every §6 item present.
+- Done on the branch: `^0.14.0` from npm with a lockfile that resolves from the registry, and the full
+  suite and the release gate (`npm run verify:packed`: pack, install into an empty directory, speak MCP
+  to the installed copy) against the published SDK, with every §6 item present.
+- Left to the release: the version bump (`package.json` stays 0.10.1 until `npm run release` bumps it
+  together with `.mcp.json`'s launch pin and the plugin manifest), the tag, the publish.
+- Not tested here: the hosted relay. The relay path runs against a fake relay (relay-auth, relay-peers,
+  envelope routing and fan-out), because the live relay is not for tests; sym-relay 0.6.0 is the relay
+  build that matches sym 0.14.
 
 ## 9. Known limits
 
+- A TXT room is a claim by whoever advertises it: it decides who a node dials, never who is admitted,
+  and a room name is not a trust boundary.
+- A LAN advertisement and a 0.13 node: a 0.13.17 node advertises no `mmp`, so it is never dialled, and
+  over a relay the Core Secure handshake with it never completes. It is reached only through a Legacy
+  Import route on the sym side.
 - First contact with no invite, anchor or grant is trust on first proven use.
 - `relay-auth` is unproven, so a relay token holder can evict a node (4004).
 - Whether a push reaches the model is the model's own statement.
@@ -371,11 +432,11 @@ sym's names, one name and no aliases):
   sym's inbox.
 - An interior mind sees no messages or moods: the interior serves inbox items only.
 
-## Parked 2026-10-02, resumed 2026-10-07
+## Parked 2026-10-02, resumed 2026-10-07, finished 2026-10-13
 
 Parked on 2026-10-02 with the move onto sym 72daeb6 half done (WIP 56f992d). It was resumed on
 2026-10-07 with the founder's go-ahead and merged with `fix/0.11.0-feed-ids` (9340d31, the journalled
-feed). Every step of the parked list is done:
+feed). Every step of the parked list was done on 2026-10-07:
 
 1. The tests are on the new code: the provenance tests have no join, and test the event facts and
    the session-only mood; the interior tests use sym's names and item shape; full fingerprints are
@@ -385,10 +446,15 @@ feed). Every step of the parked list is done:
 3. Interior mode runs against a real node's interior (§7).
 4. The invite issuer's key is asserted as `pinned`.
 5. §7, the CHANGELOG, SECURITY and the reference name the build and its behaviour.
-6. The ten mutations were re-run (21 checks in all now), then the full suite under the heavy lock.
+6. The mutations were re-run, then the full suite under the heavy lock.
 7. On sym 569cad5 (2026-10-07), messages and moods decide from their events' facts; the key lookup
    is gone, and a mood frame is its session peer's, unsigned.
 
-**Still waiting on others:**
-- spec drafts #34 and #35 to merge;
-- sym 0.14.0 on npm, for the `^0.14.0` switch and the release gate.
+**The state on 2026-10-13** (what the 2026-10-07 list was waiting on):
+- Spec drafts #34 and #35 merged, folded into MMP 2.0 update 1 (meshcognition-website PR #43, merged at
+  c07ff20).
+- sym 0.14.0 is on npm (tag `next`; `latest` stays 0.13.17). The branch depends on `^0.14.0` from the
+  registry; the `.sdk/` snapshot is gone; the suite, the mutation checks, `npm pack --dry-run` and the
+  release gate run against the published package (D14 and §7 say what that changed).
+- Still open, and not this branch's to close: the release itself (bump, tag, publish; sym-relay 0.6.0
+  first, per sym D6), and a test against the hosted relay.

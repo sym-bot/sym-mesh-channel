@@ -57,7 +57,7 @@ The launcher downloads the current channel, configures the MCP server, and start
 - The name and room are kept in the folder's `.sym/node.json`, so the agent keeps them across sessions.
 - The Claude plugin is turned off for that folder in `.claude/settings.local.json`, so the session runs exactly one mesh node, the one launched with the channels flag.
 
-Sessions in the same room find each other over loopback on one machine, Bonjour on a LAN, or an optional relay across networks. To give a folder a different name, pass `--name <node-name>`. Two sessions open at once in folders with the same name share it; the second one says so in every mesh tool and tells you to pass `--name`.
+Sessions in the same room find each other over loopback on one machine, mDNS on a LAN (each node advertises on `_sym._tcp` with its room in the TXT `room` key, and dials only advertisements of its own room), or an optional relay across networks. To give a folder a different name, pass `--name <node-name>`. Two sessions open at once in folders with the same name share it; the second one says so in every mesh tool and tells you to pass `--name`.
 
 Then tell one agent:
 
@@ -92,7 +92,13 @@ You can also tell a running Claude Code or Codex agent:
 
 > Join sym room **your-room**
 
-The agent invokes `sym_join_room` itself. Check the active room and peer roster with `sym_room_info`.
+The agent invokes `sym_join_room` itself. Check the active room and peer roster with `sym_room_info`, and see which rooms other nodes are advertising on the LAN with `sym_rooms_discover`.
+
+A room name is 1 to 64 characters from `a-z`, `0-9`, `.`, `_` and `-`, all lowercase (MMP §5.8): `your-room`, `acme.prod`. Anything else is refused, not repaired, and a room configured in `SYM_ROOM` or `.sym/node.json` that is not one stops the node from starting (it never falls back to `default`, the global mesh) and says so in every tool.
+
+## Requirements and what it cannot mesh with
+
+`@sym-bot/mesh-channel` 0.11 needs `@sym-bot/sym` `^0.14.0` and Node.js 20 or later. sym 0.14 speaks only MMP v2.0 Core Secure, so **a 0.11 channel cannot mesh with 0.10 channels, or any node on sym 0.13 or older, on a LAN or over a relay**: such a node lists no `mmp` 2.0 in its LAN advertisement, so it is never dialled, and a relay handshake with it never completes. Upgrade every node of a room together. A 0.13 node is heard only through a Legacy Import route configured on the sym side, and what it delivers is withheld here as unverified. Role grants signed by sym 0.13 confer nothing under 0.14's authority rules (MMP §6.6) until re-issued; the channel itself decides nothing from roles.
 
 ## Multi-vendor operation
 
@@ -157,7 +163,12 @@ Here is what the channel does today and where it stops.
 
 - **Proven peers:** a peer exists only after the MMP v2.0 Core Secure handshake has proven its
   nodeId and key on that session (sym 0.14). Every record is signed, and the receiving node
-  verifies it against the author's key before the channel sees it.
+  verifies it against the author's key before the channel sees it. A LAN advertisement, with its
+  room, decides who is dialled, never who is admitted; a room name is not a trust boundary.
+- **Delivered once:** a record the node has surfaced is not surfaced again, by a restart, a reconnect
+  or a room move, and an inbox id (`[in0042]`) is assigned only once its delivery is durable and is
+  never reused. That is sym 0.14's delivery ledger and journalled inbox; a channel test shows it end to
+  end.
 - **Verified or not shown:** a delivery is shown only when its own facts say the node verified it,
   and its line names the signer by label and key fingerprint (a label and a nodeId are both chosen by
   their owner; the key is what the node proved), whether it was addressed to this agent or to the
