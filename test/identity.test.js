@@ -1,90 +1,54 @@
 #!/usr/bin/env node
 'use strict';
 
-// Regression tests for node-identity resolution (identity.js). The bug: the plugin's old
-// resolveNodeName used a bare process.kill(pid,0) liveness check that misread a recycled PID as a
-// live holder, so a dead session's stale lock triggered a -2/-3 suffix — forking a fresh identity
-// and store off a still-valid node. The fix removes all plugin-side pid/lock inspection and
-// delegates collision handling to the engine. These tests pin that: a pinned name is used verbatim
-// (never suffixed, regardless of any lockfile), and the pid check is gone from this layer.
+// identity.js — the folder's agent identity (design D10). The name is an index; a nodeId pins the
+// agent and loads it without minting. Never -2, never -3: sym 0.14 has no suffixing at all, and this
+// layer inspects no lock and no pid. Lines print the LAST 8 of a nodeId: the first 8 of a UUID v7
+// are its timestamp, shared by nodes minted within about a minute of each other.
 
-const assert = require('assert');
-const { resolveIdentity } = require('../identity.js');
+const { test } = require('node:test');
+const assert = require('node:assert');
+const { resolveIdentity, nodeNameProblem, isNodeId, shortId } = require('../identity.js');
 
-let passed = 0, failed = 0;
-function test(name, fn) {
-  try { fn(); passed++; console.log(`  ✓ ${name}`); }
-  catch (e) { failed++; console.log(`  ✗ ${name}\n    ${e.message}`); }
-}
+const ID = '01a0fd15-52ca-726c-9ce1-5767a1379249';
 
-test('a pinned name (SYM_NODE_NAME / .sym/node.json) is used verbatim — never suffixed', () => {
-  const r = resolveIdentity({ pinnedName: 'claude-sym-research@hongwei-mac', defaultName: 'x' });
-  assert.equal(r.name, 'claude-sym-research@hongwei-mac');
-  assert.equal(r.pinned, true);
-  assert.equal(r.autoSuffix, false, 'pinned identity must not auto-suffix — engine hard-fails on a real live collision');
-  assert.ok(!/-\d+$/.test(r.name), 'no -N session suffix');
+test('a pinned name is used verbatim and trimmed; an unpinned session takes the default', () => {
+  assert.deepStrictEqual(resolveIdentity({ pinnedName: '  cto  ', defaultName: 'claude-x' }), { name: 'cto', nodeId: null, pinned: true });
+  assert.deepStrictEqual(resolveIdentity({ pinnedName: '   ', defaultName: 'claude-x' }), { name: 'claude-x', nodeId: null, pinned: false });
+  assert.deepStrictEqual(resolveIdentity({ defaultName: 'claude-x' }), { name: 'claude-x', nodeId: null, pinned: false });
 });
 
-test('pinned resolution does not depend on any lockfile / pid state', () => {
-  // The whole class of bug was a stale-but-reused PID lock forcing a suffix. This layer performs no
-  // fs/pid inspection at all, so the returned name is byte-identical to the input no matter what
-  // locks exist on disk — that is the regression guarantee.
-  const name = 'claude-sym-cto@hongwei-mac';
-  for (let i = 0; i < 5; i++) {
-    assert.equal(resolveIdentity({ pinnedName: name, defaultName: 'd' }).name, name);
-  }
-  assert.equal(resolveIdentity.length <= 1, true, 'pure single-arg resolver — no pid/lock parameters');
+test('a nodeId pins the agent; anything that is not a nodeId pins nothing', () => {
+  assert.strictEqual(resolveIdentity({ pinnedNodeId: ID.toUpperCase(), defaultName: 'x' }).nodeId, ID);
+  assert.strictEqual(resolveIdentity({ pinnedNodeId: 'alice', defaultName: 'x' }).nodeId, null);
+  assert.strictEqual(resolveIdentity({ pinnedNodeId: `${ID}x`, defaultName: 'x' }).nodeId, null);
 });
 
-// INVERTED 2026-08-10, founder ruling "never -2, never -3". This test used to
-// assert autoSuffix ON for unpinned sessions and is kept, reversed, rather than
-// deleted: a suffix is not a milder outcome than an error, it is a SEPARATE
-// STORE WITH A SEPARATE SIGNING KEY wearing the same name in conversation.
-test('an unpinned session takes the default name and STILL never auto-suffixes', () => {
-  const r = resolveIdentity({ pinnedName: undefined, defaultName: 'claude-xmesh-a1b2c3' });
-  assert.equal(r.name, 'claude-xmesh-a1b2c3');
-  assert.equal(r.pinned, false);
-  assert.equal(r.autoSuffix, false, 'NEVER -2/-3: a collision is a hard failure, not a new identity');
-});
-
-test('blank / whitespace pinned names are treated as unpinned — and still never suffix', () => {
-  for (const blank of ['', '   ', null, undefined]) {
-    const r = resolveIdentity({ pinnedName: blank, defaultName: 'def' });
-    assert.equal(r.name, 'def', `blank ${JSON.stringify(blank)} should fall through to default`);
-    assert.equal(r.pinned, false);
-    assert.equal(r.autoSuffix, false);
+test('no input shape produces a suffixed or second identity', () => {
+  for (const pinnedName of [undefined, null, '', 'a', 'a-2']) {
+    const r = resolveIdentity({ pinnedName, defaultName: 'base' });
+    assert.ok(!('autoSuffix' in r), 'there is no suffix setting to turn on');
+    assert.ok(r.name === (pinnedName && pinnedName.trim() ? pinnedName.trim() : 'base'));
   }
 });
 
-test('NO input shape can produce autoSuffix — the -2/-3 path does not exist', () => {
-  const inputs = [
-    { pinnedName: 'a', defaultName: 'b' },
-    { pinnedName: undefined, defaultName: 'b' },
-    { pinnedName: '', defaultName: 'b' },
-    { pinnedName: '  ', defaultName: 'b' },
-    { pinnedName: null, defaultName: 'b' },
-  ];
-  for (const i of inputs) {
-    assert.equal(resolveIdentity(i).autoSuffix, false, `autoSuffix must be false for ${JSON.stringify(i)}`);
-  }
+test('isNodeId and shortId: the tail is printed, because the head is a timestamp', () => {
+  assert.ok(isNodeId(ID));
+  assert.ok(!isNodeId('claude-agent-a'));
+  assert.strictEqual(shortId(ID), 'a1379249');
+  const sameMinute = '01a0fd15-52ca-77cd-bc1c-8eef67a748e6';
+  assert.strictEqual(ID.slice(0, 8), sameMinute.slice(0, 8), 'two nodes minted within a minute share their first 8');
+  assert.notStrictEqual(shortId(ID), shortId(sameMinute));
 });
 
 test('nodeNameProblem: the §3.1.2 bounds plus file-name safety, shared by installer and server', () => {
-  const { nodeNameProblem } = require('../identity.js');
-  for (const ok of ['claude-sym-agent-a', 'codex-mac', 'claude-sym-research@hongwei-mac', 'ü-node']) {
-    assert.strictEqual(nodeNameProblem(ok), null, ok);
-  }
-  for (const bad of ['', '   ', ' lead', 'trail ', '../evil', 'a/b', 'a\\b', '.', '..', 'a:b', 'a*b', 'a?b', 'a"b', 'a<b', 'a>b', 'a|b',
-                     'x'.repeat(65), 'zero\u200bwidth', 'bidi\u202eflip', 'ctl\u0007',
-                     'con', 'NUL', 'com1', 'lpt9.txt', 'trailing.']) {
-    assert.ok(nodeNameProblem(bad), `should refuse ${JSON.stringify(bad)}`);
-  }
+  assert.strictEqual(nodeNameProblem('claude-agent-a'), null);
+  assert.match(nodeNameProblem(''), /1–64 bytes/);
+  assert.match(nodeNameProblem('x'.repeat(65)), /1–64 bytes/);
+  assert.match(nodeNameProblem(' a'), /whitespace/);
+  assert.match(nodeNameProblem('a\u200bb'), /zero-width/);
+  assert.match(nodeNameProblem('../x'), /path separators/);
+  assert.match(nodeNameProblem('a:b'), /not valid in a file name/);
+  assert.match(nodeNameProblem('CON'), /Windows reserves/);
+  assert.match(nodeNameProblem('a.'), /end with a dot/);
 });
-
-test('pinned names are trimmed but otherwise untouched', () => {
-  const r = resolveIdentity({ pinnedName: '  melotune-dev  ', defaultName: 'd' });
-  assert.equal(r.name, 'melotune-dev');
-});
-
-console.log(`\nidentity: ${passed} passed, ${failed} failed`);
-process.exit(failed > 0 ? 1 : 0);

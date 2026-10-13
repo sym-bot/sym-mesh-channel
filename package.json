@@ -1,6 +1,6 @@
 {
   "name": "@sym-bot/mesh-channel",
-  "version": "0.10.1",
+  "version": "0.11.0",
   "description": "MCP server — real-time agent-to-agent cognition for Claude Code sessions on one machine, a LAN, or across networks via the SYM mesh.",
   "main": "server.js",
   "bin": {
@@ -10,6 +10,7 @@
     "test": "node test/run.js",
     "release": "node scripts/release.mjs",
     "verify:packed": "node scripts/verify-packed-artifact.mjs",
+    "mutation": "node test/mutation-checks.mjs",
     "prepublishOnly": "npm run verify:packed"
   },
   "files": [
@@ -18,6 +19,15 @@
     "classifier-risk.js",
     "delivery-policy.js",
     "identity.js",
+    "room-names.js",
+    "room-discovery.js",
+    "push-statement.js",
+    "interior-host.js",
+    "node-host.js",
+    "tool-queue.js",
+    "key-display.js",
+    "provenance.js",
+    "signed-parts.js",
     "outbox.js",
     "relay-store.js",
     "surface-truth.js",
@@ -32,11 +42,11 @@
   ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
-    "@sym-bot/sym": "^0.13.13",
+    "@sym-bot/sym": "^0.14.0",
     "bonjour-service": "^1.3.0"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "keywords": [
     "claude-code",

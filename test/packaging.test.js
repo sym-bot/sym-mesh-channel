@@ -31,6 +31,7 @@ test('every local module required by server.js is in the files whitelist', () =>
   const required = localRequiresOf('server.js');
   assert.ok(required.length > 0, 'expected server.js to require at least one local module');
   for (const r of required) {
+    if (r === 'package.json') continue;   // npm always ships package.json
     const withExt = r.endsWith('.js') ? r : `${r}.js`;
     const covered = pkg.files.some(f => f === withExt || f === r || (f.endsWith('/') && withExt.startsWith(f)));
     assert.ok(
@@ -50,7 +51,7 @@ test('every file in the whitelist actually exists', () => {
 
 test('transitively: local modules required BY those modules also ship', () => {
   const seen = new Set(['server.js']);
-  const queue = localRequiresOf('server.js').map(r => (r.endsWith('.js') ? r : `${r}.js`));
+  const queue = localRequiresOf('server.js').filter((r) => r !== 'package.json').map(r => (r.endsWith('.js') ? r : `${r}.js`));
   while (queue.length) {
     const f = queue.shift();
     if (seen.has(f) || !fs.existsSync(path.join(root, f))) continue;

@@ -1,6 +1,6 @@
 # sym-mesh-channel
 
-> **0.10.0 说明：** 本中文文档较英文版 [README.md](README.md) 更旧；如有出入，以英文版为准。0.10.0 起，`npx -y @sym-bot/mesh-channel@latest start --room <房间>` 会让每个文件夹成为一个智能体：节点以文件夹命名（如 `claude-agent-1`，可用 `--name` 指定），名称与房间保存在该文件夹的 `.sym/node.json` 中，并在该文件夹的 `.claude/settings.local.json` 中关闭 Claude 插件，使每个会话只运行一个网格节点。在连接阶段，对等身份目前尚未经过证明：MMP 2.0 Core Secure 握手已在引擎中实现但尚未启用，详见 [SECURITY.md](SECURITY.md)。
+> **0.11.0 说明：** 本中文文档较英文版 [README.md](README.md) 更旧；如有出入，以英文版为准。0.11.0 基于 sym 0.14 Core Secure：对等节点只有在 MMP v2.0 握手证明其 nodeId 与密钥之后才存在，每条记录都经签名验证。只有投递自身的事实表明节点已验证时才会显示；每条投递以名称加密钥指纹后缀标明签名者（名称与 nodeId 都由其所有者自选，节点证明的是密钥），并注明是定向还是发往房间、是否经中继转发；其余投递只列出编号与原因，从不显示内容。对端文本只以带引号、已转义的摘要出现，完整的已签名文本只由 sym_fetch 在围栏内给出。名称只是标签：`sym_send` 的 `to` 取 nodeId 或投递编号，`SYM_ALLOWED_PEERS` 列出 nodeId（只含名称的列表不放行任何人）。回复时请在 `parents` 中引用所回复的投递（MMP §14.3）。详见 [SECURITY.md](SECURITY.md) 与 [docs/DESIGN-0.11.0.md](docs/DESIGN-0.11.0.md)。每个文件夹仍是一个智能体：`npx -y @sym-bot/mesh-channel@latest start --room <房间>`，节点以文件夹命名，名称与房间保存在该文件夹的 `.sym/node.json` 中。 0.11.0 需要 `@sym-bot/sym` `^0.14.0`：它只使用 Core Secure，无法在局域网或中继上与 0.13 及更早版本的节点（含 0.10 的通道）建立会话，请同时升级同一房间的所有节点。房间名遵循 MMP §5.8（1 到 64 个字符，`a-z0-9._-`）。
 
 ### Claude Code 会话间的实时通信与协同 —— 同一台机器上的多个会话，或同一 Wi-Fi 下（或通过中继）跨机器的多个会话，彼此自动发现并实时协同思考，对等信号无需轮询即可在对话过程中即时送达。首个非 Anthropic 官方 Channels 实现，基于网格记忆协议（MMP）构建。
 
@@ -31,12 +31,12 @@
 > 无人工路由，无窗口间复制粘贴。**两个智能体跨设备、实时、自主完成了一次完整的发现 - 评审 - 发布闭环** —— 这正是产品的核心价值。
 
 ✅ 已验证场景：
-- Mac ↔ Windows 同 Wi-Fi 环境，纯 Bonjour 发现，无需中继、无需令牌
+- Mac ↔ Windows 同 Wi-Fi 环境，纯 mDNS 发现，无需中继、无需令牌
 - 跨网络环境：支持可选 WebSocket 中继
 
 > ⚠️ **唯一前提：同一「房间」**  
 > 会话仅在处于**同一网格组**（即共享「房间」）时才能相互发现。请先将所有需要协同的会话加入同一组，上述协同流程即可自动发生。  
-> - 同一局域网下，默认网格 `_sym._tcp` 已支持自动发现同位置会话  
+> - 同一局域网下，默认房间 `default` 已支持自动发现同位置会话  
 > - 如需私有团队房间，请在每个会话中执行 `sym_join_room "your-team"` 指向同一组名  
 > - **不同组的会话彼此完全不可见** —— 这是「同 Wi-Fi 但对等节点不出现」问题的首要排查点  
 > 完整机制详见 [团队网格组](#团队网格组) 章节
@@ -122,13 +122,13 @@ claude --dangerously-load-development-channels plugin:sym-mesh-channel@claude-co
 | `sym_publish` | 共享结构化 CAT7 观测数据：焦点、问题、意图、动机、承诺、视角、情绪；接收端经 SVAF 门控过滤 |
 | `sym_recall` | 检索网格记忆中历史认知记忆块（CMB） |
 | `sym_fetch` | 通过紧凑频道头部 ID 获取单个 CMB 的完整内容 |
-| `sym_peers` | 列出已发现的对等节点（通过 Bonjour 或中继） |
+| `sym_peers` | 列出已发现的对等节点（通过 mDNS 或中继） |
 | `sym_status` | 查询节点身份、中继状态、对等节点数、记忆块数量、当前网格组 |
-| `sym_room_info` | 报告当前节点所属网格组，含服务类型及组内对等节点清单 |
+| `sym_room_info` | 报告当前节点所属网格组、来源、在局域网上的广播方式及组内对等节点清单 |
 | `sym_invite_create` | 为指定组生成可分享的邀请链接（支持局域网或跨网络模式） |
 | `sym_invite_info` | 解析网格邀请链接，返回可直接调用的 `sym_join_room` 参数 |
 | `sym_join_room` | **热切换**当前节点至其他网格组，无需重启 Claude Code |
-| `sym_rooms_discover` | 列出当前局域网内通过 Bonjour/mDNS 广播的 SYM 网格组 |
+| `sym_rooms_discover` | 列出局域网内其他 SYM 节点当前广播的网格组（`_sym._tcp` 的 TXT `room`）及各组节点数；只显示符合房间名规则的名称，不显示节点名或密钥 |
 
 ✅ 启用 Channels 标志后，实时推送为双向：对等事件可在对话中途无工具调用即时送达 Claude 上下文；  
 ❌ 未启用标志时，上述工具仍可按需调用，但无异步推送能力。
@@ -137,11 +137,14 @@ claude --dangerously-load-development-channels plugin:sym-mesh-channel@claude-co
 
 ## 团队网格组
 
-默认情况下，每个 `sym-mesh-channel` 节点加入全局 `_sym._tcp` 网格 —— 网络内所有节点彼此可见。对于多团队企业场景，这可能导致信息过载。网格组（MMP §5.8）在 mDNS 层实现团队隔离，使 `backend-team` 与 `frontend-team` 的信号完全互不可见。
+默认情况下，每个 `sym-mesh-channel` 节点处于房间 `default`（全局网格）。对于多团队企业场景，这可能导致信息过载。网格组（MMP §5.8）是团队共用的一个名称：`backend-team` 与 `frontend-team` 的节点互不连接。
 
-> 🔍 **自 sym CLI v0.3.6 起支持组发现**  
-> 本节点通过共享的 `_symrooms._tcp` 发现信标广播其所属组，因此 `sym rooms` 命令可将本 Claude/MCP 节点与 CLI 守护进程节点并列展示 —— 跨平台支持（含 Windows，无需依赖 Apple `dns-sd`）。  
-> ⚠️ 仅用于发现；通信仍隔离于各组专属服务类型。（2026-05-01 前启动的会话需重启方可开始广播）
+**房间是名称，不是服务类型。** 在 sym 0.14（MMP 2.0 update 1，§5.1）中，所有节点都在同一个服务类型 `_sym._tcp` 上广播，房间名放在 TXT 的 `room` 键里，并带 `mmp=2.0`。节点只连接 TXT 房间与自己相同、且 `mmp` 列表含 2.0 的广播，是否准入由握手决定。本通道不再构造按房间划分的服务类型（`_<room>._tcp` 是旧映射，既不广播也不浏览）。
+
+**房间名**为 1 到 64 个字符，由小写 `a-z`、`0-9`、`.`、`_`、`-` 组成（MMP §5.8），例如 `backend-team`、`acme.prod`。`default` 即全局网格；`sym` 为保留名，会被拒绝。不符合规则的名称只会被拒绝，不会被"修正"；在 `SYM_ROOM` 或 `.sym/node.json` 中配置了不合规的房间时，节点不会启动（不会退回 `default`），每个工具都会说明原因。
+
+> 🔍 **sym CLI 的组发现**  
+> 本节点另在共享的 `_symrooms._tcp` 发现信标上广播其所属组（TXT 中为房间名与节点名，不承载会话），因此 `sym rooms` 命令可将本 Claude/MCP 节点与 CLI 守护进程节点并列展示。仅用于发现。
 
 ### 同一办公区（局域网）
 
@@ -150,11 +153,11 @@ claude --dangerously-load-development-channels plugin:sym-mesh-channel@claude-co
 ```bash
 > sym_invite_create { "room": "backend-team" }
 
-邀请链接（仅局域网 / Bonjour）:
-    sym://room/backend-team
+邀请链接（仅局域网 / mDNS）:
+    sym://room/backend-team?node=<nodeId>&key=<身份密钥>
 
 > sym_join_room { "room": "backend-team" }
-已从组 "default" (_sym._tcp) 热切换至 "backend-team" (_backend-team._tcp)
+Moved from room "default" to "backend-team", same identity.
 ```
 
 **负责人通过 Slack/邮件等分享链接**
@@ -240,13 +243,13 @@ npx @sym-bot/mesh-channel init --force --room default
 ```bash
 > sym_rooms_discover
 
-当前局域网可见的 SYM 网格组（3 个）:
-  _sym._tcp           room="sym"
-  _backend-team._tcp  room="backend-team"   (← 您当前所在组)
-  _frontend-team._tcp room="frontend-team"
+Rooms advertised on this LAN (_sym._tcp, TXT room), by the other nodes visible now (3):
+  backend-team   2 node(s)  (← your current room)
+  default   1 node(s)
+  frontend-team   1 node(s)
 ```
 
-> ℹ️ 仅显示当前至少有一个节点在线的组 —— 去中心化架构下无离线组中央目录。跨网络中继组需通过邀请链接带外分享中继地址与令牌。
+> ℹ️ 它浏览 `_sym._tcp` 两秒，按 TXT 的房间名分组并按节点计数（不含本节点）。只显示符合房间名规则的名称，不合规或没有房间名的广播只计数、不显示；`SYM_LAN=off` 的纯中继节点不浏览。仅显示当前至少有另一个节点在线的组 —— 去中心化架构下无离线组中央目录。跨网络中继组需通过邀请链接带外分享中继地址与令牌。
 
 ---
 
@@ -255,7 +258,7 @@ npx @sym-bot/mesh-channel init --force --room default
 ```
 Claude Code A                                              Claude Code B
      ↕ (stdio + MCP)                                            ↕
-sym-mesh-channel  ←——  Bonjour mDNS  ——→  sym-mesh-channel
+sym-mesh-channel  ←——  mDNS _sym._tcp  ——→  sym-mesh-channel
      ↕                  (局域网发现)                             ↕
      └──────────── 可选 WebSocket 中继  ───────────────┘
                     (跨网络通信)
@@ -280,7 +283,7 @@ sym-mesh-channel  ←——  Bonjour mDNS  ——→  sym-mesh-channel
 ### 身份与传输
 
 - 每个对等节点拥有独立 Ed25519 密钥对，存储于 `~/.sym/nodes/<name>/identity.json`  
-- 节点 ID = UUID v7 + Ed25519 签名，通过中继目录或 Bonjour TXT 记录 gossip 传播  
+- 节点 ID = UUID v7 + Ed25519 签名，通过中继目录或 mDNS TXT 记录 gossip 传播  
 - 完整架构详见 MMP §4–§6
 
 ---
@@ -337,11 +340,11 @@ cd sym-relay && npm install && npm start
 
 | 层级 | 机制 | 作用 |
 |------|------|------|
-| 🔐 传输层 | 局域网：每个节点有自己的 Ed25519 身份，但目前以首次使用即信任的方式接受（MMP 2.0 Core Secure 握手尚未启用）；跨网络：中继令牌 | 白名单、自名检查与速率限制均以送达连接为准，而非消息声称的名称 |
+| 🔐 传输层 | 每个会话都经 MMP v2.0 Core Secure 握手证明 nodeId 与 Ed25519 密钥；首次接触时信任首次证明的密钥，邀请可预先固定签发者的密钥；跨网络另需中继令牌 | 白名单与自身记录检查以经验证的签名者 nodeId 为准，速率限制以送达会话为准；名称只是标签 |
 | 🧠 协议层 | SVAF 逐字段内容门控：7 维语义评估，低相关性信号提前拦截 | 防止无关信息污染认知状态 |
 | 🛡️ 应用层 | 仅文本注入上下文，无代码执行，无权限中继（`claude/channel/permission` 显式未声明） | 最小权限原则 |
 
-🔹 **可选对等节点白名单**：设置 `SYM_ALLOWED_PEERS=claude-mac,claude-win` 限制可推送至 Claude 上下文的认证节点；留空（默认）则接受所有认证节点。
+🔹 **可选对等节点白名单**：设置 `SYM_ALLOWED_PEERS=<nodeId>,<nodeId>` 限制哪些签名者的记录可进入 Claude 上下文（以经验证的签名者为准）。不是 nodeId 的条目会被忽略并提示；只含名称的列表不放行任何人。留空（默认）则接受本节点验证过的所有节点。`sym_peers` 列出每个节点的 nodeId。
 
 完整威胁模型详见 [SECURITY.md](./SECURITY.md)
 
@@ -353,7 +356,7 @@ cd sym-relay && npm install && npm start
 |------|-------|-------|---------|
 | Node.js ≥ 18 | ✅ | ✅ | ✅ |
 | Claude Code ≥ 2.1.97（支持 Channels） | ✅ | ✅ | ✅ |
-| Bonjour / mDNS（局域网发现） | 内置 | 需安装 `avahi-daemon` | Windows 10+ 内置 |
+| mDNS（局域网发现） | 内置 | 内置（SDK 自带 mDNS 实现） | 内置 |
 
 ---
 
@@ -373,8 +376,8 @@ cd sym-relay && npm install && npm start
 - 🔸 **单进程单身份**  
   同一机器上两个 Claude Code 会话若使用相同节点名称将冲突：第二个会话的服务器会在没有网格节点的情况下启动，并在每个网格工具中说明哪个名称被占用及如何解决 → 每个智能体使用一个文件夹（`start` 以文件夹命名节点），或使用 `--name`
 
-- 🔸 **端到端加密为点对点，非全局**  
-  双方握手时若均通告 E2E 公钥，则通过 Curve25519 密钥协商 + AES-256-GCM 加密 CMB 字段内容；不支持 E2E 的节点回退至明文（保障向后兼容）。外层帧元数据（发送方 ID、时间戳、溯源信息）保持明文，以供中继转发与 SVAF 评估。
+- 🔸 **每个会话单独加密**  
+  每条记录都按会话密封传输（`cmb-encrypted`，MMP §18.2），会话密钥由每次握手的临时密钥派生；在局域网与中继上一律加密，不存在明文回退。中继只按信封转发密封帧，不保存任何内容。
 
 ---
 
@@ -398,12 +401,12 @@ npx -y @sym-bot/mesh-channel init
 
 ### 对等节点连接正常（Claude Code 启动无报错），但 `sym_peers` 中不显示
 
-**几乎总是网格组不匹配** —— Bonjour 按服务类型（`_<room>._tcp`）隔离发现范围，因此 `default` 与 `backend-team` 节点即使同 Wi-Fi 也彼此不可见。
+**几乎总是网格组不匹配** —— 节点只连接 TXT 房间与自己相同的广播，因此 `default` 与 `backend-team` 节点即使同 Wi-Fi 也彼此不可见。另一个常见原因是对方运行 sym 0.13 或更早版本：它不声明 `mmp` 2.0，无法与本节点建立 Core Secure 会话。
 
 🔍 两步诊断：
 ```bash
-> sym_status          # 显示: Room: <name> (<service-type>)
-> sym_rooms_discover # 显示当前局域网内所有广播中的组
+> sym_status          # 显示: Room: <name> — advertised on the LAN as _sym._tcp, TXT room=<name>
+> sym_rooms_discover # 显示当前局域网内所有广播中的组，以及没有 mmp 2.0 的节点数
 ```
 
 若队友节点处于不同组：
@@ -411,13 +414,13 @@ npx -y @sym-bot/mesh-channel init
 - 后续会话：用 `init --room <name>` 持久化配置  
 - 验证：运行 `doctor` 确认各条目持久化组配置，该命令会显式标记跨作用域的组不匹配
 
-> 💡 这是典型「表面健康但协同失败」场景：`sym_status` 显示 `Peers: 0`，但底层 SymNode 正常、mDNS 服务已注册、中继（若配置）已连接 —— 仅因服务类型不匹配导致彼此不可见。
+> 💡 这是典型「表面健康但协同失败」场景：`sym_status` 显示 `Peers: 0`，但底层 SymNode 正常、mDNS 服务已注册、中继（若配置）已连接 —— 仅因不在同一个房间而彼此不可见。
 
 ### 同 Wi-Fi 下对等节点相互不可见
 
-检查 Bonjour 服务状态：
+检查 mDNS 是否工作（SDK 自带 mDNS 实现，无需系统守护进程；下列工具仅用于查看）：
 - macOS：`dns-sd -B _sym._tcp`（内置）
-- Linux：`avahi-browse -r _sym._tcp`（需运行 `avahi-daemon`）
+- Linux：`avahi-browse -r _sym._tcp`（若已安装 `avahi-daemon`）
 - Windows 10+：内置；若发现失败，请检查 Windows 防火墙是否放行 mDNS（UDP 5353 端口）
 
 ⚠️ 部分企业网络完全屏蔽 mDNS 组播 → 建议用手机热点或家庭网络验证；若确认被屏蔽，请切换至中继模式。

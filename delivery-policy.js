@@ -1,88 +1,66 @@
 'use strict';
 
 /**
- * delivery-policy.js — one decision for every surface where a peer's words can reach this session:
- * the channel push, the sym_receive line, the sym_fetch body and the sym_recall line.
+ * delivery-policy.js — one decision, and one way of saying it, for every surface where a peer's
+ * words can reach this session: the channel push, the sym_receive line, the sym_fetch body and the
+ * sym_recall line.
  *
- * THE INCIDENT (2026-09-27). A peer sent a requested strategy review as a CMB carrying a
- * 36,459-character payload. It arrived and sat in the inbox, and the receiving session never
- * learned of it: sym_receive drained it, an 8 KB payload cap withheld it, and with nothing left to
- * show the tool answered "Caught up — nothing new delivered". The push path had applied the same
- * cap and written only a stderr line. sym_fetch on the inbox id applied no check at all, so the
- * one surface that could have shown the message was also the one that ignored the filter.
+ * Three rules, in this order:
+ *   1. VERIFIED OR NOT SHOWN (design D2). A delivery reaches the model only when its own facts make it
+ *      verified (provenance.js). One that does not is named by id and reason, never by its text.
+ *   2. THE CONTENT POLICY (the 2026-09-27 incident): the allowlist, the payload limit and the
+ *      injection patterns, the same judgement on every surface. A withheld delivery is NAMED with its
+ *      id and our reason, never counted as nothing. The rate holds back only the push.
+ *   3. PEER TEXT IS DATA (design D6). It never starts a line of the channel's markup: a push and a
+ *      sym_receive line carry a bounded lead escaped as a JSON string on one line, and the full text is
+ *      shown only by sym_fetch, inside a fence peer text cannot close. Only the signed parts are
+ *      rendered: the seven CAT7 texts and the signed application data.
  *
- * The rules that follow from it:
- *   1. A withheld delivery is NAMED: its id, its sender and our reason. It is never counted as
- *      nothing. The line carries none of the peer's text, and the sender's name is printed through
- *      displayName, because the sender chooses its name.
- *   2. Size does not reach the context until the payload is read, so a large payload is announced
- *      on the header and read in parts (sym_fetch pages it). Only a payload over this node's hard
- *      limit is withheld: SYM_MAX_PAYLOAD_BYTES, by default 1 MiB. On the local network a frame
- *      already bounds a payload at that size; a relayed delivery is bounded by this setting alone.
- *   3. The same judgement runs wherever the words would enter the context: push, receive, fetch
- *      and recall. The peer's `content` string is judged with the categories and the payload,
- *      because a fetch shows it and nothing makes it repeat the categories.
- *   4. Rate is the one check that is not about content. It measures arrival, so it is counted
- *      once per delivery, on the push, before anything is pushed (a withheld notice included), and
- *      it holds back only the push: the delivery waits in the inbox and sym_receive shows it.
- *      Counting it again at read time withheld the 31st message of any backlog read in one call.
+ * A signer is named by its label and its key fingerprint suffix (key-display.js, design D3), never by
+ * a truncated label or nodeId: both are chosen by their owner.
  */
 
+const crypto = require('crypto');
 const { scanClassifierRisk, quarantineHeader, neutralizeSurface } = require('./classifier-risk.js');
 const { hiddenFieldsTag } = require('./surface-truth.js');
+const { isNodeId } = require('./identity.js');
+const { WITHHELD_REASONS } = require('./provenance.js');
+const { createKeyBook, fullFingerprint, plainLabel } = require('./key-display.js');
 
 // ── Prompt-injection patterns ────────────────────────────────
-// Attack model: a peer with a valid identity sends a CMB whose categories look relevant (so it
-// passes SVAF) but whose text tries to take over the receiving session ("ignore previous
-// instructions", persona overrides, fabricated tool calls). A match withholds the delivery on
-// every surface; none of it is shown, not even in part.
+// A verified signature proves who wrote a record, not that it is safe to read. A match withholds the
+// delivery on every surface; none of it is shown.
 const INJECTION_PATTERNS = [
-  // Classic instruction overrides
   /ignore\s+(all\s+)?(previous|prior|above|earlier)\s+(instructions?|prompts?|context|rules?|guidelines?)/i,
   /disregard\s+(all\s+)?(previous|prior|above|earlier)\s+(instructions?|prompts?|context|rules?)/i,
   /forget\s+(everything|all)\s+(you('ve)?\s+)?(know|been\s+told|learned)/i,
-
-  // Role / persona hijacking
   /you\s+are\s+now\s+(a\s+|an\s+)?(new\s+)?(ai|assistant|model|system|gpt|claude|llm)/i,
   /act\s+as\s+(a\s+|an\s+)?(different|new|unrestricted|jailbroken|evil|rogue)/i,
   /pretend\s+(you\s+)?(are|have\s+no)\s+(restrictions?|rules?|guidelines?|ethics?)/i,
   /new\s+(persona|personality|mode|role)\s*:/i,
-
-  // System prompt injection
   /<\s*system\s*>/i,
   /\[SYSTEM\]/,
   /##\s*system\s+prompt/i,
   /---\s*system\s*---/i,
-
-  // Tool / function call fabrication
   /<\s*tool_call\s*>/i,
   /<\s*function_calls?\s*>/i,
   /\{"type"\s*:\s*"tool_use"/,
-
-  // Privilege / capability escalation
   /you\s+(now\s+)?(have|possess)\s+(full|unrestricted|admin|root|elevated)\s+(access|permissions?|capabilities?)/i,
   /override\s+(safety|content|ethical?|policy)\s+(filter|check|guard|restriction)/i,
   /jailbreak/i,
   /DAN\s+mode/i,
 ];
 
-/** The largest payload a node accepts unless SYM_MAX_PAYLOAD_BYTES says otherwise: the bound the
- *  LAN transport already sets on one frame (@sym-bot/sym frame-parser MAX_FRAME_SIZE). A relayed
- *  delivery is not held to a frame, so for it this setting is the only bound. */
 const DEFAULT_MAX_PAYLOAD_BYTES = 1024 * 1024;
-
-/** The most characters of a message one sym_fetch answer carries; a longer message is read in parts
- *  with `offset`. Well inside what an MCP host takes from one tool call (Claude Code's default
- *  ceiling is 25,000 tokens), so no host cuts a part short on its own. */
 const FETCH_PAGE_CHARS = 48_000;
+/** The lead a push carries (the 0.10 compact header's size) and the lead a sym_receive line carries. */
+const PUSH_LEAD_CHARS = 100;
+const RECEIVE_LEAD_CHARS = 90;
+const RECALL_LEAD_CHARS = 150;
+const CAT7 = ['focus', 'issue', 'intent', 'motivation', 'commitment', 'perspective', 'mood'];
 
 const fmt = (n) => Number(n).toLocaleString('en-US');
 
-/**
- * SYM_MAX_PAYLOAD_BYTES read as a positive whole number of bytes. Unset means the default; a value
- * that is not a whole number is reported back as `invalid` so the caller can say it was ignored.
- * (The old reader passed it to parseInt, and a NaN limit silently disabled the check.)
- */
 function readMaxPayloadBytes(raw) {
   const s = raw === undefined || raw === null ? '' : String(raw).trim();
   if (!s) return { bytes: DEFAULT_MAX_PAYLOAD_BYTES };
@@ -90,8 +68,6 @@ function readMaxPayloadBytes(raw) {
   return { bytes: Number(s) };
 }
 
-/** SYM_RATE_LIMIT, read like SYM_MAX_PAYLOAD_BYTES: a whole number of pushes per sender per minute
- *  (0 holds every push back for sym_receive). Anything else is reported, never silently defaulted. */
 const DEFAULT_RATE_LIMIT = 30;
 function readRateLimit(raw) {
   const s = raw === undefined || raw === null ? '' : String(raw).trim();
@@ -100,12 +76,19 @@ function readRateLimit(raw) {
   return { limit: Number(s) };
 }
 
-// The classifier-risk scan reads the body a line could lead to, capped: the line itself shows only
-// the focus, and scanning every byte of a 1 MiB payload per delivery cost more than it bought.
+/** SYM_ALLOWED_PEERS: nodeIds; names ignored and reported; a list with no nodeId fails closed. */
+function readAllowedPeers(raw) {
+  const entries = String(raw ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+  const nodeIds = [];
+  const ignored = [];
+  for (const e of entries) (isNodeId(e) ? nodeIds : ignored).push(isNodeId(e) ? e.toLowerCase() : e);
+  return { nodeIds, ignored, failClosed: entries.length > 0 && nodeIds.length === 0, set: entries.length > 0 };
+}
+
 const RISK_SCAN_CHARS = 64 * 1024;
-function riskText(focus, body) {
+function riskText(lead, body) {
   const b = String(body ?? '');
-  return `${focus}\n${b.length > RISK_SCAN_CHARS ? b.slice(0, RISK_SCAN_CHARS) : b}`;
+  return `${lead}\n${b.length > RISK_SCAN_CHARS ? b.slice(0, RISK_SCAN_CHARS) : b}`;
 }
 
 // ── One delivery, serialised once ────────────────────────────
@@ -117,12 +100,7 @@ function serialise(payload, indented) {
   try { return JSON.stringify(payload, null, indented ? 2 : undefined) ?? String(payload); } catch { return String(payload); }
 }
 
-/**
- * A delivery as every check and line reads it. Its payload is serialised at most twice, however
- * many read it: compactly, for its size on the wire and the injection scan, and indented, for the
- * header's size and the fetched body. With a 1 MiB ceiling, serialising once per reader was most
- * of the cost of a sym_receive.
- */
+/** A delivery as every check reads it; its payload is serialised at most twice. */
 function prepare(d) {
   if (d && d[PREPARED]) return d;
   const payload = d.payload;
@@ -135,26 +113,15 @@ function prepare(d) {
   };
 }
 
-/** A payload's size on the wire: the bytes of its compact JSON. */
 function payloadBytes(p) {
   const s = prepare(p).compact;
   return s === null ? 0 : Buffer.byteLength(s, 'utf8');
 }
 
-/** The payload marker on a header: its size in the characters a fetch returns. */
-// The size shown is the one the limit is applied to: UTF-8 bytes of the compact JSON.
 function payloadTag(p) {
   return prepare(p).indented === null ? '' : ` [+payload ${fmt(payloadBytes(p))} bytes]`;
 }
 
-/** A message body as sym_fetch returns it, for the push store and the inbox alike. */
-function renderBody(content, p) {
-  const t = prepare(p).indented;
-  return t === null ? String(content ?? '') : `${String(content ?? '')}\n\n---PAYLOAD---\n${t}`;
-}
-
-/** Every text surface of a delivery that some surface shows: the text of each category, the peer's
- *  content string, and the payload (a string payload as itself, anything else as its JSON). */
 function textSurfaces(p) {
   const out = [];
   for (const v of Object.values(p.categories || {})) {
@@ -170,58 +137,52 @@ function textSurfaces(p) {
 }
 
 /**
- * The content policy. judge() answers { show: true } or { show: false, reason, detail, excerpt }:
- * `reason` is a stable token, `detail` is our own sentence for the session (never the peer's words),
- * and `excerpt` is for the operator's stderr audit only. `self` skips only the allowlist, for a
- * delivery under this node's own name: a name is not proof, so the content checks still run.
+ * The content policy. judge() answers { show: true } or { show: false, reason, detail, counts }.
+ * `from` is the VERIFIED SIGNER's nodeId. `self` skips only the allowlist. `reason` is the category a
+ * withheld line names; `detail` is our own words; `counts` holds only numbers of ours (XMesh World,
+ * agent-c: a withheld delivery names why, never the peer's text — not even in the operator's log).
  */
-function createDeliveryPolicy({ allowedPeers = [], maxPayloadBytes = DEFAULT_MAX_PAYLOAD_BYTES } = {}) {
-  const allowed = new Set(allowedPeers.filter(Boolean));
+function createDeliveryPolicy({ allowedPeers = [], failClosed = false, maxPayloadBytes = DEFAULT_MAX_PAYLOAD_BYTES } = {}) {
+  const allowed = new Set(allowedPeers.filter(Boolean).map((s) => String(s).toLowerCase()));
   function judge(d, { self = false } = {}) {
     const p = prepare(d);
-    if (!self && allowed.size && !allowed.has(p.from)) {
-      return { show: false, reason: 'sender-not-allowed', detail: 'its sender is not in SYM_ALLOWED_PEERS', excerpt: '' };
+    if (!self && failClosed) {
+      return { show: false, reason: 'sender-not-allowed', detail: 'SYM_ALLOWED_PEERS is set but lists no nodeId, so it allows nothing (names are labels since 0.11; list nodeIds)', counts: {} };
+    }
+    if (!self && allowed.size && !allowed.has(String(p.from || '').toLowerCase())) {
+      return { show: false, reason: 'sender-not-allowed', detail: 'its signer is not in SYM_ALLOWED_PEERS', counts: {} };
     }
     const bytes = payloadBytes(p);
     if (bytes > maxPayloadBytes) {
       return {
         show: false, reason: 'payload-over-limit',
-        detail: `its payload is ${fmt(bytes)} bytes, over this node's limit of ${fmt(maxPayloadBytes)} ` +
-          `(SYM_MAX_PAYLOAD_BYTES; raise it and restart to fetch this one from the inbox)`,
-        excerpt: `${bytes}b > ${maxPayloadBytes}b limit`,
+        detail: `its payload is ${fmt(bytes)} bytes, over this node's limit of ${fmt(maxPayloadBytes)} (SYM_MAX_PAYLOAD_BYTES; raise it and restart to fetch this one from the inbox)`,
+        counts: { bytes, limit: maxPayloadBytes },
       };
     }
     for (const surface of textSurfaces(p)) {
       for (const pattern of INJECTION_PATTERNS) {
         if (pattern.test(surface)) {
-          return {
-            show: false, reason: 'injection-pattern',
-            detail: 'its text matched a prompt-injection pattern, so none of it is shown (the sender can resend it reworded)',
-            excerpt: surface.slice(0, 200),
-          };
+          return { show: false, reason: 'injection-pattern', detail: 'its text matched a prompt-injection pattern, so none of it is shown (the sender can resend it reworded)', counts: {} };
         }
       }
     }
     return { show: true };
   }
-  return { judge, maxPayloadBytes, allowedPeers: [...allowed] };
+  return { judge, maxPayloadBytes, allowedPeers: [...allowed], failClosed };
 }
 
 // ── The push ─────────────────────────────────────────────────
 
-/** Per-sender arrivals in a sliding window. admit() counts one arrival and answers false once the
- *  sender is over `limit` arrivals in `windowMs`. */
 function createRateLimiter({ limit = 30, windowMs = 60_000 } = {}) {
   const windows = new Map();
   let lastSweep = -Infinity;
   return {
     limit,
-    admit(peer, now = Date.now()) {
-      const w = (windows.get(peer) || []).filter((t) => now - t < windowMs);
+    admit(key, now = Date.now()) {
+      const w = (windows.get(key) || []).filter((t) => now - t < windowMs);
       w.push(now);
-      windows.set(peer, w);
-      // Bounded: a sender that changes its name every message must not grow this map forever.
-      // At most one sweep per window, so a large map is not rescanned on every arrival (final review F6).
+      windows.set(key, w);
       if (windows.size > 1000 && now - lastSweep >= windowMs) {
         lastSweep = now;
         for (const [k, v] of windows) if (!v.some((t) => now - t < windowMs)) windows.delete(k);
@@ -231,162 +192,286 @@ function createRateLimiter({ limit = 30, windowMs = 60_000 } = {}) {
   };
 }
 
-/**
- * What the real-time push does with one arrival: 'silent' for a sender the allowlist keeps out
- * (nothing is pushed and nothing is counted), 'rate-held' once the sender is over the rate,
- * 'notice' for a withheld delivery (announced in our words) and 'push' for one shown. The rate is
- * counted before either kind of push, so a flood of withheld deliveries is held back like any
- * other flood (the legacy message path once pushed its notice first, with no bound).
- */
-function pushAction(verdict, rate, from, now = Date.now()) {
+function pushAction(verdict, rate, rateKey, now = Date.now()) {
   if (verdict.reason === 'sender-not-allowed') return 'silent';
-  if (!rate.admit(from, now)) return 'rate-held';
+  if (!rate.admit(rateKey, now)) return 'rate-held';
   return verdict.show ? 'push' : 'notice';
 }
 
-// ── What the session and the operator read ───────────────────
+// ── Peer text as data ────────────────────────────────────────
 
-/** A sender's name as this node prints it: no line breaks, no brackets, no control characters, at
- *  most 120 characters. A sender chooses its own name, so a raw one could forge a line. A plain space
- *  stays: it cannot forge a line, and the printed name is the one a reply is addressed to. */
+/** A label in our own lines and logs (also used for outbox labels): one line, no markup characters. */
 function displayName(name) {
-  // `→` and ` via ` are this server's own line markers, so a name cannot carry them (final review F4).
-  const s = String(name ?? '').replace(/[\r\n\t\v\f[\]\u0000-\u001f\u007f-\u009f\u2028\u2029→]/g, '_').replace(/ via /gi, ' via_').slice(0, 120);
-  return s || 'unknown';
-}
-
-/** One withheld delivery, in our words only. */
-function withheldLine(id, from, decision) {
-  return `[${id}] from ${displayName(from)}: ${decision.detail}`;
-}
-
-/** The operator's stderr line for one withholding. The sender's name goes through displayName and
- *  the excerpt loses every control character and quote, so a peer can neither write lines of its
- *  own into the audit nor send escape sequences to the operator's terminal. */
-function auditLine(surface, reason, peer, excerpt, id) {
-  const safe = String(excerpt ?? '').replace(/[\u0000-\u001f\u007f-\u009f"]/g, ' ').slice(0, 120);
-  // The audit line is space-separated key=value, so here a space in a name could forge a field
-  // ("x reason=none peer=trusted"); whitespace is replaced on this line even though display keeps it.
-  const who = displayName(peer).replace(/\s/g, '_');
-  return `[sym-security] WITHHELD surface=${surface} reason=${reason} peer=${who}${id ? ` id=${id}` : ''} excerpt="${safe}"\n`;
+  return plainLabel(name);
 }
 
 /**
- * One inbox delivery as sym_receive shows it, and the count it lands in: 'shown', 'withheld',
- * 'not-allowed' or 'own-name'. It never throws: a delivery this node cannot render is withheld with
- * that reason, so one bad message costs one line and never the batch the drain has already taken.
- * `audit` is [reason, excerpt] when the operator's log should record the decision.
+ * Peer text summarised on one line: whitespace collapsed, cut to `max` characters, and escaped as a
+ * JSON string — quoted, with every quote, backslash, control character and line separator escaped —
+ * so it can never end the line or start one of the channel's own.
  */
-function receiveLine(m, { policy, selfName, now = Date.now(), pushed = false }) {
-  try {
-    // Under this node's own name: an echo of its own words, or a node using its name. Counted, never
-    // silently dropped, since the name alone cannot tell the two apart.
-    if (m.from === selfName) return { bucket: 'own-name', id: m.id, audit: ['own-name', ''] };
-    const p = prepare({ from: m.from, content: m.content, categories: m.categories, payload: m.payload });
-    const verdict = policy.judge(p);
-    if (verdict.reason === 'sender-not-allowed') return { bucket: 'not-allowed' };
-    // `label` is what to print (the claimed author, and the deliverer when different); `from` is the
-    // deliverer every decision above was made on.
-    if (!verdict.show) return { bucket: 'withheld', line: withheldLine(m.id, m.label || m.from, verdict), audit: [verdict.reason, verdict.excerpt] };
-    const name = displayName(m.label || m.from);
-    const age = Math.round((now - m.receivedAt) / 1000);
-    const focus = String(m.categories?.focus?.text || m.content || '');
-    const dirTag = m.directed ? ' →you' : '';
-    // The same delivery already went out as a <channel> push under this id. Said, not hidden: the
-    // server cannot tell whether that push reached the session, so the line still appears.
-    const memTag = (m.directed && m.remixed === false ? ' ·not-stored' : '') + (pushed ? ' ·pushed' : '');
-    const payTag = payloadTag(p);
-    // The push's classifier-risk quarantine, over the text the push scans, so one delivery gets one
-    // verdict on both surfaces; this line enters the context the same way a push does.
-    const risk = scanClassifierRisk(riskText(focus, renderBody(m.content || focus, p)));
-    if (risk.risky) {
-      return { bucket: 'shown', line: `${quarantineHeader(name, dirTag, risk.terms.length, `${memTag}${payTag}${hiddenFieldsTag(m.categories)}`)} [${m.id}] (${age}s ago)`, audit: [`classifier-risk:${risk.terms.join(',')}`, focus] };
+function escapeLead(t, max) {
+  const flat = String(t ?? '').replace(/\s+/g, ' ').trim();
+  const cut = flat.length > max ? `${flat.slice(0, max)}…` : flat;
+  return JSON.stringify(cut);
+}
+
+/** The signed text a line leads with (design D6): a CMB's focus, a message's text, a mood's text. */
+function leadText(d) {
+  if (d.kind === 'mood' || d.kind === 'message') return String(d.text ?? '');
+  const f = d.categories && d.categories.focus;
+  return String((f && typeof f === 'object' ? f.text : f) ?? '');
+}
+
+/**
+ * The body sym_fetch shows: only what was signed (design D6) — the seven CAT7 texts, a message's or a
+ * mood's text, and the signed application data. Never the SDK's rendered `content`, a non-CAT7 key, or
+ * a mood's valence and arousal.
+ */
+function signedBody(d, p) {
+  const lines = [];
+  if (d.kind === 'message') lines.push(String(d.text ?? ''));
+  else if (d.kind === 'mood') lines.push(`mood: ${String(d.text ?? '')}`);
+  else {
+    for (const f of CAT7) {
+      const v = d.categories && d.categories[f];
+      const t = v && typeof v === 'object' ? v.text : v;
+      // 'neutral' is the canonical empty value an emitter writes for a category it left out (§14.3.2).
+      if (typeof t === 'string' && t && t !== 'neutral') lines.push(`${f}: ${t}`);
     }
-    const flat = focus.replace(/\s+/g, ' ');
-    const cutTag = flat.length > 90 ? '…' : '';
-    // m053: this line shows the focus' first 90 chars and NOTHING of the other fields — a bare-focus
-    // CMB and one hauling 1.4KB of commitment were indistinguishable here, and a receiver replied to
-    // the header. The elision is explicit.
-    return { bucket: 'shown', line: `[${name}${dirTag}] ${flat.slice(0, 90)}${cutTag}${memTag}${payTag}${hiddenFieldsTag(m.categories)} [${m.id}] (${age}s ago)` };
-  } catch {
-    return { bucket: 'withheld', line: withheldLine(m && m.id, m && m.from, { detail: 'this node could not render it' }), audit: ['render-failed', ''] };
   }
+  const pay = prepare(p).indented;
+  if (pay !== null) lines.push('', '(payload — signed application data)', pay);
+  return lines.join('\n');
+}
+
+function keyBook(ctx) { return (ctx && ctx.keys) || DEFAULT_KEYS; }
+const DEFAULT_KEYS = createKeyBook();
+
+/**
+ * The bracket every line opens with: the signer (label and key fingerprint suffix), the audience, and
+ * the relay session when there was one.
+ *   [alice ⟨…7f3a91c2⟩ →you]
+ *   [bob (2 keys) ⟨…77c0de11a4⟩ →room via carol ⟨…0a1b2c3d⟩]
+ */
+function deliveryTag(d, ctx) {
+  const keys = keyBook(ctx);
+  const f = d.facts;
+  const who = keys.tag({ key: f.signer.key, label: f.signer.label, nodeId: f.signer.nodeId });
+  // A mood frame carries no signed record: it is its session's proven peer's word, and said to be unsigned.
+  if (d.kind === 'mood') return `[${who} mood${f.signed === false ? ', unsigned' : ''}]`;
+  const audience = f.audience === 'directed' ? '→you' : '→room';
+  const relay = f.relayed && f.deliverer ? ` via ${keys.tag({ key: f.deliverer.key, label: f.deliverer.label, nodeId: f.deliverer.nodeId })}` : '';
+  return `[${who} ${audience}${relay}${d.kind === 'message' ? ' message' : ''}]`;
+}
+
+/** A reason category as a line names it: our own word, one token. */
+function reasonWord(reason) {
+  return String(reason || 'withheld').replace(/[^a-z0-9-]/gi, '_').slice(0, 40);
+}
+
+/** The line for a delivery the content policy withholds: its id, the signer, the category and why. */
+function withheldLine(id, who, decision) {
+  return `[${id}] from ${who}: withheld · ${reasonWord(decision.reason || 'render-failed')} — ${decision.detail}`;
+}
+
+/** The line for a delivery that is not verified: its id, the category and why, nothing of its text. */
+function unverifiedLine(d) {
+  const reason = WITHHELD_REASONS[d.withheld] ? d.withheld : 'unverified';
+  return `[${d.id}] withheld, not verified · ${reason}: ${WITHHELD_REASONS[reason]}`;
 }
 
 /**
- * One sym_recall hit. A memory is text the session reads like any delivery, so a peer's memory passes
- * the same policy: withheld, the line shows the sender and our reason and none of its text. A memory
- * under this node's own name skips only the allowlist. (Recall has no fetch path, so a line is not
- * quarantined for wording: the agent asked for these memories, and a quarantined line could never
- * be read.)
+ * The operator's stderr line for one withholding: the surface, the category, the sender and our own
+ * counts (`flagged=2`, `bytes=…`). Never an excerpt of the peer's text: a host may show this log to a
+ * model, and the text is what was withheld (XMesh World, agent-c).
  */
-function recallLine(r, { policy, selfName }) {
-  const sender = r.source || r.cmb?.createdBy || 'unknown';
-  const head = `[${displayName(r.label || sender)}] ${r.timestamp ? new Date(r.timestamp).toLocaleString() : ''}`;
+function auditLine(surface, reason, peer, counts, id) {
+  const who = displayName(peer).replace(/\s/g, '_');
+  const nums = counts && typeof counts === 'object'
+    ? Object.entries(counts).filter(([k, v]) => /^[a-z]{1,16}$/.test(k) && Number.isSafeInteger(v)).map(([k, v]) => ` ${k}=${v}`).join('')
+    : '';
+  return `[sym-security] WITHHELD surface=${surface} reason=${String(reason || 'withheld').replace(/[^a-z0-9:-]/gi, '_').slice(0, 64)} peer=${who}${id ? ` id=${String(id).replace(/[^a-z0-9]/gi, '').slice(0, 16)}` : ''}${nums}\n`;
+}
+
+function keyTag(d) {
+  const key = d.key || (d.facts && d.facts.key);
+  return key ? ` key ${key}` : '';
+}
+
+/**
+ * The judgement for one delivery: { bucket, verdict?, prepared? } — 'unverified', 'own', 'not-allowed',
+ * 'withheld' or 'shown'.
+ */
+function judgeDelivery(d, { policy, selfNodeId }) {
+  if (!d.facts) return { bucket: 'unverified' };
+  const signer = d.facts.signer.nodeId;
+  if (selfNodeId && signer === selfNodeId) return { bucket: 'own' };
+  const p = prepare({ from: signer, content: d.kind === 'cmb' ? undefined : d.text, categories: d.categories, payload: d.payload });
+  const verdict = policy.judge(p, { self: false });
+  if (verdict.reason === 'sender-not-allowed') return { bucket: 'not-allowed', verdict, prepared: p };
+  if (!verdict.show) return { bucket: 'withheld', verdict, prepared: p };
+  return { bucket: 'shown', verdict, prepared: p };
+}
+
+function whoOf(d, ctx) {
+  return d.facts ? keyBook(ctx).tag({ key: d.facts.signer.key, label: d.facts.signer.label, nodeId: d.facts.signer.nodeId }) : 'an unverified sender';
+}
+
+/**
+ * The push for a delivery that is shown (design D6): one line — the tag, an escaped lead of at most
+ * PUSH_LEAD_CHARS, the markers and the id — and the facts as structured meta.
+ */
+function pushOf(d, prepared, ctx) {
+  const lead = leadText(d);
+  const risk = scanClassifierRisk(riskText(lead, signedBody(d, prepared)));
+  const memTag = d.directed && d.remixed === false && d.kind === 'cmb' ? ' ·not-stored' : '';
+  const tail = `${memTag}${payloadTag(prepared)}${hiddenFieldsTag(d.categories)}`;
+  const tag = deliveryTag(d, ctx);
+  const text = risk.risky
+    ? `${quarantineHeader(tag.slice(1, -1), '', risk.terms.length, tail)} [${d.id}]`
+    : `${tag} ${escapeLead(lead, PUSH_LEAD_CHARS)}${tail} [${d.id}]`;
+  const f = d.facts;
+  const meta = {
+    delivery_id: d.id,
+    kind: d.kind,
+    signer_node_id: f.signer.nodeId,
+    signer_key_fingerprint: fullFingerprint(f.signer.key) || '',
+    audience: f.audience,
+    relayed_by: f.relayed && f.deliverer ? f.deliverer.nodeId : '',
+    cmb_key: d.key || f.key || '',
+    assertion_id: f.assertionId || '',
+    signed: f.signed === false ? 'no' : 'yes',
+  };
+  return { text, meta, risk, lead };
+}
+
+/**
+ * One delivery as sym_receive shows it, and the count it lands in. Never throws: a delivery that
+ * cannot be rendered costs one line, never the batch.
+ */
+function receiveLine(d, ctx) {
+  const { policy, selfNodeId, now = Date.now(), pushed = false } = ctx;
   try {
-    const verdict = policy.judge({ from: sender, content: r.content, categories: r.cmb?.categories, payload: r.cmb?.payload }, { self: sender === selfName });
-    if (!verdict.show) return { line: `${head}\n  withheld: ${verdict.detail}`, audit: [verdict.reason, verdict.excerpt] };
-    const focus = String(r.cmb?.categories?.focus?.text || r.content || '');
-    // The same classifier-risk guard as push and receive: a recalled line enters the context too, and
-    // a wording that trips the classifier costs the whole turn, which is worse than an elided line.
-    const cut = focus.length > 150 ? '… [truncated — sym_fetch for full]' : '';
-    // Recall has no fetch path, so a flagged line is defanged rather than hidden (final review F1):
-    // each flagged word stays readable but no longer matches as a token.
-    const risk = scanClassifierRisk(focus);
-    if (risk.risky) return { line: `${head}\n  ${neutralizeSurface(focus.slice(0, 150))}${cut} [${risk.terms.length} flagged term(s) defanged]`, audit: [`classifier-risk:${risk.terms.join(',')}`, focus] };
-    return { line: `${head}\n  ${focus.slice(0, 150)}${cut}` };
+    const j = judgeDelivery(d, { policy, selfNodeId });
+    if (j.bucket === 'unverified') return { bucket: 'unverified', line: unverifiedLine(d), audit: [`unverified:${d.withheld || 'unverified'}`, {}] };
+    if (j.bucket === 'own') return { bucket: 'own', id: d.id };
+    if (j.bucket === 'not-allowed') return { bucket: 'not-allowed', who: whoOf(d, ctx) };
+    if (j.bucket === 'withheld') return { bucket: 'withheld', line: withheldLine(d.id, whoOf(d, ctx), j.verdict), audit: [j.verdict.reason, j.verdict.counts] };
+    const age = Math.round((now - (d.receivedAt || now)) / 1000);
+    const lead = leadText(d);
+    const memTag = (d.directed && d.remixed === false && d.kind === 'cmb' ? ' ·not-stored' : '') + (pushed ? ' ·pushed' : '');
+    const tail = `${memTag}${payloadTag(j.prepared)}${hiddenFieldsTag(d.categories)}`;
+    const risk = scanClassifierRisk(riskText(lead, signedBody(d, j.prepared)));
+    const tag = deliveryTag(d, ctx);
+    if (risk.risky) {
+      return { bucket: 'shown', line: `${quarantineHeader(tag.slice(1, -1), '', risk.terms.length, tail)} [${d.id}]${keyTag(d)} (${age}s ago)`, audit: ['classifier-risk', { flagged: risk.terms.length }] };
+    }
+    return { bucket: 'shown', line: `${tag} ${escapeLead(lead, RECEIVE_LEAD_CHARS)}${tail} [${d.id}]${keyTag(d)} (${age}s ago)` };
   } catch {
-    return { line: `${head}\n  withheld: this node could not render it`, audit: ['render-failed', ''] };
+    return { bucket: 'withheld', line: withheldLine(d && d.id, 'a sender', { reason: 'render-failed', detail: 'this node could not render it' }), audit: ['render-failed', {}] };
   }
 }
 
+const KEY_SOURCE_SAID = {
+  pinned: 'pinned out of band (an accepted invite, a Legacy Import route or an operator\'s resolution)',
+  anchor: 'the configured anchor',
+  proven: 'proven by a Core Secure session with it',
+  grant: 'named by a grant in force under the anchor (MMP §6.6.9)',
+  session: 'proven by the session that delivered it',
+};
+
+/** The account sym_fetch gives before a delivery's body: everything verified, in full. */
+function fetchHead(d, ctx) {
+  const f = d.facts;
+  const when = new Date(d.receivedAt || Date.now()).toISOString();
+  const lines = [`[${d.id}] ${deliveryTag(d, ctx)} · ${when}`];
+  if (f.signed === false) {
+    // A mood frame (MMP §9.3): no record, nothing signed. Its session proved who sent it.
+    lines.push(`Sent by: ${displayName(f.signer.label)} — nodeId ${f.signer.nodeId}; key fingerprint ${fullFingerprint(f.signer.key) || 'unknown'}, the key its Core Secure session proved. The label and the nodeId are the sender's own choice; the key is what this node verified.`);
+    lines.push(`Unsigned: a mood frame carries no signed record, so nothing in it is a signature. It came sealed on that peer's own session${f.deliverer && f.deliverer.transport ? `, over ${f.deliverer.transport}` : ''}, which is what attributes it.`);
+    lines.push('Memory: a mood frame — delivered, never stored, nothing to cite.');
+    return lines.join('\n');
+  }
+  lines.push(`Signed by: ${displayName(f.signer.label)} — nodeId ${f.signer.nodeId}; key fingerprint ${fullFingerprint(f.signer.key) || 'unknown'}; the key is ${KEY_SOURCE_SAID[f.signer.keySource] || (f.signer.keySource ? `bound (${f.signer.keySource})` : 'bound')}. The label and the nodeId are the signer's own choice; the key is what this node verified.`);
+  lines.push(f.relayed && f.deliverer
+    ? `Delivered: relayed by ${displayName(f.deliverer.label)} — nodeId ${f.deliverer.nodeId}, key fingerprint ${fullFingerprint(f.deliverer.key) || 'unknown'}, over ${f.deliverer.transport || 'a session'}. The record's signature is the author's, over the seven CAT7 texts and the signed metadata shown here.`
+    : `Delivered: directly by its author's own session${f.deliverer && f.deliverer.transport ? `, over ${f.deliverer.transport}` : ''}.`);
+  lines.push(f.audience === 'directed' ? 'Audience: directed to this node (the signed recipient is this node\'s nodeId).' : `Audience: room-bound, room "${displayName(f.room ?? 'default')}".`);
+  if (d.kind === 'mood') lines.push('Memory: this node\'s SVAF rejected the record, so it was not stored; only its mood was delivered (MMP §9.3).');
+  else if (d.kind === 'message') lines.push('Memory: a message — delivered, never stored.');
+  else lines.push(`Memory: ${d.remixed === false ? 'delivered only, not stored in this node\'s memory' : 'admitted to this node\'s memory'}.`);
+  const key = d.key || f.key;
+  lines.push(`Record: key ${key || '(none given)'} · assertion ${f.assertionId} · ${f.suite || 'suite not given'}`);
+  if (Array.isArray(f.parents) && f.parents.length) lines.push(`Lineage: it cites ${f.parents.join(', ')}.`);
+  if (key) lines.push(`Cite it: parents ["${key}"] (or ["${d.id}"]) when you respond to it (MMP §14.3).`);
+  return lines.join('\n');
+}
+
+/** A fence for one fetch: peer text cannot close it, because it does not know the nonce. */
+function newFence(id) {
+  const nonce = crypto.randomBytes(6).toString('hex');
+  return { open: `----- BEGIN PEER TEXT ${id} ${nonce} -----`, close: `----- END PEER TEXT ${id} ${nonce} -----` };
+}
+
 /**
- * The sym_receive answer. "Caught up" is said only when the batch held no delivery at all; every
- * delivery drained is shown, withheld with its reason, counted against the allowlist by sender, or
- * counted as sent under this node's own name, so a withheld message is never reported as none.
- *
- * @param {object} r
- * @param {string[]} r.shown        rendered lines for the deliveries shown
- * @param {string[]} r.withheld     withheldLine() for each delivery withheld on its content
- * @param {Map<string,number>} r.notAllowed  sender → count, for deliveries kept out by SYM_ALLOWED_PEERS
- * @param {number} [r.ownName]      deliveries under this node's own name
- * @param {string[]} [r.alreadyRead] ids of deliveries the session already read in full with sym_fetch
- * @param {number} r.remaining      deliveries past this batch
- * @param {boolean} r.peek
+ * One sym_recall hit (design D9, review L3): this node's own record only when its signed author is this
+ * node's own nodeId (and it was not received from a peer, or was verified as this node's when it was);
+ * a peer's record only when it was verified on admission. The lead is escaped as on every surface.
  */
-function receiveReport({ shown, withheld, notAllowed, ownName = 0, ownIds = [], alreadyRead = [], remaining, peek }) {
+function recallLine(r, ctx) {
+  const { policy, selfName, selfNodeId } = ctx;
+  const md = (r.cmb && r.cmb.metadata) || {};
+  const authorId = r.author && typeof r.author.nodeId === 'string' ? r.author.nodeId.toLowerCase() : null;
+  const signed = typeof md.createdByNodeId === 'string' ? md.createdByNodeId.toLowerCase() : null;
+  const own = !!selfNodeId && ((signed === selfNodeId && (r.peerId === null || r.peerId === undefined) && !authorId) || (authorId === selfNodeId && r.verified === true));
+  if (!own && (r.verified !== true || !authorId)) return { bucket: 'unverified' };
+  const keys = keyBook(ctx);
+  const who = own ? `${displayName(selfName)} (this node)` : keys.tag({ key: r.author.key, label: r.author.name, nodeId: authorId });
+  const head = `[${who}] ${r.timestamp || r.storedAt ? new Date(r.timestamp || r.storedAt).toISOString() : ''}`;
+  const key = r.key ? ` key ${r.key}` : '';
+  try {
+    const cats = r.cmb && r.cmb.categories;
+    const focusV = cats && cats.focus;
+    const focus = String((focusV && typeof focusV === 'object' ? focusV.text : focusV) ?? '');
+    const verdict = policy.judge({ from: own ? null : authorId, categories: cats, payload: r.cmb && r.cmb.payload }, { self: own });
+    if (!verdict.show) return { line: `${head}${key}\n  withheld · ${reasonWord(verdict.reason)} — ${verdict.detail}`, audit: [verdict.reason, verdict.counts] };
+    const risk = scanClassifierRisk(focus);
+    if (risk.risky) return { line: `${head}${key}\n  ${escapeLead(neutralizeSurface(focus), RECALL_LEAD_CHARS)} [${risk.terms.length} flagged term(s) defanged]`, audit: ['classifier-risk', { flagged: risk.terms.length }] };
+    return { line: `${head}${key}\n  ${escapeLead(focus, RECALL_LEAD_CHARS)}` };
+  } catch {
+    return { line: `${head}${key}\n  withheld · render-failed — this node could not render it`, audit: ['render-failed', {}] };
+  }
+}
+
+/** The sym_receive answer. "Caught up" only when the batch held no delivery at all. */
+function receiveReport({ shown, withheld, unverified = [], notAllowed, own = [], alreadyRead = [], alreadyPushed = [], remaining, peek }) {
   const kept = [...notAllowed.values()].reduce((a, b) => a + b, 0);
   const more = remaining > 0 ? ` (+${remaining} more — call sym_receive again)` : '';
   const peekTag = peek ? ' (peek — not drained)' : '';
-  const readLine = alreadyRead.length
-    ? `Already read with sym_fetch, not repeated: ${alreadyRead.length} (${alreadyRead.join(', ')}).`
-    : '';
-  if (!shown.length && !withheld.length && !kept && !ownName) {
-    // Never "caught up" while a next batch is waiting (the 2026-09-27 failure, review F3).
+  const readLine = [
+    alreadyRead.length ? `Already read with sym_fetch, not repeated: ${alreadyRead.length} (${alreadyRead.join(', ')}).` : '',
+    alreadyPushed.length ? `Already pushed into this session, not repeated: ${alreadyPushed.length} (${alreadyPushed.join(', ')}) — sym_fetch any of them to read it again.` : '',
+  ].filter(Boolean).join(' ');
+  if (!shown.length && !withheld.length && !unverified.length && !kept && !own.length) {
     if (readLine) return remaining > 0 ? `No delivery in this batch${peekTag}${more}. ${readLine}` : `Caught up — nothing unread${peekTag}. ${readLine}`;
-    return remaining > 0
-      ? `No delivery in this batch${peekTag}${more}.`
-      : 'Caught up — nothing new delivered since your last sym_receive.';
+    return remaining > 0 ? `No delivery in this batch${peekTag}${more}.` : 'Caught up — nothing new delivered since your last sym_receive.';
   }
   const parts = [];
-  if (shown.length) parts.push(`${shown.length} new mesh message(s)${peekTag}${more}:\n${shown.join('\n')}`);
-  else parts.push(`No message to show${peekTag}${more}: ${withheld.length + kept + ownName} delivered and not shown.`);
-  if (withheld.length) parts.push(`Withheld — delivered to this node, not shown:\n${withheld.join('\n')}`);
+  if (shown.length) parts.push(`${shown.length} new mesh delivery(ies)${peekTag}${more}:\n${shown.join('\n')}`);
+  else parts.push(`No delivery to show${peekTag}${more}: ${withheld.length + unverified.length + kept + own.length} delivered and not shown.`);
+  if (withheld.length) parts.push(`Withheld by this node's content policy — delivered, not shown:\n${withheld.join('\n')}`);
+  if (unverified.length) parts.push(`Withheld, not verified under Core Secure — never shown:\n${unverified.join('\n')}`);
   if (kept) {
-    const who = [...notAllowed].map(([n, c]) => `${displayName(n)} ×${c}`).join(', ');
-    parts.push(`Not shown, sender outside SYM_ALLOWED_PEERS: ${kept} (${who}).`);
+    const who = [...notAllowed].map(([n, c]) => `${n} ×${c}`).join(', ');
+    parts.push(`Not shown, signer outside SYM_ALLOWED_PEERS: ${kept} (${who}).`);
   }
-  if (ownName) parts.push(`Not shown, sent under this node's own name: ${ownName}${ownIds.length ? ` (${ownIds.join(', ')})` : ''} — an echo of this node's own words, or another node using its name; sym_fetch an id to look.`);
+  if (own.length) parts.push(`Not shown, signed by this node itself: ${own.length} (${own.join(', ')}) — its own records, relayed back.`);
   if (readLine) parts.push(readLine);
-  if (shown.length) parts.push('Use sym_fetch <id> for full content; reply via sym_send to=<peer>.');
+  if (shown.length) parts.push('Each line: [signer label ⟨…key fingerprint⟩ →you|→room (via relay)] "escaped lead". sym_fetch <id> gives the full verification and the signed text; reply with sym_send {to: "<id>", parents: ["<id>"]}.');
   return parts.join('\n\n');
 }
 
-/**
- * sym_fetch's `offset`: absent means the start; otherwise a whole number of characters (a numeric
- * string is accepted, since hosts differ in how they pass numbers). Anything else is a malformed
- * call, answered as one.
- */
 function readOffset(raw) {
   if (raw === undefined || raw === null || raw === '') return { offset: 0 };
   const n = typeof raw === 'string' && /^\s*\d+\s*$/.test(raw) ? Number(raw) : raw;
@@ -397,54 +482,27 @@ function readOffset(raw) {
 }
 
 /**
- * One part of a message for sym_fetch. A message that fits one part is returned whole, exactly as
- * before. A longer one is returned FETCH_PAGE_CHARS at a time, and every part says which characters
- * it holds (counted from 1, both ends included) and the offset that reads the rest, so a long
- * payload is never cut without saying so.
+ * One part of a message for sym_fetch; every part says which characters it holds. With `fence`, the
+ * part's slice of peer text sits between the fence's markers.
  */
-function fetchPart({ id, head, body, offset = 0, pageChars = FETCH_PAGE_CHARS }) {
+function fetchPart({ id, head, body, offset = 0, pageChars = FETCH_PAGE_CHARS, fence = null }) {
   const total = body.length;
-  if (offset > 0 && offset >= total) {
-    return { error: `offset ${offset} is past the end of ${id}, which is ${fmt(total)} characters long.` };
-  }
-  // `last`: this answer ends the message, so the caller may treat it as read in full.
-  if (offset === 0 && total <= pageChars) return { text: `${head}\n\n${body}`, last: true };
-  // Never split a surrogate pair at either end: a character cut in half is lost from both parts.
-  // An offset from this tool is always a boundary; a typed one may land inside a pair.
+  if (offset > 0 && offset >= total) return { error: `offset ${offset} is past the end of ${id}, which is ${fmt(total)} characters long.` };
+  const wrap = (t) => (fence ? `${fence.open}\n${t}\n${fence.close}` : t);
+  if (offset === 0 && total <= pageChars) return { text: `${head}\n\n${wrap(body)}`, last: true };
   let start = offset;
-  // Step back only over a real pair's second half; an unpaired low surrogate is a character of its own.
   if (start > 0 && /[\uDC00-\uDFFF]/.test(body[start]) && /[\uD800-\uDBFF]/.test(body[start - 1])) start--;
   let end = Math.min(total, start + pageChars);
   if (end < total && /[\uD800-\uDBFF]/.test(body[end - 1])) end = end - 1 > start ? end - 1 : end + 1;
   const where = `characters ${fmt(start + 1)}–${fmt(end)} of ${fmt(total)}`;
-  const tail = end >= total
-    ? `— ${where}: the end of ${id}.`
-    : `— ${where}. The rest: sym_fetch {"msg_id": "${id}", "offset": ${end}}`;
-  return { text: `${head}\n\n${body.slice(start, end)}\n\n${tail}`, last: end >= total };
+  const tail = end >= total ? `— ${where}: the end of ${id}.` : `— ${where}. The rest: sym_fetch {"msg_id": "${id}", "offset": ${end}}`;
+  return { text: `${head}\n\n${wrap(body.slice(start, end))}\n\n${tail}`, last: end >= total };
 }
 
 module.exports = {
-  INJECTION_PATTERNS,
-  DEFAULT_MAX_PAYLOAD_BYTES,
-  FETCH_PAGE_CHARS,
-  readMaxPayloadBytes,
-  DEFAULT_RATE_LIMIT,
-  readRateLimit,
-  RISK_SCAN_CHARS,
-  riskText,
-  prepare,
-  payloadBytes,
-  payloadTag,
-  renderBody,
-  createDeliveryPolicy,
-  createRateLimiter,
-  pushAction,
-  displayName,
-  withheldLine,
-  auditLine,
-  receiveLine,
-  recallLine,
-  receiveReport,
-  readOffset,
-  fetchPart,
+  INJECTION_PATTERNS, DEFAULT_MAX_PAYLOAD_BYTES, FETCH_PAGE_CHARS, PUSH_LEAD_CHARS, RECEIVE_LEAD_CHARS,
+  readMaxPayloadBytes, DEFAULT_RATE_LIMIT, readRateLimit, readAllowedPeers, RISK_SCAN_CHARS, riskText,
+  prepare, payloadBytes, payloadTag, createDeliveryPolicy, createRateLimiter, pushAction,
+  displayName, escapeLead, leadText, signedBody, deliveryTag, withheldLine, unverifiedLine, auditLine,
+  keyTag, judgeDelivery, pushOf, receiveLine, fetchHead, newFence, recallLine, receiveReport, readOffset, fetchPart,
 };

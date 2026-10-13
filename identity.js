@@ -1,47 +1,49 @@
 'use strict';
 
-// identity.js — resolve a node's stable identity for SymNode construction.
+// identity.js — the folder's agent identity, and the two ways a node is written down.
 //
-// A node's on-disk store and its identity are keyed by its name, so if the name changes it becomes a
-// separate, empty store. Collision handling therefore belongs to the engine, whose lock liveness is
-// start-time-verified and thus safe against reused process ids. The plugin previously did its own
-// check with a bare `process.kill(pid, 0)`, which can't distinguish a live holder from a recycled
-// PID — a stale lock left by a dead session could read as "held" and force a `-2`/`-3` suffix,
-// starting a fresh identity in place of the intended one. This module does no pid/lock inspection;
-// that decision is delegated to the engine.
+// THE FOLDER IS THE AGENT. Its name comes from SYM_NODE_NAME or `.sym/node.json` (`node_name`), or
+// the session default. The name is the index of the identity on this host, never the identity: sym
+// 0.14 keeps identities by nodeId (`nodes/by-id/<nodeId>/`) with the name as an index (sym D9.1).
 //
-// NEVER -2, NEVER -3. autoSuffix is OFF for every
-// identity, pinned or not. A suffix looks like a courtesy and is a data event:
-// `foo-2` is a DIFFERENT store with a DIFFERENT signing key, so the seat keeps
-// its name in conversation while silently becoming a new cryptographic identity
-// with none of its own memory. We found three such stores on one machine
-// (codex-mac, -2, -3), each with its own keypair, minted by collisions nobody
-// was told about.
+// NEVER -2, NEVER -3. A collision is a hard failure, never a suffix: `foo-2` would be a different
+// store with a different key under a familiar name. sym 0.14 has no suffixing at all.
 //
-// A collision is now always a hard failure. The engine still reclaims a DEAD
-// holder's stale lock — that path is start-time-verified and is not a suffix —
-// so this only bites when a genuinely live process holds the name, which is a
-// real conflict that deserves an error rather than a second identity.
-//
-//   - PINNED (SYM_NODE_NAME or .sym/node.json): used verbatim.
-//   - UNPINNED session: the caller's default name.
-//   Both: autoSuffix OFF. EIDENTITYLOCK on a live holder.
+// A NODE ID PINS THE AGENT. With `node_id` in `.sym/node.json`, or SYM_NODE_ID, the identity is loaded
+// with `create: false`: a missing identity stops the node and says why, instead of minting a
+// replacement silently (design D10, sym D9.1). Without one the name is looked up, and minted only the
+// first time.
 
-/**
- * @param {{ pinnedName?: string|null, defaultName: string }} opts
- * @returns {{ name: string, autoSuffix: boolean, pinned: boolean }}
- */
-function resolveIdentity({ pinnedName, defaultName } = {}) {
-  const pinned = (typeof pinnedName === 'string' && pinnedName.trim()) ? pinnedName.trim() : null;
-  if (pinned) return { name: pinned, autoSuffix: false, pinned: true };
-  return { name: defaultName, autoSuffix: false, pinned: false };
+const NODE_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Whether `s` is a nodeId (MMP §3.1.1: a UUID). */
+function isNodeId(s) {
+  return typeof s === 'string' && NODE_ID_RE.test(s.trim());
 }
 
 /**
- * Why a node name cannot be used, or null if it can. A name becomes a directory under
- * ~/.sym/nodes/, and MMP §3.1.2 bounds it to 1–64 bytes of printable characters. Shared by the
- * installer (--name) and the server (.sym/node.json), so a name planted in a config file meets the
- * same check as one typed on a command line.
+ * The 8 characters a line prints for a nodeId: its LAST 8. The first 8 of a UUID v7 are the top of
+ * its timestamp, so nodes minted within about a minute of each other share them; the tail is random.
+ */
+function shortId(nodeId) {
+  return typeof nodeId === 'string' && nodeId.length >= 8 ? nodeId.slice(-8) : String(nodeId || '?');
+}
+
+/**
+ * @param {{ pinnedName?: string|null, pinnedNodeId?: string|null, defaultName: string }} opts
+ * @returns {{ name: string, nodeId: string|null, pinned: boolean }}
+ */
+function resolveIdentity({ pinnedName, pinnedNodeId, defaultName } = {}) {
+  const pinned = (typeof pinnedName === 'string' && pinnedName.trim()) ? pinnedName.trim() : null;
+  const nodeId = isNodeId(pinnedNodeId) ? pinnedNodeId.trim().toLowerCase() : null;
+  return { name: pinned || defaultName, nodeId, pinned: !!pinned };
+}
+
+/**
+ * Why a node name cannot be used, or null if it can. A name is a directory-safe index on this host,
+ * and MMP §3.1.2 bounds it to 1–64 bytes of printable characters. Shared by the installer (--name)
+ * and the server (.sym/node.json), so a name planted in a config file meets the same check as one
+ * typed on a command line.
  */
 function nodeNameProblem(name) {
   if (typeof name !== 'string' || !name.trim() || Buffer.byteLength(name, 'utf8') > 64) return 'must be 1–64 bytes and not blank';
@@ -55,4 +57,4 @@ function nodeNameProblem(name) {
   return null;
 }
 
-module.exports = { resolveIdentity, nodeNameProblem };
+module.exports = { resolveIdentity, nodeNameProblem, isNodeId, shortId, NODE_ID_RE };

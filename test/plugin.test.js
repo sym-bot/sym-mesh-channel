@@ -7,12 +7,13 @@
  * Tests:
  *   1. plugin.json is valid and has all required fields
  *   2. MCP server module loads without error
- *   3. Peer allowlist gate works correctly
- *   4. Self-echo filtering works
+ *   3. The peer allowlist takes nodeIds (names are labels)
+ *   4. Own records are judged by nodeId
  *   5. Clean shutdown signal handling
  *   6. Security: no permission relay capability declared
  */
 
+require('./_harness.js'); // sandbox first: no installer test may reach the real ~/.claude.json or ~/.sym
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -142,27 +143,23 @@ test('server.js is valid JavaScript', () => {
   assert.ok(code.includes('claude/channel'), 'server should use channel notifications');
 });
 
-// ── 3. Security: peer allowlist ─────────────────────────────
+// ── 3. Security: peer allowlist (nodeIds since 0.11) ────────
 
 console.log('\nSecurity - peer allowlist:');
 
-test('isPeerAllowed accepts all when SYM_ALLOWED_PEERS is empty', () => {
-  const { isPeerAllowed } = loadAllowlistModule('');
-  assert.strictEqual(isPeerAllowed('any-peer'), true);
-  assert.strictEqual(isPeerAllowed('another-peer'), true);
+test('SYM_ALLOWED_PEERS takes nodeIds; empty admits every verified signer', () => {
+  const { readAllowedPeers } = require('../delivery-policy.js');
+  assert.deepStrictEqual(readAllowedPeers('').nodeIds, []);
+  assert.strictEqual(readAllowedPeers('').failClosed, false);
+  const id = '01a0fd15-52ca-726c-9ce1-5767a1379249';
+  assert.deepStrictEqual(readAllowedPeers(` ${id} , `).nodeIds, [id], 'whitespace is trimmed');
 });
 
-test('isPeerAllowed filters when SYM_ALLOWED_PEERS is set', () => {
-  const { isPeerAllowed } = loadAllowlistModule('claude-mac,claude-win');
-  assert.strictEqual(isPeerAllowed('claude-mac'), true);
-  assert.strictEqual(isPeerAllowed('claude-win'), true);
-  assert.strictEqual(isPeerAllowed('unknown-peer'), false);
-});
-
-test('isPeerAllowed handles whitespace in SYM_ALLOWED_PEERS', () => {
-  const { isPeerAllowed } = loadAllowlistModule(' claude-mac , claude-win ');
-  assert.strictEqual(isPeerAllowed('claude-mac'), true);
-  assert.strictEqual(isPeerAllowed('claude-win'), true);
+test('a list of names is not an allowlist of identities: it is reported and fails closed', () => {
+  const { readAllowedPeers } = require('../delivery-policy.js');
+  const r = readAllowedPeers('claude-mac,claude-win');
+  assert.deepStrictEqual(r.ignored, ['claude-mac', 'claude-win']);
+  assert.strictEqual(r.failClosed, true);
 });
 
 // ── 4. Security: no permission relay ────────────────────────
@@ -186,138 +183,56 @@ test('server does NOT execute code from mesh signals', () => {
   assert.ok(!pushChannelSection.includes('spawn('), 'pushChannel must not spawn processes from mesh input');
 });
 
-test('self-echo filtering is implemented', () => {
-  const serverPath = resolveServerJs();
-  const code = fs.readFileSync(serverPath, 'utf8');
-  assert.ok(code.includes('entry.source === NODE_NAME'), 'server should filter self-echoed CMBs');
+test('a record this node signed is counted as its own, by nodeId, never shown as a peer\'s', () => {
+  const policy = fs.readFileSync(path.join(__dirname, '..', 'delivery-policy.js'), 'utf8');
+  assert.ok(policy.includes("signer === selfNodeId) return { bucket: 'own' }"), 'own records are judged by the signer nodeId');
 });
 
-// ── 4b. Tool surface — CAT7 CMB emission (v0.2.0 breaking change) ──
+// ── 4b. Tool surface — CAT7 CMB emission, with lineage ──
 
 console.log('\nTool surface — sym_send / sym_publish:');
 
-test('sym_send tool schema has focus (required) and to (optional), no message', () => {
-  const code = fs.readFileSync(resolveServerJs(), 'utf8');
-  // Locate the sym_send tool descriptor.
-  const sendIdx = code.indexOf("name: 'sym_send'");
-  assert.ok(sendIdx !== -1, "sym_send tool descriptor not found");
-  // Grab the descriptor block (next ~80 lines — tool definitions are small).
-  const block = code.slice(sendIdx, sendIdx + 2000);
-  // Next tool marker bounds the block.
-  const nextToolIdx = block.indexOf("name: 'sym_publish'");
-  const descriptor = nextToolIdx !== -1 ? block.slice(0, nextToolIdx) : block;
-  assert.ok(descriptor.includes("required: ['focus']"), 'sym_send must declare focus as required (MMP §4.2 CAT7 anchor)');
-  assert.ok(descriptor.includes('to: {'), 'sym_send must accept a "to" property for targeted send (§4.4.4)');
-  assert.ok(!descriptor.match(/message:\s*\{\s*type:\s*'string'/), 'sym_send must NOT carry a raw-text "message" field — emit CAT7 instead');
-  assert.ok(!descriptor.match(/required:\s*\['message'\]/), 'sym_send must NOT require "message" — focus is the required anchor');
-});
-
-test('sym_send handler routes through explicitSend/node.remember, not node.send', () => {
-  const code = fs.readFileSync(resolveServerJs(), 'utf8');
-  const caseIdx = code.indexOf("case 'sym_send'");
-  assert.ok(caseIdx !== -1, "sym_send case handler not found");
-  // Handler runs until the next case: label. Find that label in the FULL source
-  // rather than inside a fixed-size window: the old `caseIdx + 4000` bound went
-  // red the moment the handler grew past it (the sender-side outbox took it to
-  // ~4800 chars), reporting "explicitSend is missing" when explicitSend was
-  // simply further down. A window that silently truncates what it searches
-  // answers a different question than the one the assertion asks.
-  const nextCaseIdx = code.indexOf("case 'sym_publish'", caseIdx);
-  assert.ok(nextCaseIdx !== -1, "sym_publish case not found — cannot bound the sym_send handler");
-  const handler = code.slice(caseIdx, nextCaseIdx);
-  assert.ok(handler.includes('explicitSend('), 'handler must route the send through explicitSend() (which emits via node.remember, MMP §4.2)');
-  const deliveryCode = fs.readFileSync(path.join(__dirname, '..', 'channel-delivery.js'), 'utf8');
-  assert.ok(deliveryCode.includes('n.remember('), 'explicitSend (channel-delivery.js) must emit via node.remember() — CAT7 CMB, not a raw node.send()');
-  assert.ok(!/node\.send\(\s*msg\s*\)/.test(handler), 'handler must NOT fall back to node.send(msg) raw-text broadcast');
-  // Peer resolution guards:
-  assert.ok(handler.includes('not connected'), 'handler must return a clear error when "to" peer is disconnected');
-  assert.ok(handler.includes('ambiguous'), 'handler must reject ambiguous peer matches with an explicit message');
-});
-
-test('sym_publish tool schema unchanged shape (regression)', () => {
-  const code = fs.readFileSync(resolveServerJs(), 'utf8');
-  const obsIdx = code.indexOf("name: 'sym_publish'");
-  assert.ok(obsIdx !== -1, 'sym_publish descriptor not found');
-  const block = code.slice(obsIdx, obsIdx + 2000);
-  const nextIdx = block.indexOf("name: 'sym_recall'");
-  const descriptor = nextIdx !== -1 ? block.slice(0, nextIdx) : block;
-  assert.ok(descriptor.includes("required: ['focus']"), 'sym_publish continues to require focus');
-});
-
-test('MCP server instructions reference SVAF + targeted CMB semantics', () => {
-  const code = fs.readFileSync(resolveServerJs(), 'utf8');
-  assert.ok(code.includes('SVAF'), 'instructions must mention SVAF for receiver semantics');
-  assert.ok(code.includes('§4.4.4') || code.includes('4.4.4'), 'instructions must reference §4.4.4 targeted CMB');
-});
-
-// ── 4c. Send-path delivery integrity (E8 variant c) ──
-
-console.log('\nSend-path delivery integrity (E8 variant c):');
-
-// The fix lives in channel-delivery.js, which package.json `files` ships next to server.js.
-// These source-scan assertions catch its removal.
-test('server.js carries the delivery-integrity fix', () => {
-  const code = fs.readFileSync(resolveServerJs(), 'utf8');
-  const deliveryCode = fs.readFileSync(path.join(__dirname, '..', 'channel-delivery.js'), 'utf8');
-  assert.ok(deliveryCode.includes('function explicitSend('), 'explicitSend helper missing');
-  assert.ok(code.includes("require('./channel-delivery.js')"), 'server.js must use the shipped explicitSend');
-  assert.ok(require('../package.json').files.includes('channel-delivery.js'), 'channel-delivery.js must be in package.json files');
-  assert.ok(code.includes('deliveredCmbKeys'), 'delivered-key tracking missing');
-  assert.ok(deliveryCode.includes('[re-sent '), 're-issue salt for an undelivered re-send is missing');
-  assert.ok(/deliveredCmbKeys = new Set\(\)/.test(code.slice(code.indexOf('node = newNode'))),
-    'deliveredCmbKeys must reset on hot-swap (sym_join_room)');
-  assert.ok(!code.includes('CMB already in memory, not re-broadcast'),
-    'the old unconditional "Duplicate — not re-broadcast" message must be gone');
-});
-
-// The shipped explicitSend (channel-delivery.js). This used to be a hand-kept mirror of a helper
-// inline in server.js, which could drift from what it claimed to test.
-function loadSendIntegrity() {
-  const { explicitSend, deliveryTag } = require('../channel-delivery.js');
-  return { explicitSend, deliveryTag };
+function toolBlock(code, name, next) {
+  const i = code.indexOf(`name: '${name}'`);
+  assert.ok(i !== -1, `${name} tool descriptor not found`);
+  const j = code.indexOf(`name: '${next}'`, i);
+  return code.slice(i, j === -1 ? i + 3000 : j);
 }
 
-// A content-addressed fake node: remember() dedups on the fields, like the store.
-function fakeNode(peerCount) {
-  const stored = new Set();
-  const crypto = require('crypto');
-  const key = (f) => 'cmb-' + crypto.createHash('sha256').update(JSON.stringify(f)).digest('hex').slice(0, 16);
-  return {
-    stored,
-    peers: () => Array.from({ length: peerCount }, (_, i) => ({ peerId: 'p' + i })),
-    status: () => ({ peerCount }),
-    remember(fields) { const k = key(fields); if (stored.has(k)) return null; stored.add(k); return { key: k }; },
-  };
-}
-
-const F = { focus: 'hi', issue: 'none', intent: 'directive', motivation: '', commitment: '', perspective: 'me', mood: {} };
-const okS = (e, c) => (c ? `Sent CMB ${e.key}` : `Stored ${e.key} — no peers`);
-
-test('true duplicate to a connected peer is suppressed (no flood regression)', () => {
-  const { explicitSend } = loadSendIntegrity();
-  const n = fakeNode(2); const delivered = new Set();
-  const a = explicitSend(n, delivered, F, {}, okS, () => 'T');
-  assert.ok(/^Sent CMB/.test(a.text), 'first broadcast should send');
-  const b = explicitSend(n, delivered, F, {}, okS, () => 'T');
-  assert.ok(/already dispatched/.test(b.text), 'identical resend after a real dispatch is a suppressed duplicate');
+test('sym_send: focus required, to (a nodeId or a delivery id), parents for lineage, no raw message', () => {
+  const d = toolBlock(fs.readFileSync(resolveServerJs(), 'utf8'), 'sym_send', 'sym_publish');
+  assert.ok(d.includes("required: ['focus']"));
+  assert.ok(d.includes('to: {'), 'targeted send (§4.4.4)');
+  assert.ok(d.includes('parents: PARENTS_PROP'), 'lineage at the emit surface (audit C-3.1)');
+  assert.ok(!/message:\s*\{\s*type:\s*'string'/.test(d), 'no raw-text message field');
 });
 
-test('undelivered re-send (variant c) is re-issued, not swallowed', () => {
-  const { explicitSend } = loadSendIntegrity();
-  const n = fakeNode(0); const delivered = new Set();       // stored while disconnected
-  const a = explicitSend(n, delivered, F, {}, okS, () => 'T');
-  assert.ok(!/^Sent CMB/.test(a.text), 'a 0-peer send must not claim delivery');
-  assert.strictEqual(delivered.size, 0, 'nothing delivered while disconnected');
-  n.status = () => ({ peerCount: 1 }); n.peers = () => [{ peerId: 'p0' }];   // a peer connects
-  const b = explicitSend(n, delivered, F, {}, okS, () => 'T');
-  assert.ok(/Re-sent CMB/.test(b.text), 'the undelivered CMB must be re-issued so it reaches the mesh');
+test('sym_publish: focus required and parents accepted', () => {
+  const d = toolBlock(fs.readFileSync(resolveServerJs(), 'utf8'), 'sym_publish', 'sym_receive');
+  assert.ok(d.includes("required: ['focus']"));
+  assert.ok(d.includes('parents: PARENTS_PROP'));
 });
 
-test('directed dedup against a pre-existing store copy is re-issued', () => {
-  const { explicitSend } = loadSendIntegrity();
-  const n = fakeNode(1); n.remember(F);                      // copy already in store (pre-reconnect)
-  const r = explicitSend(n, new Set(), F, { to: 'peerX' }, () => 'Sent to peerX', () => 'T');
-  assert.ok(/Re-sent CMB/.test(r.text), 'a stored-but-never-delivered directed CMB must be re-issued');
+test('emission goes through the host to node.remember(), with parents and to, and never node.send()', () => {
+  const code = fs.readFileSync(resolveServerJs(), 'utf8');
+  assert.ok(code.includes('host.emitRecord({ categories, to, parents: par.keys'), 'the server emits through the host');
+  const host = fs.readFileSync(path.join(__dirname, '..', 'node-host.js'), 'utf8');
+  assert.ok(host.includes('node.remember(categories, {'), 'the node host emits via remember() — a signed CAT7 CMB');
+  assert.ok(host.includes('parents: parents.map((key) => ({ key }))'));
+  assert.ok(!/node\.send\(/.test(host) && !/node\.send\(/.test(code), 'no raw node.send()');
+});
+
+test('`to` is resolved by identity, never by name', () => {
+  const code = fs.readFileSync(resolveServerJs(), 'utf8');
+  assert.ok(code.includes('cd.resolveTo(args.to'), 'to goes through resolveTo');
+  assert.ok(!/p\.name === args\.to/.test(code), 'no name match routes a send');
+});
+
+test('the instructions teach lineage, the verification line, and that to never takes a name', () => {
+  const code = fs.readFileSync(resolveServerJs(), 'utf8');
+  assert.ok(code.includes('MMP §14.3'));
+  assert.ok(code.includes('SVAF'));
+  assert.ok(code.includes('`to` never takes a name'));
 });
 
 // ── 5. Server lifecycle ─────────────────────────────────────
@@ -329,6 +244,12 @@ test('clean shutdown handlers registered', () => {
   const code = fs.readFileSync(serverPath, 'utf8');
   assert.ok(code.includes("process.on('SIGTERM'"), 'SIGTERM handler missing');
   assert.ok(code.includes("process.on('SIGINT'"), 'SIGINT handler missing');
+});
+
+test('the room beacon reads the port from status(), not an SDK internal', () => {
+  const code = fs.readFileSync(resolveServerJs(), 'utf8');
+  assert.ok(code.includes('host.status().port'));
+  assert.ok(!code.includes('_port'));
 });
 
 test('identity collision exits cleanly', () => {
@@ -620,6 +541,21 @@ async function runProjectInstallTests() {
     }
   });
 
+  await testAsync('--project --room takes every MMP §5.8 room: dotted, underscored, and the tenant-suffixed one', async () => {
+    // The kebab-case grammar refused these; a node in them is valid (sym 0.14), so the installer must persist them.
+    for (const room of ['acme.prod', 'team_x', 'x-review--team-02779b950c3d8d7378fd11d6']) {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-proj-'));
+      try {
+        const { code } = await spawnInstaller(['init', '--project', '--room', room], { cwd: tmpDir, env: { ...process.env, SYM_NODE_NAME: 'claude-test-grp', SYM_ROOM: '' } });
+        assert.strictEqual(code, 0, room);
+        const mcp = JSON.parse(fs.readFileSync(path.join(tmpDir, '.mcp.json'), 'utf8'));
+        assert.strictEqual(mcp.mcpServers['claude-sym-mesh'].env.SYM_ROOM, room);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    }
+  });
+
   await testAsync('--project without --room omits SYM_ROOM (default mesh)', async () => {
     // Omitting SYM_ROOM from the env block (rather than writing an empty
     // value) lets the server.js fallback select the global _sym._tcp mesh.
@@ -741,21 +677,22 @@ async function runProjectInstallTests() {
     }
   });
 
-  await testAsync('init rejects malformed SYM_ROOM env var with kebab-case error', async () => {
-    // CTO PR review note 2: KEBAB_CASE_RE must apply to SYM_ROOM env var,
-    // not just the --room CLI flag. Pre-fix, SYM_ROOM=Backend_Team flowed
-    // through unvalidated and got written into the entry as-is, producing
-    // an mDNS service type the SymNode would silently fail to register.
+  await testAsync('init rejects malformed SYM_ROOM env var with the MMP §5.8 room error', async () => {
+    // CTO PR review note 2: the room gate must apply to the SYM_ROOM env var, not just the --room CLI
+    // flag. Pre-fix, SYM_ROOM=Backend_Team flowed through unvalidated and got written into the entry
+    // as-is, for a node that refuses it (sym 0.14 throws EBADROOM; a room is [a-z0-9._-], 1 to 64).
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-proj-'));
     try {
-      const { code, stderr } = await spawnInstaller(['init', '--project'], {
-        cwd: tmpDir,
-        env: { ...process.env, SYM_ROOM: 'Backend_Team' },
-        allowFail: true,
-      });
-      assert.strictEqual(code, 1, 'malformed SYM_ROOM must exit 1');
-      assert.ok(stderr.includes('SYM_ROOM'), 'error must name the env var, not just --room');
-      assert.ok(stderr.includes('kebab-case'), 'error must explain the constraint');
+      for (const bad of ['Backend_Team', 'sym', 'has space', 'a'.repeat(65)]) {
+        const { code, stderr } = await spawnInstaller(['init', '--project'], {
+          cwd: tmpDir,
+          env: { ...process.env, SYM_ROOM: bad },
+          allowFail: true,
+        });
+        assert.strictEqual(code, 1, `malformed SYM_ROOM ${JSON.stringify(bad.slice(0, 12))} must exit 1`);
+        assert.ok(stderr.includes('SYM_ROOM'), 'error must name the env var, not just --room');
+        assert.ok(stderr.includes('MMP §5.8') && stderr.includes('1 to 64 characters'), 'error must explain the constraint');
+      }
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
@@ -1195,150 +1132,53 @@ function spawnInstallerCapture(args, opts = {}) {
   });
 }
 
-// ── Invite URL parse + create round-trip ─────────────────────
+// ── Invite URL parse + create round-trip (the SDK's grammar, sym 0.14) ──
 //
-// Replicates the INVITE_URL_RE + parser logic from server.js so we can
-// unit-test it without spawning the full MCP process. The in-server copy
-// is the authoritative one; this mirror is kept tight and regenerated
-// if the authoritative version changes.
+// 0.10 kept a mirror of its own invite regex here. The grammar is now the SDK's (room-names.js asks
+// sym's `invite`), so these test the real thing, including the issuer an invite now carries.
 
-const INVITE_URL_RE = /^([a-z][a-z0-9-]+):\/\/(?:room|team)\/([^/?#]+)(?:\/([^?#]+))?(?:\?(.+))?$/i;
-const KEBAB_CASE_RE = /^[a-z0-9]+(?:--?[a-z0-9]+)*$/; // regenerated from server.js (grammar review F5: the mirror had drifted — stale grammar AND a duplicated alternative)
+console.log('\nInvite URL — parse and round trip:');
+const { parseInviteURL } = require('../room-names.js');
+const { buildInvite } = require('@sym-bot/sym').invite;
+const ISSUER = { nodeId: '01a0fd15-52ca-726c-9ce1-5767a1379249', publicKey: 'AIFMY28eNJTXCDpjEPAwqpcORIiJt1ByDeaatkY_K-U' };
 
-function parseInviteURL(url) {
-  const m = INVITE_URL_RE.exec(url);
-  if (!m) return { error: 'unrecognised' };
-  const appScheme = m[1].toLowerCase();
-  const rawId = decodeURIComponent(m[2]);
-  const rawName = m[3] ? decodeURIComponent(m[3]) : rawId;
-  const queryStr = m[4] || '';
-  const query = Object.fromEntries(
-    queryStr.split('&').filter(Boolean).map(kv => {
-      const [k, v = ''] = kv.split('=');
-      return [decodeURIComponent(k), decodeURIComponent(v)];
-    })
-  );
-  const serviceType = appScheme === 'sym' ? `_${rawId}._tcp` : `_${appScheme}-${rawId}._tcp`;
-  const room = appScheme === 'sym' ? rawId : `${appScheme}-${rawId}`;
-  return {
-    appScheme, room, serviceType,
-    roomId: rawId, roomName: rawName,
-    relayUrl: query.relay || null, relayToken: query.token || null,
-  };
-}
-
-function buildInviteURL({ room, relayUrl, relayToken }) {
-  if (!KEBAB_CASE_RE.test(room)) throw new Error(`invalid room: ${room}`);
-  if (relayToken && !relayUrl) throw new Error('relay_token requires relay_url');
-  if (!relayUrl && !relayToken) return `sym://room/${room}`;
-  const params = [`relay=${encodeURIComponent(relayUrl)}`];
-  if (relayToken) params.push(`token=${encodeURIComponent(relayToken)}`);
-  return `sym://team/${room}?${params.join('&')}`;
-}
-
-console.log('\nInvite URL — parse:');
-
-test('sym://room/{name} parses to matching room + service type', () => {
+test('sym://room/{name} parses to the room, and a room is not a service type', () => {
   const p = parseInviteURL('sym://room/backend-team');
-  assert.strictEqual(p.appScheme, 'sym');
   assert.strictEqual(p.room, 'backend-team');
-  assert.strictEqual(p.serviceType, '_backend-team._tcp');
-  assert.strictEqual(p.relayUrl, null);
-  assert.strictEqual(p.relayToken, null);
+  assert.ok(!('serviceType' in p), 'nothing in this channel maps a room to `_<room>._tcp` (sym 0.14: _sym._tcp with TXT room)');
+  assert.strictEqual(p.issuer, null);
+  assert.strictEqual(parseInviteURL('sym://room/acme.prod').room, 'acme.prod', 'a dotted room is a room (MMP §5.8)');
 });
 
-test('sym://team/{name}?relay=... parses relay URL + token', () => {
-  const url = 'sym://team/eng-team?relay=wss%3A%2F%2Frelay.example.com&token=abc123';
-  const p = parseInviteURL(url);
-  assert.strictEqual(p.room, 'eng-team');
-  assert.strictEqual(p.serviceType, '_eng-team._tcp');
+test('sym://team/{name}?relay=&token= parses the relay credentials', () => {
+  const p = parseInviteURL('sym://team/eng-team?relay=wss%3A%2F%2Frelay.example.com&token=shared-secret-xyz');
   assert.strictEqual(p.relayUrl, 'wss://relay.example.com');
-  assert.strictEqual(p.relayToken, 'abc123');
+  assert.strictEqual(p.relayToken, 'shared-secret-xyz');
 });
 
-test('melotune://room/{id}/{name} prefixes room with app scheme', () => {
-  const p = parseInviteURL('melotune://room/abc123/Kitchen');
-  assert.strictEqual(p.appScheme, 'melotune');
+test('melotune://room/{id}/{name} prefixes the room with the app scheme', () => {
+  const p = parseInviteURL('melotune://room/abc123/Lounge');
   assert.strictEqual(p.room, 'melotune-abc123');
-  assert.strictEqual(p.serviceType, '_melotune-abc123._tcp');
-  assert.strictEqual(p.roomName, 'Kitchen');
+  assert.strictEqual(p.roomName, 'Lounge');
 });
 
-test('percent-encoded room name decodes correctly', () => {
-  const p = parseInviteURL('melotune://room/xyz/Living%20Room');
-  assert.strictEqual(p.roomName, 'Living Room');
+test('a non-invite string is refused with the expected shapes', () => {
+  assert.match(parseInviteURL('https://example.com').error, /Expected shapes/);
+  assert.ok(parseInviteURL('').error);
 });
 
-test('relay URL only (no token) parses cleanly', () => {
-  const url = 'sym://team/eng?relay=wss%3A%2F%2Frelay.example.com';
+test('round trip: an invite built with an issuer parses back to the same room, relay and issuer', () => {
+  const url = buildInvite({ room: 'x-review--team-02779b950c3d8d7378fd11d6', relay: 'wss://r.example', token: 'tok', issuer: ISSUER });
   const p = parseInviteURL(url);
-  assert.strictEqual(p.relayUrl, 'wss://relay.example.com');
-  assert.strictEqual(p.relayToken, null);
+  assert.strictEqual(p.room, 'x-review--team-02779b950c3d8d7378fd11d6');
+  assert.strictEqual(p.relayUrl, 'wss://r.example');
+  assert.strictEqual(p.relayToken, 'tok');
+  assert.deepStrictEqual(p.issuer, ISSUER);
 });
 
-test('non-invite URL returns error', () => {
-  const p = parseInviteURL('https://example.com/foo');
-  assert.ok(p.error, 'expected error on non-invite URL');
+test('an issuer whose node or key is malformed makes the invite no invite', () => {
+  assert.match(parseInviteURL('sym://room/a?node=alice&key=x').error, /names an issuer/);
 });
-
-test('garbage string returns error', () => {
-  const p = parseInviteURL('not-a-url-at-all');
-  assert.ok(p.error, 'expected error');
-});
-
-console.log('\nInvite URL — create + round-trip:');
-
-test('buildInviteURL(room) returns sym://room/{name}', () => {
-  assert.strictEqual(buildInviteURL({ room: 'backend-team' }), 'sym://room/backend-team');
-  assert.strictEqual(buildInviteURL({ room: 'x-review--team-02779b950c3d8d7378fd11d6' }), 'sym://room/x-review--team-02779b950c3d8d7378fd11d6'); // tenant-suffix grammar (ruling 2026-08-26)
-});
-
-test('buildInviteURL(room, relay, token) returns sym://team/ with query string', () => {
-  const url = buildInviteURL({
-    room: 'eng-team',
-    relayUrl: 'wss://relay.example.com',
-    relayToken: 'shared-secret-xyz',
-  });
-  assert.ok(url.startsWith('sym://team/eng-team?'), 'should be sym://team/ with query');
-  assert.ok(url.includes('relay=wss%3A%2F%2Frelay.example.com'), 'relay URL percent-encoded');
-  assert.ok(url.includes('token=shared-secret-xyz'), 'token present');
-});
-
-test('buildInviteURL rejects invalid room name', () => {
-  assert.throws(() => buildInviteURL({ room: 'Bad Room' }), /invalid room/);
-  assert.throws(() => buildInviteURL({ room: 'UPPERCASE' }), /invalid room/);
-  assert.throws(() => buildInviteURL({ room: '-leading-hyphen' }), /invalid room/);
-  assert.throws(() => buildInviteURL({ room: 'a---b' }), /invalid room/); // triple stays out
-  assert.throws(() => buildInviteURL({ room: 'trailing-hyphen-' }), /invalid room/);
-});
-
-test('buildInviteURL rejects token without URL', () => {
-  assert.throws(
-    () => buildInviteURL({ room: 'x', relayToken: 'token-only' }),
-    /relay_token requires relay_url/,
-  );
-});
-
-test('round-trip: create LAN → parse → same room back', () => {
-  const url = buildInviteURL({ room: 'my-team' });
-  const p = parseInviteURL(url);
-  assert.strictEqual(p.room, 'my-team');
-  assert.strictEqual(p.serviceType, '_my-team._tcp');
-});
-
-test('round-trip: create relay → parse → same room + relay creds back', () => {
-  const url = buildInviteURL({
-    room: 'cross-net',
-    relayUrl: 'wss://relay.example.com',
-    relayToken: 'tok-123',
-  });
-  const p = parseInviteURL(url);
-  assert.strictEqual(p.room, 'cross-net');
-  assert.strictEqual(p.relayUrl, 'wss://relay.example.com');
-  assert.strictEqual(p.relayToken, 'tok-123');
-});
-
-// ── Results ─────────────────────────────────────────────────
 
 (async () => {
   await runProjectInstallTests();
@@ -1362,153 +1202,78 @@ function resolveServerJs() {
   return path.join(__dirname, '..', 'server.js');
 }
 
-function loadAllowlistModule(envValue) {
-  // Replicate the allowlist logic from server.js without starting the server
-  const ALLOWED_PEERS = (envValue || '')
-    .split(',')
-    .map(s => s.trim())
-    .filter(Boolean);
-
-  function isPeerAllowed(peerName) {
-    if (ALLOWED_PEERS.length === 0) return true;
-    return ALLOWED_PEERS.includes(peerName);
-  }
-
-  return { isPeerAllowed };
-}
-
 // ── Room grammar: one source, and the one permitted mirror cannot drift ──────
 //
-// A room name IS the Bonjour service type (MMP §5.8), so a validator that
-// disagrees with the SDK's by one character means two nodes disagree about
-// whether a room exists. That has now happened twice in this repo, and the
-// second time the divergent copy silently gated the room-PERSISTENCE path while
-// the runtime path accepted the same name — green tests, broken install.
+// A room is an MMP §5.8 identifier ([a-z0-9._-], 1 to 64 characters, and not `sym`), signed into every
+// record and the handshake, so a validator that disagrees with the SDK's by one character means two
+// nodes disagree about whether a room exists. That has happened in this repo three times: twice as a
+// kebab-case copy, and once more in relay-store.js, which kept its own pattern and refused every dotted
+// room a node may be in. Since sym 0.14 the SDK's `rooms.isValidRoom` is the grammar.
 //
-// server.js keeps NO copy (it imports the grammar). bin/install.js keeps one
-// last-resort mirror, because install must still validate when the SDK is not
-// resolvable. This test reads the mirror out of the SOURCE TEXT rather than
-// requiring the module — install.js runs its installer on require — and pins it
-// character-identical to the SDK's own exported regex.
-test('room grammar has one source, and install.js mirror matches the SDK exactly', () => {
-  const fs = require('fs');
-  const path = require('path');
-  const root = path.join(__dirname, '..');
+// The modules keep NO copy (they import it). bin/install.js keeps one last-resort mirror, because install
+// must still validate when the SDK is not resolvable. The mirror is read out of the SOURCE TEXT (install.js
+// runs its installer on require) and run against the SDK on a table of names.
+const ROOM_TABLE = [
+  'default', 'backend-team', 'acme.prod', 'team_x', 'a', 'x-review--team-02779b950c3d8d7378fd11d6', '-lead', 'x---y', '.', '..', '0',
+  'a'.repeat(64), 'a'.repeat(65), '', ' ', 'Backend', 'My Team', 'café', 'a/b', 'a\\b', 'sym', 'SYM', 'sym.', 'a\nb', 'ünï',
+];
 
-  const server = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
-  assert.ok(
-    !/const\s+KEBAB_CASE_RE\s*=\s*\//.test(server),
-    'server.js must not declare its own room-name regex — it imports the SDK grammar'
-  );
-  assert.ok(
-    /require\('@sym-bot\/sym(?:\/lib\/rooms\.js)?'\)/.test(server) && /sdkRooms\(\)/.test(server),
-    'server.js must take the room grammar from the SDK'
-  );
+test('room grammar has one source, and install.js mirror matches the SDK on a table of names', () => {
+  const root = path.join(__dirname, '..');
+  for (const f of ['server.js', 'room-names.js', 'room-discovery.js', 'relay-store.js']) {
+    const src = fs.readFileSync(path.join(root, f), 'utf8').split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+    assert.ok(!/\[a-z0-9\._-\]|\[a-z0-9\]\[a-z0-9-\]|KEBAB_CASE_RE/.test(src), `${f} must not declare a room pattern of its own — it asks the SDK`);
+    assert.ok(!/lib\/rooms\.js|core\/room-id/.test(src), `${f}: the room grammar comes from the SDK's rooms export, never a deep import`);
+  }
+  assert.ok(/= require\('@sym-bot\/sym'\)\.rooms;/.test(fs.readFileSync(path.join(root, 'relay-store.js'), 'utf8')), 'relay-store.js asks the SDK');
+  assert.ok(/= sdk\.rooms;/.test(fs.readFileSync(path.join(root, 'room-names.js'), 'utf8')), 'room-names.js asks the SDK');
 
   const install = fs.readFileSync(path.join(root, 'bin', 'install.js'), 'utf8');
-  const mirror = install.match(/const\s+FALLBACK_KEBAB_CASE_RE\s*=\s*(\/.+\/);/);
+  const mirror = install.match(/const\s+FALLBACK_ROOM_RE\s*=\s*(\/.+\/);/);
   assert.ok(mirror, 'install.js must keep its mirror in a named FALLBACK_ constant');
+  const fallback = install.match(/const\s+fallbackIsRoom\s*=\s*\(v\)\s*=>\s*(.+);/);
+  assert.ok(fallback, 'install.js must keep the mirror\'s predicate');
+  const re = new Function(`return ${mirror[1]}`)();
+  const mirrorIsRoom = new Function('FALLBACK_ROOM_RE', `return (v) => ${fallback[1]}`)(re);
 
-  const sdkRooms = require('@sym-bot/sym').rooms || require('@sym-bot/sym/lib/rooms.js');
-  const sdk = sdkRooms.KEBAB_CASE_RE;
-  assert.strictEqual(
-    mirror[1], sdk.toString(),
-    'install.js fallback regex has drifted from @sym-bot/sym rooms.KEBAB_CASE_RE'
-  );
-
-  // The grammar this pins is the tenant-suffix one: a scoped room name must pass.
-  const { isValidRoom } = sdkRooms;
-  assert.ok(isValidRoom('x-review--team-02779b950c3d8d7378fd11d6'), 'tenant-suffixed room must be valid');
-  assert.ok(isValidRoom('backend-team'), 'plain kebab room must be valid');
-  assert.ok(!isValidRoom('x---y'), 'triple hyphen must stay invalid');
-  assert.ok(!isValidRoom('-lead'), 'leading hyphen must stay invalid');
+  const { isValidRoom } = require('@sym-bot/sym').rooms;
+  for (const r of ROOM_TABLE) {
+    assert.strictEqual(mirrorIsRoom(r), isValidRoom(r), `install.js mirror and the SDK disagree about ${JSON.stringify(r.slice(0, 20))}`);
+  }
+  // What the table pins: the §5.8 grammar, not the kebab-case one.
+  assert.ok(isValidRoom('acme.prod') && isValidRoom('team_x') && isValidRoom('.') && isValidRoom('-lead') && isValidRoom('x---y'), '§5.8 admits dots, underscores and any hyphen placement');
+  assert.ok(isValidRoom('x-review--team-02779b950c3d8d7378fd11d6') && isValidRoom('a'.repeat(64)) && !isValidRoom('a'.repeat(65)));
+  assert.ok(!isValidRoom('Backend') && !isValidRoom('') && !isValidRoom('a b') && !isValidRoom('café'), 'uppercase, empty, spaces and non-ASCII are not rooms');
 });
 
-test('room names are canonical: `sym` is refused even on an SDK that predates the rule', () => {
-  const fs = require('fs');
-  const path = require('path');
-  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-
-  // Founder ruling 2026-08-27. The check must be the PROPERTY, computed from
-  // the SDK's own mapping in both directions -- not a second grammar. If this
-  // ever becomes a regex, the drift this file guards has come back.
-  assert.ok(
-    /serviceTypeToRoom\(roomServiceType\(room\)\) === room/.test(server),
-    'canonicity must be derived from the SDK mapping, not re-implemented'
-  );
-  assert.ok(
-    !/function isCanonicalRoom[\s\S]{0,400}\/\^\[a-z0-9\]/.test(server),
-    'isCanonicalRoom must not carry its own grammar'
-  );
-
-  // Both gates go through it, so neither can be canonical while the other is not.
-  const gates = server.match(/if \(!isCanonicalRoom\(room\)/g) || [];
-  assert.strictEqual(gates.length, 2, `both join gates must enforce canonicity, found ${gates.length}`);
-  // Gates sit inside switch cases (six-space indent); the helpers that
-  // classify a refusal are module-level (two). isValidRoom is legitimate in a
-  // helper -- roomRefusalReason needs it to tell "bad grammar" apart from
-  // "aliases another room" -- so this forbids it at the GATES, which is what
-  // would actually let a non-canonical name through.
-  assert.ok(
-    !/^ {6}if \(!isValidRoom\(room\)/m.test(server),
-    'no join gate may use the bare grammar check in place of canonicity'
-  );
-
-  // And the property itself, against whatever SDK is actually resolved here.
-  const rooms = require('@sym-bot/sym').rooms || require('@sym-bot/sym/lib/rooms.js');
-  const canonical = (r) => rooms.isValidRoom(r)
-    && rooms.serviceTypeToRoom(rooms.roomServiceType(r)) === r;
-  assert.ok(!canonical('sym'), '`sym` aliases the global mesh and must not be canonical');
-  assert.ok(canonical('default'), 'the global mesh under its canonical name');
-  assert.ok(canonical('backend-team'));
-  assert.ok(canonical('x-review--team-02779b950c3d8d7378fd11d6'));
+test('room names: `sym` is refused, and both gates (invite and join) use the one predicate', () => {
+  const root = path.join(__dirname, '..');
+  const server = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
+  const { isRoom } = require('../room-names.js');
+  assert.ok(!isRoom('sym'), '`sym` is the service every room is advertised under; the SDK refuses it');
+  assert.ok(isRoom('default') && isRoom('backend-team') && isRoom('acme.prod') && isRoom('x-review--team-02779b950c3d8d7378fd11d6'));
+  assert.ok(!isRoom('Bad_Room') && !isRoom(' backend') && !isRoom('') && !isRoom(null) && !isRoom(42));
+  assert.strictEqual((server.match(/if \(!isRoom\(room\)/g) || []).length, 2, 'both tool gates (invite and join) enforce isRoom');
+  assert.ok(/if \(!isRoom\(ROOM\)\)/.test(server), 'the configured room is checked before the node is built');
 });
 
-test('a refusal names the cause that applies, on an SDK that enforces canonicity', () => {
-  // Regression guard. roomRefusalReason branched on isValidRoom, whose meaning
-  // CHANGED at sym 0.13.0 from "grammatical" to "grammatical AND canonical".
-  // After that, every canonicity failure was reported as a grammar failure --
-  // so the author of `sym`, which is impeccable kebab-case, was told it was not
-  // kebab-case. Only bumping the SDK exposed it; the source never changed.
-  const fs = require('fs');
-  const path = require('path');
-  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-  assert.ok(
-    !/function roomRefusalReason[\s\S]{0,300}if \(!isValidRoom\(room\)\)/.test(server),
-    'roomRefusalReason must not branch on isValidRoom -- it conflates the two causes'
-  );
-  assert.ok(
-    /KEBAB_CASE_RE\.test\(room\)/.test(server),
-    'the grammar cause must be read from the grammar itself'
-  );
+test('a refusal names the cause that applies', () => {
+  const { roomRefusalReason } = require('../room-names.js');
+  assert.match(roomRefusalReason('sym'), /"sym" is reserved/, '`sym` is grammatical; the cause is that it is reserved');
+  assert.match(roomRefusalReason('Bad_Room'), /1 to 64 characters from a-z, 0-9, "\.", "_" and "-", all lowercase \(MMP §5\.8\)/);
+  assert.match(roomRefusalReason('a'.repeat(65)), /at most 64 characters \(this one is 65\)/);
+  assert.match(roomRefusalReason(''), /cannot be empty/);
+  assert.ok(!/kebab/i.test(roomRefusalReason('Bad_Room')), 'the kebab-case grammar is gone');
 });
 
-test('room -> service-type mapping has one source: no inline `_${room}._tcp` in server.js', () => {
-  const fs = require('fs');
-  const path = require('path');
-  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-
-  // The drift class this pins: server.js once built the service type in four
-  // places, so a grammar change had to be made four times or the copies
-  // disagreed. Every mapping now goes through the SDK. Two escapes are
-  // deliberate and named: the app-scoped invite prefix (which builds a ROOM,
-  // not a service type) and the dns-sd output scanner (which parses external
-  // text rather than mapping a room).
-  const offenders = server
-    .split('\n')
-    .map((line, i) => [i + 1, line])
-    .filter(([, line]) => /`_\$\{[A-Za-z]/.test(line) || /'_sym\._tcp'/.test(line))
-    .filter(([, line]) => !/^\s*(\/\/|\*)/.test(line))
-    .filter(([, line]) => !/appScheme|typeRe|m\[1\]/.test(line));
-
-  assert.deepStrictEqual(
-    offenders, [],
-    'server.js must map room -> service type only via roomServiceType(): ' +
-      offenders.map(([n, l]) => `${n}: ${l.trim()}`).join(' | ')
-  );
-
-  assert.ok(
-    /serviceTypeToRoom/.test(server),
-    'the inverse mapping must also come from the SDK, not a hand-rolled strip'
-  );
+test('this channel builds no per-room service type: the SDK advertises _sym._tcp with TXT room', () => {
+  const root = path.join(__dirname, '..');
+  const offenders = [];
+  for (const f of ['server.js', 'node-host.js', 'room-names.js', 'room-discovery.js', 'interior-host.js']) {
+    fs.readFileSync(path.join(root, f), 'utf8').split('\n').forEach((line, i) => {
+      if (/^\s*(\/\/|\*|\/\*)/.test(line)) return;
+      if (/roomServiceType|serviceTypeToRoom|discoveryServiceType|discoveryBrowseTypes|`_\$\{[A-Za-z]|serviceType/.test(line)) offenders.push(`${f}:${i + 1}: ${line.trim()}`);
+    });
+  }
+  assert.deepStrictEqual(offenders, [], 'a per-room type would make this node invisible to every 0.14 node, which browses only _sym._tcp');
 });

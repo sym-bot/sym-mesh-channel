@@ -39,7 +39,7 @@ Two Claude Code sessions on two machines used one mesh during a real crash fix. 
 
 No one copied the finding between windows or manually selected the reviewing agent. The evidence here is the exchange itself: one Claude Code session surfaced work to another across the mesh.
 
-The current implementation supports multiple sessions on one machine, LAN discovery through Bonjour, and optional relay transport across networks.
+The current implementation supports multiple sessions on one machine, LAN discovery through mDNS (every node advertises on `_sym._tcp` with its room in the TXT `room` key), and optional relay transport across networks.
 
 > ⚠️ **The one prerequisite: same room.** Sessions only see each other when they're in the **same room** — their shared room. Get every session that should collaborate into one room *first*; then the exchange above just happens. On one wifi the default mesh already rooms co-located sessions, so they find each other automatically; for a private team room, point them all at one name — run `sym_join_room "your-team"` in each session. Sessions in *different* rooms are invisible to one another — that's the #1 "we're on the same wifi but my peer never shows up" gotcha. Full mechanics in [Team mesh rooms](#team-mesh-rooms).
 
@@ -109,30 +109,60 @@ Also listed in the [Anthropic community directory](https://github.com/anthropics
 
 ## What you get
 
-Eleven MCP tools exposed to Claude Code, namespaced under `mcp__claude-sym-mesh__`:
+Fourteen MCP tools exposed to Claude Code, namespaced under `mcp__claude-sym-mesh__`:
 
 | Tool | What it does |
 |---|---|
-| `sym_send` | Send a CAT7 CMB to a specific peer (point-to-point), or to all if no recipient is given. Arrives in receivers' contexts as a `<channel>` notification. |
-| `sym_publish` | Publish a structured CAT7 CMB — a projection of your state — to your whole room (publish-subscribe): focus, issue, intent, motivation, commitment, perspective, mood. SVAF-gated on the receiving side. |
-| `sym_receive` | Surface CMBs the mesh delivered to you in real-time when the `<channel>` push was gated — a live delivery feed, not a store query. |
-| `sym_recall` | Search mesh memory for past cognitive memory blocks. |
-| `sym_fetch` | Fetch the full content of a single CMB by its compact channel-header ID. |
-| `sym_peers` | List discovered peers (via bonjour or relay). |
-| `sym_status` | Node identity, relay state, peer count, memory count, current mesh room. |
-| `sym_room_info` | Report the mesh room this node is in, with service type and peer roster scoped to the room. |
-| `sym_invite_create` | Generate a shareable invite URL for a named room. LAN-only or cross-network flavour. |
-| `sym_invite_info` | Parse a mesh invite URL and return a ready-to-use `sym_join_room` call. |
-| `sym_join_room` | **Hot-swap** this node into a different mesh room at runtime — no Claude Code restart. |
-| `sym_rooms_discover` | List SYM-mesh rooms currently advertising on the local network via Bonjour / mDNS. |
+| `sym_send` | Send a CAT7 CMB to one peer (`to`: its nodeId, or a delivery id meaning that delivery's verified signer), or to the room if no recipient is given. `parents` cites what it answers (MMP §14.3). |
+| `sym_publish` | Publish a structured CAT7 CMB — a projection of your state — to your whole room: focus, issue, intent, motivation, commitment, perspective, mood, and optional `parents`. SVAF-gated on the receiving side. |
+| `sym_receive` | The deliveries since your last call, each with its verified signer, audience, relay, id and CMB key — a live delivery feed, not a store query. |
+| `sym_fetch` | A delivery in full by id: the whole verification account and the body, in parts when long. |
+| `sym_recall` | Search this node's memory (its own records, and peers' records verified when admitted). |
+| `sym_push_confirm` | State, first-hand, that this server's `<channel>` pushes reach you, with the code from a push check. |
+| `sym_peers` | Peers with a proven session: label and key fingerprint, nodeId, key source, sessions; and the outbox, stuck items included. |
+| `sym_status` | Node identity (nodeId, key fingerprint), the loaded `@sym-bot/mesh-channel` and `@sym-bot/sym` versions, room, relay state, Core Secure sessions and key conflicts, what sym's authority store says (anchor pinned or not, statements in force, this node's roles), deliveries that got no inbox id, memory, push statement, and the daemon-room advisory when it applies. |
+| `sym_room_info` | Report the mesh room this node is in, where that came from, how it is advertised on the LAN, and the peer roster scoped to the room. |
+| `sym_invite_create` | Generate an invite URL for a named room, naming this node as its issuer. LAN-only or cross-network flavour. |
+| `sym_invite_info` | Parse an invite URL: room, relay, and the issuer's nodeId and key fingerprint. |
+| `sym_join_room` | **Hot-swap** this node into a different mesh room at runtime, same identity; with `invite`, pin the issuer's key. |
+| `sym_rooms_discover` | List the rooms other SYM nodes are advertising on the local network now (`_sym._tcp`, TXT `room`), with how many nodes each has. Shows only a name that is a room; no node name or key. |
+| `sym_outbox_discard` | Discard what is held for a peer that is not coming back. |
 
 With the Channels flag enabled, real-time push is bidirectional: peer events arrive in Claude's context without any tool call, while the session is mid-turn. Without the flag, the same tools are available on demand — you just don't get the async push surface.
 
+**What a delivery line says.** `[alice ⟨…7f3a91c2⟩ →you] "review the migration" [in0042] key cmb-…` —
+the signer's own label and the shortest suffix of its key fingerprint that is unique among the keys
+this node knows (at least 8 hex; `alice (2 keys)` when two known keys use the label), `→you` for a
+CMB addressed to this node or `→room` for one bound to the room (admitted by this node's SVAF),
+`via label ⟨…⟩` when a relay session carried it, a quoted and escaped excerpt of the signed focus, the
+delivery id and the CMB key. A push carries the same line, and the facts as structured meta.
+`sym_fetch` gives the full nodeId and fingerprint (`sha256:<hex>`) and the signed text, fenced. A
+delivery whose own facts do not make it verified is listed by id and reason only, and one the
+content policy withholds names its category: `[in0042] from alice ⟨…⟩: withheld · injection-pattern
+— …`. A record whose wording may trip the model's own classifier is quarantined: its line says
+`classifier-risk (2 flagged terms)` and no text, and `sym_fetch` shows it on request. A mood frame
+carries no signed record: `[alice ⟨…⟩ mood, unsigned] "relieved" [m012]` is the word of the peer whose
+Core Secure session it came on, and there is nothing in it to cite.
+
+**The daemon in another room.** When the sym daemon on this machine is in a different room, the
+first tool answer of the session says so once (again only if the rooms change); `sym_status` always
+does. To answer it with lineage:
+`sym_send {"to": "in0042", "parents": ["in0042"], "focus": "…"}`.
+
+**Push, stated first-hand.** The server cannot see whether its notifications reach the model, so it
+sends one push check with a code. A session that received it calls `sym_push_confirm {"code": "…"}`;
+from then on `sym_receive` names a delivery it already pushed instead of repeating it. Until then,
+every delivery is listed.
+
 ## Team mesh rooms
 
-By default every `sym-mesh-channel` node joins the global `_sym._tcp` mesh — every peer on the network sees every other peer. For a company with multiple teams, that's too noisy. Mesh rooms (MMP §5.8) isolate each team at the mDNS layer so `backend-team` and `frontend-team` can't see each other's signals at all.
+By default every `sym-mesh-channel` node is in the room `default`, the global mesh. For a company with multiple teams, that's too noisy. A room (MMP §5.8) is a name the team shares, and `backend-team` and `frontend-team` nodes never dial each other.
 
-> **Discoverable by the `sym` CLI (since 0.3.6).** This node advertises its room on a shared `_symrooms._tcp` discovery beacon, so the [`sym` CLI](https://www.npmjs.com/package/@sym-bot/sym)'s `sym rooms` lists this Claude/MCP node alongside CLI-daemon nodes — cross-platform, including Windows (where Apple's `dns-sd` is absent). Discovery-only; comms stay isolated on the room's own service type. *(A restart is needed for sessions started before 0.3.6 to begin beaconing.)*
+**A room is a name, not a service type.** With sym 0.14 (MMP 2.0 update 1, §5.1) every node advertises on one service type, `_sym._tcp`, with its room in the TXT `room` key and `mmp=2.0`. A node dials only an advertisement whose TXT room is its own and whose `mmp` list contains 2.0, and the handshake is what admits it. The channel builds no per-room service type (`_<room>._tcp`, the earlier mapping, is neither advertised nor browsed), so the room of an advertisement is whatever its TXT says, and `sym_rooms_discover` shows only names that are rooms.
+
+**A room name** is 1 to 64 characters from `a-z`, `0-9`, `.`, `_` and `-`, all lowercase (MMP §5.8): `backend-team`, `acme.prod`, `x-review--team-02779b950c3d8d7378fd11d6`. `default` is the global mesh; `sym` is reserved and refused. A name that is not a room is refused, never repaired. A room configured in `SYM_ROOM` or `.sym/node.json` that is not one stops the node from starting (no mesh node is built, nothing falls back to `default`), and every tool says why. A room is signed into every record, so a free-form name used before 0.11 names a different room from any identifier you map it to: choose the identifier once and keep it.
+
+> **Discoverable by the `sym` CLI.** This node also advertises its room on a shared `_symrooms._tcp` discovery beacon (room and node name in TXT; it carries no session), so the [`sym` CLI](https://www.npmjs.com/package/@sym-bot/sym)'s `sym rooms` lists this Claude/MCP node alongside CLI-daemon nodes. Discovery-only.
 
 ### Same office (LAN)
 
@@ -141,11 +171,11 @@ By default every `sym-mesh-channel` node joins the global `_sym._tcp` mesh — e
 ```
 > sym_invite_create { "room": "backend-team" }
 
-Invite URL (LAN-only (Bonjour)):
-    sym://room/backend-team
+Invite URL (LAN-only (mDNS)):
+    sym://room/backend-team?node=<nodeId>&key=<identity key>
 
 > sym_join_room { "room": "backend-team" }
-Hot-swapped from room "default" (_sym._tcp) to "backend-team" (_backend-team._tcp).
+Moved from room "default" to "backend-team", same identity.
 ```
 
 **Team lead shares the URL** over Slack, email, whatever.
@@ -157,10 +187,10 @@ Hot-swapped from room "default" (_sym._tcp) to "backend-team" (_backend-team._tc
 Parsed invite: sym://room/backend-team
 
 > sym_join_room { "room": "backend-team" }
-Hot-swapped from room "default" to "backend-team".
+Moved from room "default" to "backend-team", same identity.
 ```
 
-No restart needed for the current session. Teammates on the same LAN now see each other; `backend-team` and `frontend-team` live in isolated mDNS spaces.
+No restart needed for the current session. Teammates on the same LAN now see each other; a `backend-team` node dials only advertisements whose TXT room is `backend-team`, so `frontend-team` nodes are never dialled. The move is a new node for the same identity: what this node already received stays received, with the same inbox ids, and none of it is delivered again.
 
 > **`sym_join_room` is runtime-only.** On the next Claude Code launch, the node restarts from its `~/.claude.json` config — if `SYM_ROOM` isn't persisted there, it reverts to the global mesh and your teammates' peer count silently drops to zero. Persist your membership before closing the session (see below).
 
@@ -225,21 +255,25 @@ The relay carries frames; it keeps none. Two sessions exchange CMBs when both ar
 ```
 > sym_rooms_discover
 
-SYM-mesh rooms visible on LAN (3):
-  _sym._tcp           room="sym"
-  _backend-team._tcp  room="backend-team"   (← your current room)
-  _frontend-team._tcp room="frontend-team"
+Rooms advertised on this LAN (_sym._tcp, TXT room), by the other nodes visible now (3):
+  backend-team   2 node(s)  (← your current room)
+  default   1 node(s)
+  frontend-team   1 node(s)
+
+To join one, call sym_join_room with room="<name>". A node dials only an advertisement whose TXT room is its own, and the handshake is what admits.
 ```
 
-Only shows rooms with at least one node online right now — there's no central directory of offline-but-known rooms (decentralised architecture). For cross-network relay-backed rooms, members must know the relay URL and token out of band (someone shares the invite URL).
+It browses `_sym._tcp` for two seconds and groups what it hears by TXT room, counting distinct nodes (this node is not counted). Only a name that is a room is shown: an advertisement naming anything else, or no room, is counted and not printed, and no node name or key is shown. A node that does not list `mmp` 2.0 is said so (it cannot form a Core Secure session with this one). On a relay-only node (`SYM_LAN=off`) it browses nothing and says so.
+
+Only shows rooms with at least one other node online right now — there's no central directory of offline-but-known rooms (decentralised architecture). For cross-network relay-backed rooms, members must know the relay URL and token out of band (someone shares the invite URL).
 
 ## How it works
 
 ```
 Claude Code A                                              Claude Code B
      ↕ (stdio + MCP)                                            ↕
-sym-mesh-channel  ←——  Bonjour mDNS  ——→  sym-mesh-channel
-     ↕                  (LAN discovery)                         ↕
+sym-mesh-channel  ←——  mDNS _sym._tcp  ——→  sym-mesh-channel
+     ↕                (LAN discovery; TXT room)                 ↕
      └────────────  optional WebSocket relay  ───────────────┘
                     (cross-network)
 ```
@@ -251,7 +285,7 @@ The plugin composes two open specs:
 
 **What happens on each message.** When a peer broadcasts a cognitive memory block (CMB), the local SymNode evaluates it via SVAF — Symbolic-Vector Attention Fusion, a receiver-side relevance gate that rejects low-signal messages before they reach Claude's context. If accepted, the MCP server fires a `notifications/claude/channel` notification to Claude Code, which surfaces it as a `<channel>` block in the conversation. Claude sees it, can react, and can broadcast back via `sym_send` or `sym_publish`. No polling. No tool calls. The mesh thinks together.
 
-**Identity and transport.** Each peer has its own Ed25519 keypair stored at `~/.sym/nodes/<name>/identity.json`. Node IDs are UUID v7 + Ed25519 signatures, gossiped through the relay's directory or via Bonjour TXT records. Full architecture in MMP §4–§6.
+**Identity and transport.** Each peer has its own Ed25519 keypair stored at `~/.sym/nodes/by-id/<nodeId>/identity.json` (sym 0.14; the name is an index). A peer exists only after the MMP v2.0 Core Secure handshake has proven its nodeId and key on a session, and every record is signed and verified before the channel sees it. Full architecture in MMP §4–§6 and §18.
 
 ## Advanced: per-project node identity
 
@@ -262,9 +296,14 @@ Without `start`, the plugin names each session `claude-<repo>-<session>`, which 
 ```json
 {
   "node_name": "cto",
-  "room": "my-team"
+  "room": "my-team",
+  "node_id": "01a0fd15-52ca-726c-9ce1-5767a1379249"
 }
 ```
+
+`node_id` is optional. With it, the folder's identity is loaded without minting: if it is not on
+this host, the node does not start and every tool says why, instead of quietly becoming a new agent
+with an empty memory. `sym_status` prints the line to add.
 
 Both the plugin's node and the `claude-sym-mesh` server read it on launch whenever Claude Code runs from that directory: the node takes that name and joins that room.
 
@@ -310,9 +349,11 @@ A peer message is external input. Treat it that way.
 - A room name or relay token is not a complete enterprise trust boundary.
 - Keep human approval for consequential actions.
 
-**Optional peer allowlist.** Set `SYM_ALLOWED_PEERS=claude-mac,claude-win` to restrict which authenticated peers can push to Claude's context. When empty (default), every authenticated peer remains eligible for the other receiver-side checks.
+**Optional peer allowlist.** Set `SYM_ALLOWED_PEERS=<nodeId>,<nodeId>` to restrict whose records can reach Claude's context; it is judged against the verified signer. Names are labels, so an entry that is not a nodeId is ignored and reported, and a list with no nodeId in it allows nothing. When empty (default), every peer this node verified remains eligible for the other receiver-side checks.
 
-**Payload and rate limits.** `SYM_MAX_PAYLOAD_BYTES` (default 1048576) is the largest payload shown; a larger one is withheld and named, and stays in the inbox. A payload within it is read on demand, and `sym_fetch` returns a long message in parts, each naming the `offset` of the next. `SYM_RATE_LIMIT` (default 30) is how many deliveries from one sender per minute are pushed in real time; the rest wait in the inbox for `sym_receive` (a legacy direct message, which has no inbox entry, is dropped and recorded in the audit). On the local network a frame already bounds a payload at 1 MiB; for a relayed delivery `SYM_MAX_PAYLOAD_BYTES` is the only bound.
+**Verified or not shown.** A delivery without the node's verification facts — from a Legacy Import session, received before this node ran Core Secure, or unverified — is listed by id and reason and never shown.
+
+**Payload and rate limits.** `SYM_MAX_PAYLOAD_BYTES` (default 1048576) is the largest payload shown; a larger one is withheld and named, and stays in the inbox. A payload within it is read on demand, and `sym_fetch` returns a long message in parts, each naming the `offset` of the next. `SYM_RATE_LIMIT` (default 30) is how many deliveries from one session per minute are pushed in real time; the rest wait for `sym_receive`. A payload is the record's signed application section, which MMP bounds at 512 KiB.
 
 See [SECURITY.md](../SECURITY.md) for the full threat model.
 
@@ -320,9 +361,9 @@ See [SECURITY.md](../SECURITY.md) for the full threat model.
 
 | | macOS | Linux | Windows |
 |---|---|---|---|
-| Node.js ≥ 18 | ✓ | ✓ | ✓ |
+| Node.js ≥ 20 | ✓ | ✓ | ✓ |
 | Claude Code ≥ 2.1.97 (Channels feature) | ✓ | ✓ | ✓ |
-| Bonjour / mDNS for LAN discovery | built-in | install `avahi-daemon` | built-in (Windows 10+) |
+| mDNS for LAN discovery | built-in | built-in (the SDK speaks mDNS itself) | built-in |
 
 ## Limitations
 
@@ -332,8 +373,11 @@ Clear-eyed about what's not there yet:
 - **Corporate networks often block mDNS multicast.** If LAN discovery fails on the same wifi, fall back to a relay.
 - **No offline directory of known rooms.** `sym_rooms_discover` only shows rooms with at least one node currently online. For cross-network relay-backed rooms, invite URLs must be shared out of band.
 - **One mesh identity per process.** Two Claude Code sessions on the same machine with the same node name collide. The second one's server starts without a mesh node, and every mesh tool says which name is held and how to fix it. Use one folder per agent (`start` names the node after the folder), or `--name`.
-- **Peer identity is trust-on-first-use until MMP 2.0 Core Secure ships.** See [SECURITY.md](../SECURITY.md#layer-1-transport-and-peer-identity).
-- **Transport protection is peer- and version-dependent.** Do not assume every peer or metadata path is encrypted. Mixed-version peers may fall back to plaintext, and outer routing metadata remains visible where required for delivery. Review [SECURITY.md](../SECURITY.md) before carrying sensitive material.
+- **First contact is trust on first proven use.** A peer you have never met is bound to the key its first session proves; an invite pins the issuer's key out of band. See [SECURITY.md](../SECURITY.md#layer-1-transport-and-peer-identity-mmp-v20-core-secure-sym-014).
+- **0.13 peers are not heard.** sym 0.14 speaks only Core Secure. A 0.13.17 or older node advertises no `mmp`, so a 0.14 node never dials it as Core Secure on the LAN, and over a relay the Core Secure handshake with it never completes. Such a node is reached only through a Legacy Import route on the sym side, and what it delivers is withheld here as unverified. **Upgrade every node of a room together.**
+- **Role grants signed by sym 0.13 confer nothing.** Authority is sym's MMP §6.6 store, rooted at an anchor pinned out of band (`SYM_FOUNDER_ANCHOR` in this server's env). With none, nothing is in force and every peer resolves as a participant; `sym_status` says which. The channel decides nothing from authority; it shows what the store says.
+- **Messages and moods are kept in the channel's own feed**, journalled in the node's directory, not in the SDK's inbox. Their `m` ids survive a restart and are never reused. A mind attached through a node's interior sees neither.
+- **A cited reply is never gated.** sym 0.14 applies MMP §15.7's remix guard to `remix()`, which this channel does not call, and never to a record the agent writes with `parents`. A record sym refuses to build or sign (a category over its 256 KiB bound, say) is answered "Not sent", and a held reply it refuses at flush is reported STUCK in `sym_peers`.
 
 ## Troubleshooting
 
@@ -357,35 +401,37 @@ npx -y @sym-bot/mesh-channel init
 
 ### Peers connect (Claude Code starts cleanly) but never appear in `sym_peers`
 
-Almost always a **mesh room mismatch** — Bonjour scopes discovery by service type (`_<room>._tcp`), so `default` and `backend-team` nodes on the same wifi are invisible to each other. Two diagnostics:
+Almost always a **mesh room mismatch** — a node dials only an advertisement whose TXT room is its own, so `default` and `backend-team` nodes on the same wifi are invisible to each other. The other common cause is a peer on sym 0.13 or older, which does not list `mmp` 2.0 and cannot form a Core Secure session with this node. Two diagnostics:
 
 ```
-> sym_status         # shows: Room: <name> (<service-type>)
-> sym_rooms_discover  # shows every room currently advertising on the LAN
+> sym_status         # shows: Room: <name> — advertised on the LAN as _sym._tcp, TXT room=<name>
+> sym_rooms_discover  # shows every room currently advertising on the LAN, and nodes without mmp 2.0
 ```
 
 If your teammate's node is on a different room, align via `sym_join_room` (this session) and persist via `init --room <name>` (future sessions). Run `npx @sym-bot/mesh-channel doctor` to confirm the persisted room on every entry — the doctor explicitly flags mismatches across user-global and project-scoped configs.
 
-This is the failure pattern where every other indicator looks healthy: `sym_status` says `Peers: 0` but the underlying SymNode is fine, the mDNS service is registered, and the relay (if any) is connected — they're just announced on a service type your peer isn't browsing.
+This is the failure pattern where every other indicator looks healthy: `sym_status` says `Peers: 0` but the underlying SymNode is fine, the mDNS service is registered, and the relay (if any) is connected — they're just announced in a room your peer isn't in.
 
 ### Peers don't see each other on the same wifi
 
-Check Bonjour is running:
+Check that mDNS works (the SDK speaks it itself, so no system daemon is needed; these tools only let you look):
 
 - macOS: `dns-sd -B _sym._tcp` (built-in)
-- Linux: `avahi-browse -r _sym._tcp` (needs `avahi-daemon` running)
-- Windows 10+: built-in. If discovery fails, check Windows Firewall allows mDNS (port 5353 UDP).
+- Linux: `avahi-browse -r _sym._tcp` (if `avahi-daemon` is installed)
+- Windows 10+: if discovery fails, check Windows Firewall allows mDNS (port 5353 UDP).
+
+Each entry is one node; its TXT carries `room` and `mmp`. Two nodes meet only when both name the same room.
 
 Some corporate networks block mDNS multicast entirely — try a hotspot or home wifi to verify. If LAN is blocked, fall back to a relay.
 
 ### `<channel>` notifications never arrive even though peers are connected
 
-The 11 tools work without any flag. The real-time `<channel>` **push** is separate: Claude Code only delivers channel notifications for channels on its **approved-channels allowlist**, and sym-mesh-channel isn't on it yet — so push requires the development-channels flag matching your install path:
+The tools work without any flag. The real-time `<channel>` **push** is separate: Claude Code only delivers channel notifications for channels on its **approved-channels allowlist**, and sym-mesh-channel isn't on it yet — so push requires the development-channels flag matching your install path:
 
 - plugin install: `--dangerously-load-development-channels plugin:sym-mesh-channel@sym-bot` (or `@claude-community` if you installed from the Anthropic community directory — the handle must match your install source)
 - npm install: `--dangerously-load-development-channels server:claude-sym-mesh`
 
-This is an Anthropic-side gate, not a bug here — once the channel is allowlisted the flag is no longer needed. Tracked in [anthropics/claude-plugins-official#1512](https://github.com/anthropics/claude-plugins-official/issues/1512).
+The server cannot tell whether a push reached you, and does not guess. Call `sym_push_confirm {}` to have a push check sent: if the notification arrives, confirm with its code; if it does not, push is not reaching this session, and `sym_receive` is how you read deliveries. This is an Anthropic-side gate, not a bug here. Tracked in [anthropics/claude-plugins-official#1512](https://github.com/anthropics/claude-plugins-official/issues/1512).
 
 ### `sym_status` says "Relay: connected" when you didn't configure one
 
@@ -393,9 +439,9 @@ Your shell profile (`~/.zshrc`, `~/.bashrc`) exports `SYM_RELAY_URL`. Claude Cod
 
 ### Multiple Claude Code sessions on the same machine want to share an identity
 
-Don't. Each agent should have a distinct node name; `start` gives each folder its own. The SymNode takes an exclusive lockfile on its identity (`~/.sym/nodes/<name>/lock.pid`) and refuses a second process with the same name. That second server starts without a node, and every mesh tool answers `MESH NODE NOT RUNNING: node identity '<name>' … is already held by a live process (PID n)`. Close the other session, or give this one its own name with `--name`, `node_name` in `.sym/node.json`, or `SYM_NODE_NAME`.
+Don't. Each agent should have a distinct node name; `start` gives each folder its own. The SymNode takes an exclusive lock on its identity (in `~/.sym/nodes/by-id/<nodeId>/`) and refuses a second process with the same identity. That second server starts without a node, and every mesh tool answers `MESH NODE NOT RUNNING: node identity '<name>' … is already held by a live process (PID n)`. Close the other session, or give this one its own name with `--name`, `node_name` in `.sym/node.json`, or `SYM_NODE_NAME`.
 
-On **Windows** the lock can't yet tell a live holder from a crashed session whose PID has been reused by another program. If no process with that PID is this agent, delete `~/.sym/nodes/<name>/lock.pid` and restart.
+On **Windows**, if no process with that PID is this agent, delete the lock file the message names and restart.
 
 ### Two mesh nodes in one session (a `MESH NODE ADVISORY` at startup)
 
@@ -437,15 +483,51 @@ Apache 2.0. Built and owned by **[SYM.BOT](https://sym.bot)**, the trading name 
 
 ## Offline peers: held mail
 
-A directed send to a peer that is not connected is **held in your outbox** (0.7.0+) and
-delivered when that peer returns. `sym_peers` lists anything still waiting.
+A directed send to a peer that has no session now is **held in your outbox** and sent when that
+peer's session returns. `sym_peers` lists anything still waiting.
 
 - **Held is not delivered.** The queue is on your machine; the recipient cannot see it.
   If your node does not come back, the message is lost.
-- **Only peers you have seen** can be held for. Unknown names are refused, so a typo
-  creates nothing.
+- **Only nodeIds you have had a Core Secure session with** can be held for: a `peer-joined` counts
+  only when `sym_peers` shows that peer's session as a proven Core Secure one, never a Legacy Import
+  session. An unknown nodeId is refused, so a typo creates nothing, and a name is never a route.
+- **A held reply keeps its lineage.** sym never refuses a reply for citing a peer's record. If it
+  refuses to build one when the peer returns (a category over its bound, a key that cannot sign), the
+  item is marked STUCK with sym's own reason in `sym_peers`, not reported as waiting; it is tried
+  again after you publish, or `sym_outbox_discard` drops it. A stuck item does not hold up the ones
+  behind it at the next flush.
 - **The sender must return** to flush — holding does not help when the sender is the
   intermittent one.
+- A 0.10 item held for a name is converted to its nodeId when the old roster recorded one;
+  otherwise `sym_peers` lists it under its label, and `sym_outbox_discard {peer: "<label>"}` clears it.
+
+## Interior mode: a node's mind
+
+An XMesh cognitive node (or any sym 0.14 node) can run a Claude session as its **mind**: the node
+keeps its key, its store and its learned admission profile, and the session submits drafts the node
+checks and signs as itself (XMesh design C2, sym design D9.3). The session has no mesh identity.
+
+```bash
+SYM_INTERIOR_SOCKET=/path/to/node/interior.sock \
+SYM_INTERIOR_CAPABILITY_FILE=/path/to/capability   # yours, 0600, or it is refused; or SYM_INTERIOR_CAPABILITY
+SYM_INTERIOR_KIND=observe                           # the default submission kind
+```
+
+- `sym_send` and `sym_publish` submit; a refusal (a kind the mission did not declare, an intent
+  that is not the kind, a recipient outside its allowlist, a parent outside the mind's scope, the
+  rate) is said in plain words. The node signs the kind as the record's intent, so leave intent out.
+- `sym_peers`, `sym_join_room`, the invite tools and the outbox are not available: the node owns
+  its room and its peers.
+- The mind reads the node's deliveries through the interior ([DESIGN-0.11.0.md §6](DESIGN-0.11.0.md)),
+  gated exactly as in node mode. The node gives it only what arrived for its mission while it runs
+  (a directed delivery only from a nodeId the mission may address); recall and `parents` are limited
+  to those, its own submissions and the mission's context. A node that serves no read side is
+  reported as such; a request the node refuses is reported as a refusal, not as unsupported.
+- The capability is bound to the one connection the channel opens; the node refuses it on any other
+  (`capability-bound-to-another-connection`). When that connection closes, this mind is detached and
+  says so, and the channel never reconnects with it.
+- When the host's stdin closes, the channel ends the mind, which revokes its capability.
+  `SYM_INTERIOR_END_ON_EXIT=0` leaves it running.
 
 ## Codex setup (full)
 

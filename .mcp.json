@@ -4,7 +4,7 @@
       "command": "npx",
       "args": [
         "-y",
-        "@sym-bot/mesh-channel@0.10.1"
+        "@sym-bot/mesh-channel@0.11.0"
       ],
       "env": {
         "SYM_RELAY_URL": "${user_config.relay_url}",

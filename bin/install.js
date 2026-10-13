@@ -53,7 +53,7 @@ const cmd = args.find((a) => !a.startsWith('--')) || 'init';
 // --room <name>: persist a SYM_ROOM env entry into the written .mcp.json /
 // ~/.claude.json so the node joins that room on every Claude Code launch.
 // Without this flag, the env block omits SYM_ROOM and the node falls back
-// to the default _sym._tcp mesh on startup. Runtime sym_join_room hot-swaps
+// to the default room on startup. Runtime sym_join_room hot-swaps
 // only last for the current session — without persistence, peers in named
 // rooms silently revert to default and become invisible to teammates.
 const roomArgIdx = args.indexOf('--room');
@@ -71,34 +71,31 @@ try {
   if (n) process.stderr.write(`[sym-mesh-channel] migrated ${n} node store(s): meshmem → cmbs\n`);
 } catch { /* SDK not resolvable or nothing to do — non-fatal */ }
 
-// The room grammar belongs to the SDK (@sym-bot/sym >= 0.12.3 exports `rooms`).
-// Prefer it. The literal below is a LAST-RESORT MIRROR for the one case the SDK
-// cannot serve: install runs before/without a resolvable SDK, and a validator
-// that silently disappears would let a malformed room reach the config file —
-// which is exactly the persistence path this gate exists to protect (grammar
-// review F1). The mirror is not allowed to drift: test/plugin.test.js asserts it
-// is character-identical to the SDK's exported source, so divergence fails CI
-// rather than surfacing as two nodes disagreeing about whether a room exists.
-const FALLBACK_KEBAB_CASE_RE = /^[a-z0-9]+(?:--?[a-z0-9]+)*$/;
-let KEBAB_CASE_RE = FALLBACK_KEBAB_CASE_RE;
+// The room grammar belongs to the SDK (its `rooms.isValidRoom`: MMP §5.8, `[a-z0-9._-]` of 1 to 64
+// characters, and not `sym`). Prefer it. The pattern below is a LAST-RESORT MIRROR for the one case the SDK
+// cannot serve: install runs before/without a resolvable SDK, and a validator that silently disappears would
+// let a malformed room reach the config file, which is exactly the persistence path this gate exists to
+// protect. The mirror is not allowed to drift: test/plugin.test.js checks it against the SDK on a table of
+// names, so divergence fails CI rather than surfacing as two nodes disagreeing about whether a room exists.
+const FALLBACK_ROOM_RE = /^[a-z0-9._-]{1,64}$/;
+const fallbackIsRoom = (v) => v === 'default' || (FALLBACK_ROOM_RE.test(v) && v !== 'sym');
+let isRoomName = fallbackIsRoom;
 try {
   const sdk = require('@sym-bot/sym');
-  KEBAB_CASE_RE = (sdk.rooms || require('@sym-bot/sym/lib/rooms.js')).KEBAB_CASE_RE;
+  isRoomName = sdk.rooms.isValidRoom;
 } catch { /* SDK not resolvable — mirror stands */ }
 function validateRoomValue(value, source) {
   if (!value) return;
-  if (value === 'default') return;
-  if (!KEBAB_CASE_RE.test(value)) {
-    process.stderr.write(`ERROR: ${source} "${value}" must be kebab-case (e.g. backend-team) or "default".\n`);
+  if (!isRoomName(value)) {
+    process.stderr.write(`ERROR: ${source} "${value}" is not a room name: 1 to 64 characters from a-z, 0-9, ".", "_" and "-", all lowercase (MMP §5.8), e.g. backend-team or acme.prod, or "default". "sym" is reserved.\n`);
     process.exit(1);
   }
 }
 validateRoomValue(roomArg, '--room');
 // Apply the same gate to the env-var path. Pre-0.3.4-followup, a malformed
 // SYM_ROOM=' ' or SYM_ROOM=Backend_Team value flowed through unvalidated
-// and got written into the .mcp.json env block as-is, producing an mDNS
-// service type the SymNode would silently fail to register on. Now both
-// inputs share the validator with the same error message shape.
+// and got written into the .mcp.json env block as-is; a node refuses such a room (sym 0.14 throws EBADROOM).
+// Now both inputs share the validator with the same error message shape.
 validateRoomValue(process.env.SYM_ROOM, 'SYM_ROOM');
 
 // ── isStaleEntry: a claude-sym-mesh entry whose server.js path is gone ──
@@ -181,7 +178,7 @@ function preserveNodeName(entry) {
 // preserveRoom: return the SYM_ROOM from an existing entry's env so
 // rewrites keep the mesh room. Same shape as preserveNodeName — without
 // this, healing a stale entry would drop a previously-persisted room
-// and silently downgrade the node to the default _sym._tcp mesh,
+// and silently downgrade the node to the default room,
 // stranding teammates who stay in the named room.
 function preserveRoom(entry) {
   if (!entry || !entry.env || typeof entry.env.SYM_ROOM !== 'string') return null;
@@ -296,7 +293,7 @@ function disablePluginForFolder(dir) {
 // The npx / MCP-server install path always exposes the channel as a raw
 // server, so the handle is deterministically `server:claude-sym-mesh`.
 //
-//   sym-mesh-channel start                       # this dir, real-time push on
+//   sym-mesh-channel start                       # this dir, launched with the channels flag
 //   sym-mesh-channel start --project --name cto --room my-team
 //   sym-mesh-channel start --print               # show the command, don't launch
 //   sym-mesh-channel start -- --resume           # pass args through to claude
@@ -459,13 +456,15 @@ if (cmd === 'start') {
   }
   else if (roomArg) writeProjectConfig(launchDir, { room: roomArg, defaultName: false });
 
-  // ONE AGENT, ONE NODE. `start` launches the server: registration with real-time push. If the Claude
+  // ONE AGENT, ONE NODE. `start` launches the server registration named in the channels flag. If the Claude
   // plugin is installed, Claude Code would start its node too, and that node reads the same
   // .sym/node.json, so the session's two nodes would claim one name and whichever started first would
   // win — a coin flip on whether the push-enabled node exists. Turn the plugin off for this folder.
   disablePluginForFolder(launchDir);
 
-  console.log(`\n▶ Launching Claude Code on the SYM mesh — real-time push on.\n  (channel: ${handle}; the dev flag is temporary until Anthropic allowlists it)\n`);
+  // Launched with the channels flag, push CAN reach the session; whether it does, only the session can
+  // say (design D5): the server sends a push check, and the session answers it with sym_push_confirm.
+  console.log(`\n▶ Launching Claude Code on the SYM mesh with the channels flag for ${handle}.\n  (the dev flag is temporary until Anthropic allowlists it; the session confirms push itself with sym_push_confirm)\n`);
   // On Windows the `claude` CLI is a `.cmd`/`.ps1` shim (npm) or `.exe`
   // (native installer). Node's spawn does an exact-filename lookup that
   // ignores PATHEXT, so bare `spawnSync('claude', …)` returns ENOENT even
@@ -503,9 +502,9 @@ const nodeName = process.env.SYM_NODE_NAME || defaultNodeName;
 // Capture the user's *explicit* room intent for this install, distinct
 // from "user didn't ask, use existing or default":
 //   null            → user didn't pass --room or SYM_ROOM
-//   'default'       → user explicitly wants the global _sym._tcp mesh
+//   'default'       → user explicitly wants the global mesh (the room `default`)
 //                     (escape hatch: revert from a named room, with --force)
-//   '<kebab-name>'  → user explicitly wants this named room
+//   '<room>'         → user explicitly wants this named room (MMP §5.8)
 const explicitRoom = roomArg !== null ? roomArg
                     : (process.env.SYM_ROOM || null);
 
@@ -522,7 +521,7 @@ const explicitRoom = roomArg !== null ? roomArg
 //
 // Returns the SYM_ROOM value to write, or null to omit the key entirely
 // (which the caller maps to "leave SYM_ROOM out of the env block, node
-// uses default _sym._tcp on launch").
+// is in the room `default` on launch").
 function resolveRoom(existingEntry) {
   const preserved = preserveRoom(existingEntry);
   if (force && explicitRoom !== null) {
@@ -692,7 +691,7 @@ if (useProjectMode) {
     `✓ sym-mesh-channel configured for project: ${projectDir}`,
     '',
     `  Node name:     ${projectNodeName}${projectEntryIsStale ? ' (preserved from stale entry)' : ''}`,
-    `  Mesh room:    ${projectRoom || 'default (global _sym._tcp mesh)'}`,
+    `  Mesh room:    ${projectRoom || 'default (the global mesh)'}`,
     `  Server path:   ${serverJsPath}`,
     `  Wrote:         ${mcpJsonPath}`,
   ];
@@ -819,7 +818,7 @@ if (cmd === 'doctor') {
   if (roomMismatch) {
     console.log('');
     console.log(`⚠ Room mismatch across entries: ${Array.from(rooms).join(', ')}.`);
-    console.log('  Nodes in different rooms cannot discover each other on Bonjour.');
+    console.log('  Nodes in different rooms do not dial each other: a node dials only an advertisement whose TXT room is its own.');
     console.log('  If teammates expect to see each other, align the SYM_ROOM env var.');
     console.log('  See README "Team mesh rooms → Persisting your room across restarts".');
   }
@@ -887,7 +886,7 @@ const entry = {
   },
 };
 // SYM_ROOM only emitted when explicitly chosen — see project-mode comment
-// for the rationale. Omitted = node uses the global _sym._tcp default.
+// for the rationale. Omitted = node is in the room 'default'.
 if (topRoom && !noPin) entry.env.SYM_ROOM = topRoom;
 
 if (!keepTop) claudeJson.mcpServers['claude-sym-mesh'] = entry;   // keepTop: heal projects only
@@ -978,7 +977,7 @@ console.log(`
 ✓ sym-mesh-channel configured globally in ~/.claude.json
 
   Node name:     ${noPin ? 'per folder (.sym/node.json; not pinned here)' : `${topNodeName}${nodeNameSuffix}`}
-  Mesh room:    ${noPin ? 'per folder (.sym/node.json; not pinned here)' : (topRoom || 'default (global _sym._tcp mesh)')}
+  Mesh room:    ${noPin ? 'per folder (.sym/node.json; not pinned here)' : (topRoom || 'default (the global mesh)')}
   Server path:   ${serverJsPath}
   Backup:        ${backupPath}
 ${healedLines}
@@ -989,7 +988,7 @@ Launch Claude Code with the Channels flag:
 Inside Claude Code, verify:
 
   sym_status   →  node id, relay state, peer count
-  sym_peers    →  discovered peers via Bonjour or relay
+  sym_peers    →  discovered peers via mDNS or relay
   sym_send "hello mesh"   →  broadcast to all peers
 
 Troubleshoot a broken install with:
