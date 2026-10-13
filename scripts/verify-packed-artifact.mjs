@@ -79,7 +79,8 @@ ok('installed into an empty consumer project');
 const installedDir = path.dirname(installed);
 const code = fs.readFileSync(installed, 'utf8');
 for (const m of code.matchAll(/require\(\s*'(\.\/[^']+)'\s*\)/g)) {
-  const rel = m[1].endsWith('.js') ? m[1] : `${m[1]}.js`;
+  // A require names its file: `./package.json` is that file (npm always ships it), not `./package.json.js`.
+  const rel = /\.(js|json|mjs|cjs)$/.test(m[1]) ? m[1] : `${m[1]}.js`;
   const target = path.join(installedDir, rel);
   if (fs.existsSync(target)) ok(`require('${m[1]}') resolves in the installed package`);
   else bad(`require('${m[1]}') is MISSING from the tarball — add it to package.json "files"`);

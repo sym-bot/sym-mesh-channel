@@ -59,3 +59,10 @@ test('the gate checks the real ~/.sym afterwards', () => {
   assert.match(src, /os\.userInfo\(\)\.homedir/);
   assert.match(src, /the real ~\/\.sym is untouched by the gate/);
 });
+
+test('the gate resolves a require by the file it names: server.js requires ./package.json, which is not ./package.json.js', () => {
+  // The gate could not run to completion while the dependency was a file: path, so this was never seen: it
+  // looked for `package.json.js` in the installed package and failed a correct tarball.
+  assert.match(src, /\/\\\.\(js\|json\|mjs\|cjs\)\$\/\.test\(m\[1\]\)/);
+  assert.ok(/require\(\s*'\.\/package\.json'\s*\)/.test(fs.readFileSync(path.join(root, 'server.js'), 'utf8')), 'server.js does require ./package.json');
+});
