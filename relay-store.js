@@ -25,10 +25,13 @@ function relaysDir() {
   return path.join(process.env.SYM_STATE_DIR || path.join(os.homedir(), '.sym'), 'relays');
 }
 
-// The room is a path segment. Rooms are validated kebab-case before they get here, but the
-// store must not be the place that trusts that.
+// The room is a path segment. Rooms are validated before they get here, but the store must not be the
+// place that trusts that. It keeps no grammar of its own: a room is the SDK's (MMP §5.8, `[a-z0-9._-]`, 1 to
+// 64 characters), which has no path separator, so it cannot leave the directory. A copy of the old kebab-case
+// grammar here refused every dotted and underscored room a node may now be in, and said "not writable".
+const { isValidRoom } = require('@sym-bot/sym').rooms;
 function fileFor(room) {
-  if (typeof room !== 'string' || !/^[a-z0-9][a-z0-9-]{0,127}$/.test(room)) return null;
+  if (!isValidRoom(room)) return null;
   return path.join(relaysDir(), `${room}.json`);
 }
 

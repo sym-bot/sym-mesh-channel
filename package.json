@@ -19,6 +19,7 @@
     "delivery-policy.js",
     "identity.js",
     "room-names.js",
+    "room-discovery.js",
     "push-statement.js",
     "interior-host.js",
     "node-host.js",
