@@ -364,3 +364,23 @@ test('the host feed keeps its ids across hosts: an announced m-id fetches what i
     assert.strictEqual(after, null, 'past the unread bound, no id is announced');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('an id taken by an item the feed evicted is never given again, however many times the host restarts', () => {
+  const { createLocalFeed } = require('../node-host.js');
+  const dir = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'feed-floor-'));
+  try {
+    const file = path.join(dir, 'channel-feed.log');
+    const a = createLocalFeed(5, file);
+    const items = [a.add({ kind: 'message', text: 'one' }), a.add({ kind: 'message', text: 'two' }), a.add({ kind: 'message', text: 'three' })];
+    for (const d of items) a.markRead(d.id);
+    a.advanceTo(items[2].seq);
+    // A host with a bound of 0 keeps nothing that was read: the journal is folded without them, and the
+    // only record that ids up to m003 were taken is the floor it writes.
+    const folded = createLocalFeed(0, file);
+    for (const d of items) assert.strictEqual(folded.get(d.id), null, `${d.id} was evicted`);
+    // Another host, later: its first id must come after the evicted ones, not restart at m001.
+    const later = createLocalFeed(5, file);
+    const next = later.add({ kind: 'message', text: 'after the floor' });
+    assert.strictEqual(next.id, 'm004', 'the ids of evicted items are not reused');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
