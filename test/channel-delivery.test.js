@@ -43,15 +43,14 @@ test('`to` is a nodeId or a delivery id (its verified signer), never a name', ()
 test('the node\'s own account decides the answer (design D4)', () => {
   const entry = (over) => ({ key: KEY, cmb: { metadata: { key: KEY, assertionId: 'asrt-9' } }, ...over });
   const delivery = (d) => Object.defineProperty(entry({}), 'delivery', { value: d, enumerable: false });
-  assert.deepStrictEqual(cd.emitOutcome(null, ['remix-rejected'], false), { outcome: 'remix-refused' });
-  assert.deepStrictEqual(cd.emitOutcome(null, [], false), { outcome: 'already-in-memory' }, 'identical cognition is already stored: not an error');
-  assert.deepStrictEqual(cd.emitOutcome(entry({ collapsed: true }), ['cmb-collapsed'], false), { outcome: 'already-said', key: KEY });
-  assert.deepStrictEqual(cd.emitOutcome(delivery({ dispatched: 2 }), ['cmb-produced'], false), { outcome: 'published', key: KEY, assertionId: 'asrt-9', dispatched: 2 });
-  assert.deepStrictEqual(cd.emitOutcome(delivery({ dispatched: 0 }), [], false), { outcome: 'no-peers', key: KEY, assertionId: 'asrt-9' });
-  assert.deepStrictEqual(cd.emitOutcome(delivery({ directed: true, undelivered: true, reason: 'not-connected', dispatched: 0 }), [], true), { outcome: 'undelivered', key: KEY, assertionId: 'asrt-9', reason: 'not-connected' });
-  assert.strictEqual(cd.emitOutcome(delivery({ directed: true, dispatched: 1 }), [], true).outcome, 'sent');
+  assert.deepStrictEqual(cd.emitOutcome(null, false), { outcome: 'store-failed' }, 'sym 0.14: null is a store that could not write, never "already stored"');
+  assert.deepStrictEqual(cd.emitOutcome(entry({ collapsed: true }), false), { outcome: 'already-said', key: KEY });
+  assert.deepStrictEqual(cd.emitOutcome(delivery({ dispatched: 2 }), false), { outcome: 'published', key: KEY, assertionId: 'asrt-9', dispatched: 2 });
+  assert.deepStrictEqual(cd.emitOutcome(delivery({ dispatched: 0 }), false), { outcome: 'no-peers', key: KEY, assertionId: 'asrt-9' });
+  assert.deepStrictEqual(cd.emitOutcome(delivery({ directed: true, undelivered: true, reason: 'not-connected', dispatched: 0 }), true), { outcome: 'undelivered', key: KEY, assertionId: 'asrt-9', reason: 'not-connected' });
+  assert.strictEqual(cd.emitOutcome(delivery({ directed: true, dispatched: 1 }), true).outcome, 'sent');
   const dup = Object.defineProperty(entry({ duplicate: true }), 'delivery', { value: { directed: true, dispatched: 1 }, enumerable: false });
-  assert.strictEqual(cd.emitOutcome(dup, [], true).duplicate, true, 'a directed send of stored cognition is a new assertion of it');
+  assert.strictEqual(cd.emitOutcome(dup, true).duplicate, true, 'a directed send of stored cognition is a new assertion of it');
 });
 
 test('the SDK\'s refusals to build a record are the tool\'s answer; any other error is not', () => {
@@ -70,9 +69,11 @@ test('a directed send to a peer silent for over 30 s says its session may be gon
   assert.strictEqual(cd.staleNote(null), '');
 });
 
-test('spec draft #35\'s shapes: a refusal names itself, a broadcast duplicate names its key', () => {
-  assert.deepStrictEqual(cd.emitOutcome({ refused: 'remix-without-new-domain-data' }, [], true), { outcome: 'remix-refused', reason: 'remix-without-new-domain-data' });
-  assert.deepStrictEqual(cd.emitOutcome({ key: KEY, duplicate: true }, [], false), { outcome: 'already-in-memory', key: KEY });
+test('a broadcast duplicate names its key; a cited reply is never gated, so no outcome is a remix refusal', () => {
+  assert.deepStrictEqual(cd.emitOutcome({ key: KEY, duplicate: true }, false), { outcome: 'already-in-memory', key: KEY });
+  // sym 0.14.0: only remix() answers `{ refused: 'remix-without-new-domain-data' }`, and this channel never calls it.
+  const src = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'channel-delivery.js'), 'utf8');
+  assert.ok(!/remix-refused|remix-rejected/.test(src), 'no pre-0.14 gating outcome is left in the outcome table');
 });
 
 test('the salt is gone: identical cognition is answered once, never re-sent with words the agent did not write', () => {
@@ -81,7 +82,7 @@ test('the salt is gone: identical cognition is answered once, never re-sent with
   const calls = [];
   const node = Object.assign(new EventEmitter(), {
     nodeId: '01a0fd15-0000-7000-8000-000000000001', name: 'n', peers: () => [], inboxStatus: () => ({ seq: 0, cursor: 0, undrained: 0 }),
-    remember(categories) { calls.push(JSON.parse(JSON.stringify(categories))); return null; },   // the store already holds it
+    remember(categories) { calls.push(JSON.parse(JSON.stringify(categories))); return { key: KEY, duplicate: true }; },   // the store already holds it (sym 0.14: a broadcast duplicate names its key)
   });
   const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
   const host = new NodeHost({ build: () => node, nodeDir: () => fs.mkdtempSync(path.join(os.tmpdir(), 'cd-')) });
@@ -89,4 +90,6 @@ test('the salt is gone: identical cognition is answered once, never re-sent with
   const out = host.emitRecord({ categories: { focus: 'the same words' } });
   assert.strictEqual(out.outcome, 'already-in-memory');
   assert.deepStrictEqual(calls, [{ focus: 'the same words' }], 'one remember(), with exactly what was given');
+  node.remember = () => null;   // sym 0.14: the store could not write the record
+  assert.strictEqual(host.emitRecord({ categories: { focus: 'unwritable' } }).outcome, 'store-failed');
 });

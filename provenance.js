@@ -18,7 +18,7 @@
  *   6. the facts' delivering session is entry.author.via.nodeId when both are given
  *                                                              (else 'facts-mismatch')
  *
- * MESSAGES AND MOODS. sym raises these as events, not inbox entries, and since 569cad5 each event
+ * MESSAGES AND MOODS. sym raises these as events, not inbox entries, and since sym 0.14.0 each event
  * carries the same frozen `verified`, `profile`, `verification` and `session` facts as an inbox entry,
  * by the same names. A message, and a mood from a record that verified, are gated by the rule above,
  * as an entry is. Nothing is joined or looked up: the key is the one the facts name.

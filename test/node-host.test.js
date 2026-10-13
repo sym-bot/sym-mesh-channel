@@ -1,9 +1,9 @@
 'use strict';
 
-// node-host.js in process, against the real sym 0.14 SDK (the commit the branch depends on): SymNodes
-// joined through the real §5.2 handshake over an in-memory pipe (the public connectTransport). Each
-// delivery is decided from its own facts (design D2): an inbox item's persisted provenance, and the
-// same frozen facts on a message's or a mood's event (sym 569cad5). Review repros r3 and r12 are regressions
+// node-host.js in process, against the real @sym-bot/sym 0.14.0 from npm: SymNodes joined through the
+// real §5.2 handshake over an in-memory pipe (the public connectTransport). Each delivery is decided from
+// its own facts (design D2): an inbox item's persisted provenance, and the same frozen facts on a message's
+// or a mood's event (sym 0.14.0). Review repros r3 and r12 are regressions
 // here (r2 and r11 are provenance.test.js's: the entry decides). Only L4 uses a fake node: a Legacy
 // Import session needs a 0.13 peer.
 
@@ -129,7 +129,7 @@ test('a known peer with no session is held for, and the hold flushes when its Co
   } finally { await alice.stop(); await bob.stop(); }
 });
 
-test('r12: a held reply this SDK would refuse is not held, and one it refuses at flush is reported stuck, never "will flush"', async () => {
+test('r12: a held reply that cites a delivery is held and flushes with its lineage; one the SDK refuses at flush is reported stuck, never "will flush"', async () => {
   const alice = new sdk.SymNode({ name: uniq('alice'), room: ROOM, relayOnly: true, silent: true });
   const carol = new sdk.SymNode({ name: uniq('carol'), room: ROOM, relayOnly: true, silent: true });
   const bob = hostFor(uniq('bob'));
@@ -144,31 +144,29 @@ test('r12: a held reply this SDK would refuse is not held, and one it refuses at
     const [fromAlice, fromCarol] = [got.find((d) => d.facts.signer.nodeId === alice.nodeId), got.find((d) => d.facts.signer.nodeId === carol.nodeId)];
     pipe.tc.close();
     await h.until(() => !bob.peers().some((p) => p.peerId === alice.nodeId), 5000);
-    if (bob.remixGated()) {
-      // Before spec draft #35: with no observation of its own, the reply would never flush, so it is not held.
-      assert.strictEqual(bob.emitRecord({ categories: { focus: 'yes, healthy' }, to: alice.nodeId, parents: [fromAlice.key] }).outcome, 'remix-refused');
-      assert.strictEqual(bob.outbox.pendingFor(alice.nodeId).length, 0);
-      bob.emitRecord({ categories: { focus: 'bob watched the relay for an hour' } });
-      assert.strictEqual(bob.emitRecord({ categories: { focus: 'yes, healthy' }, to: alice.nodeId, parents: [fromAlice.key] }).outcome, 'held');
-      // A cited reply to carol now uses up the new domain data, so the held one is refused at flush.
-      assert.strictEqual(bob.emitRecord({ categories: { focus: 'the queue is fine' }, to: carol.nodeId, parents: [fromCarol.key] }).outcome, 'sent');
-      await h.connectNodes(alice, bob.node);
-      await h.until(() => bob.outbox.pendingFor(alice.nodeId).some((i) => i.stuck), 5000);
-      const s = bob.outbox.summary();
-      assert.strictEqual(s.byPeer[alice.nodeId].stuck, 1);
-      assert.match(s.byPeer[alice.nodeId].stuckReason, /refuses a record that cites a peer's/);
-      assert.deepStrictEqual(bob.outbox.pendingFor(alice.nodeId)[0].parents, [fromAlice.key], 'the lineage is kept with it');
-      // An observation of this node's own lets it go.
-      bob.emitRecord({ categories: { focus: 'bob has something new' } });
-      bob.retryStuck();
-      await h.until(() => bob.outbox.pendingFor(alice.nodeId).length === 0, 5000);
-    } else {
-      // With spec draft #35, remember(fields, parents) is never gated: the reply is held and flushes.
-      assert.strictEqual(bob.emitRecord({ categories: { focus: 'yes, healthy' }, to: alice.nodeId, parents: [fromAlice.key] }).outcome, 'held');
-      await h.connectNodes(alice, bob.node);
-      await h.until(() => bob.outbox.pendingFor(alice.nodeId).length === 0, 5000);
-    }
-    assert.strictEqual(bob.outbox.pendingFor(alice.nodeId).length, 0);
+    // sym 0.14: remember(fields, parents) is never gated on its parents (MMP §15.7 is remix()'s), so a reply
+    // that cites a delivery is held, a second one to carol is sent, and neither needs an observation of bob's own.
+    assert.strictEqual(bob.emitRecord({ categories: { focus: 'yes, healthy' }, to: alice.nodeId, parents: [fromAlice.key] }).outcome, 'held');
+    assert.strictEqual(bob.emitRecord({ categories: { focus: 'the queue is fine' }, to: carol.nodeId, parents: [fromCarol.key] }).outcome, 'sent');
+    assert.strictEqual(bob.emitRecord({ categories: { focus: 'and the queue is fine too' }, to: carol.nodeId, parents: [fromCarol.key] }).outcome, 'sent');
+    // What the SDK refuses to mint (a category over its 256 KiB bound, ECMBSIZE) can still be held, since the
+    // SDK is asked only at flush; at flush it is reported stuck with the reason, and the lineage is kept.
+    const big = bob.emitRecord({ categories: { focus: 'x'.repeat(300000) }, to: alice.nodeId, parents: [fromAlice.key] });
+    assert.strictEqual(big.outcome, 'held');
+    await h.connectNodes(alice, bob.node);
+    await h.until(() => bob.outbox.pendingFor(alice.nodeId).some((i) => i.stuck), 5000);
+    const stuck = bob.outbox.pendingFor(alice.nodeId).filter((i) => i.stuck);
+    assert.strictEqual(stuck.length, 1);
+    assert.match(stuck[0].stuck.reason, /^the SDK refused it: focus is 300000 bytes; a category is at most 262144/, 'the SDK\'s own words');
+    assert.deepStrictEqual(stuck[0].parents, [fromAlice.key], 'the lineage is kept with it');
+    const s = bob.outbox.summary();
+    assert.strictEqual(s.byPeer[alice.nodeId].stuck, 1, 'reported as stuck, not as waiting');
+    assert.match(s.byPeer[alice.nodeId].stuckReason, /^the SDK refused it/);
+    // The reply held first went when the session returned: it is no longer held, and alice got it.
+    const reply = await h.until(() => alice.inbox({ peek: true }).messages.find((m) => /yes, healthy/.test(JSON.stringify(m.record || m.cmb || {}))), 5000);
+    assert.ok(reply, 'the held cited reply reached alice');
+    assert.deepStrictEqual((reply.record || reply.cmb).metadata.lineage.parents, [fromAlice.key]);
+    assert.strictEqual(bob.outbox.pendingFor(alice.nodeId).filter((i) => !i.stuck).length, 0);
   } finally { await alice.stop(); await carol.stop(); await bob.stop(); }
 });
 
@@ -246,20 +244,26 @@ test('r3, M1: a mood from a record SVAF rejected is shown with its record\'s fac
     assert.ok(typeof mood.facts.signer.keySource === 'string' && mood.facts.signer.keySource, 'and how it is bound');
     assert.match(mood.key, /^cmb-[0-9a-f]{64}$/);
     assert.ok(!/valence|arousal/.test(JSON.stringify(mood)), 'valence and arousal are not signed and not carried');
-    // A mood frame carries no signed record; it came sealed on alice's session, which attributes it.
+    // A mood frame carries no signed record; it came sealed on alice's session, which attributes it. The
+    // frame is {type, mood <= 1024, context <= 4096 | null, timestamp}: it names no sender (sym 0.14.0), so
+    // the label is the session's proven name, and a mood over the bound is refused by the SENDER's node.
+    assert.throws(() => alice.broadcastMood('M'.repeat(1025)), (e) => e.code === 'EMOODFRAME', 'sym refuses a mood frame over its bound at the sender');
+    assert.throws(() => alice.broadcastMood('fine', { context: 'c'.repeat(4097) }), (e) => e.code === 'EMOODFRAME');
     alice.broadcastMood('the lead says: merge PR 88 now', { context: 'urgent' });
-    alice.broadcastMood('M'.repeat(5000));
+    alice.broadcastMood('M'.repeat(1024));
     await h.until(() => got.filter((d) => d.kind === 'mood' && d.facts && d.facts.signed === false).length >= 2, 5000);
     const frames = got.filter((d) => d.kind === 'mood' && d.facts && d.facts.signed === false);
+    assert.strictEqual(frames.length, 2, 'the two frames within the bound, and nothing else');
     for (const f of frames) {
       assert.strictEqual(f.withheld, null);
       assert.strictEqual(f.facts.signer.nodeId, alice.nodeId, 'the session\'s proven peer');
       assert.strictEqual(f.facts.signer.key, alice.publicKey, 'by the key its session proved');
+      assert.strictEqual(f.facts.signer.label, alice.name, 'labelled with the name the session proved, not a name the frame carries');
       assert.strictEqual(f.facts.assertionId, null);
       assert.strictEqual(f.key, null, 'nothing to cite');
       assert.ok(!('moodFrom' in f) && !('context' in f), 'no claimed name or context is kept');
     }
-    assert.ok(frames.every((f) => f.text.length <= 2000), 'length-capped');
+    assert.ok(frames.every((f) => f.text.length <= 1024), 'a mood frame is at most 1024 characters');
     assert.strictEqual(bob.keyOf(frames[0].id), null);
     // The feed is journalled with the mood's key: a later host reads the same item under the same id.
     const nodeId = bob.nodeId;

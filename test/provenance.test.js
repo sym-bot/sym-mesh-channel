@@ -74,7 +74,7 @@ test('r11: the admitted copy names its own delivering session; a relayed copy\'s
 });
 
 test('a message or a record\'s mood is gated on the facts its event carries, by the inbox entry\'s names', () => {
-  // sym 569cad5: the event meta carries verified, profile, verification and session.
+  // sym 0.14.0: the event meta carries verified, profile, verification and session.
   const ev1 = ev({ aid: 'asrt-m', via: C, viaKey: KC });
   const event = { verified: true, profile: 'core-secure', verification: ev1.verification, session: ev1.session, assertionId: 'asrt-m', key: KEY, author: { nodeId: A, via: { nodeId: C } } };
   const v = gate(event, entryFacts(event));

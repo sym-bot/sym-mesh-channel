@@ -8,8 +8,8 @@
 // key) is not an error to route around. The answer says what happened, and the agent decides
 // whether it has something new to say.
 //
-// The node's own account decides every answer: remember()'s return, its `delivery` report, and the
-// metric events it emits during the call. Nothing is inferred from peers() or from a local set.
+// The node's own account decides every answer: remember()'s return and its `delivery` report. Nothing is
+// inferred from peers() or from a local set.
 
 const { isNodeId } = require('./identity.js');
 
@@ -86,19 +86,17 @@ function resolveTo(raw, { signerOf, peersLabelled } = {}) {
 }
 
 /**
- * What one remember() did, from the node's own account (design D4).
- *   entry   — remember()'s return
- *   metrics — the metric types the node emitted during the call
- *   directed — whether the call had `to`
+ * What one remember() did, from the node's own account (design D4). sym 0.14.0 returns, never gating on
+ * `parents` (MMP §15.7 is the remix path's, `remix()`, which this channel does not call):
+ *   - the stored entry, with its non-enumerable `delivery` report;
+ *   - `{ key, duplicate: true }` for a broadcast whose cognition the store already holds;
+ *   - a collapsed re-assertion of the node's own newest record (`collapsed: true`);
+ *   - null when the store could not write the record: nothing was stored and nothing went out.
+ * entry    — remember()'s return
+ * directed — whether the call had `to`
  */
-function emitOutcome(entry, metrics, directed) {
-  const m = new Set(metrics || []);
-  if (!entry) {
-    if (m.has('remix-rejected')) return { outcome: 'remix-refused' };
-    return { outcome: 'already-in-memory' };
-  }
-  // Spec draft #35's shapes: a refusal says so, and a broadcast duplicate names its key.
-  if (entry.refused) return { outcome: 'remix-refused', reason: entry.refused };
+function emitOutcome(entry, directed) {
+  if (!entry) return { outcome: 'store-failed' };
   if (entry.duplicate === true && !entry.cmb && !directed) return { outcome: 'already-in-memory', key: entry.key || null };
   const key = entry.key || entry.cmb?.metadata?.key || null;
   const assertionId = entry.cmb?.metadata?.assertionId || null;

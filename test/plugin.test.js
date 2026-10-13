@@ -541,6 +541,21 @@ async function runProjectInstallTests() {
     }
   });
 
+  await testAsync('--project --room takes every MMP §5.8 room: dotted, underscored, and the tenant-suffixed one', async () => {
+    // The kebab-case grammar refused these; a node in them is valid (sym 0.14), so the installer must persist them.
+    for (const room of ['acme.prod', 'team_x', 'x-review--team-02779b950c3d8d7378fd11d6']) {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-proj-'));
+      try {
+        const { code } = await spawnInstaller(['init', '--project', '--room', room], { cwd: tmpDir, env: { ...process.env, SYM_NODE_NAME: 'claude-test-grp', SYM_ROOM: '' } });
+        assert.strictEqual(code, 0, room);
+        const mcp = JSON.parse(fs.readFileSync(path.join(tmpDir, '.mcp.json'), 'utf8'));
+        assert.strictEqual(mcp.mcpServers['claude-sym-mesh'].env.SYM_ROOM, room);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    }
+  });
+
   await testAsync('--project without --room omits SYM_ROOM (default mesh)', async () => {
     // Omitting SYM_ROOM from the env block (rather than writing an empty
     // value) lets the server.js fallback select the global _sym._tcp mesh.
@@ -662,21 +677,22 @@ async function runProjectInstallTests() {
     }
   });
 
-  await testAsync('init rejects malformed SYM_ROOM env var with kebab-case error', async () => {
-    // CTO PR review note 2: KEBAB_CASE_RE must apply to SYM_ROOM env var,
-    // not just the --room CLI flag. Pre-fix, SYM_ROOM=Backend_Team flowed
-    // through unvalidated and got written into the entry as-is, producing
-    // an mDNS service type the SymNode would silently fail to register.
+  await testAsync('init rejects malformed SYM_ROOM env var with the MMP §5.8 room error', async () => {
+    // CTO PR review note 2: the room gate must apply to the SYM_ROOM env var, not just the --room CLI
+    // flag. Pre-fix, SYM_ROOM=Backend_Team flowed through unvalidated and got written into the entry
+    // as-is, for a node that refuses it (sym 0.14 throws EBADROOM; a room is [a-z0-9._-], 1 to 64).
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-proj-'));
     try {
-      const { code, stderr } = await spawnInstaller(['init', '--project'], {
-        cwd: tmpDir,
-        env: { ...process.env, SYM_ROOM: 'Backend_Team' },
-        allowFail: true,
-      });
-      assert.strictEqual(code, 1, 'malformed SYM_ROOM must exit 1');
-      assert.ok(stderr.includes('SYM_ROOM'), 'error must name the env var, not just --room');
-      assert.ok(stderr.includes('kebab-case'), 'error must explain the constraint');
+      for (const bad of ['Backend_Team', 'sym', 'has space', 'a'.repeat(65)]) {
+        const { code, stderr } = await spawnInstaller(['init', '--project'], {
+          cwd: tmpDir,
+          env: { ...process.env, SYM_ROOM: bad },
+          allowFail: true,
+        });
+        assert.strictEqual(code, 1, `malformed SYM_ROOM ${JSON.stringify(bad.slice(0, 12))} must exit 1`);
+        assert.ok(stderr.includes('SYM_ROOM'), 'error must name the env var, not just --room');
+        assert.ok(stderr.includes('MMP §5.8') && stderr.includes('1 to 64 characters'), 'error must explain the constraint');
+      }
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
@@ -1126,11 +1142,12 @@ const { parseInviteURL } = require('../room-names.js');
 const { buildInvite } = require('@sym-bot/sym').invite;
 const ISSUER = { nodeId: '01a0fd15-52ca-726c-9ce1-5767a1379249', publicKey: 'AIFMY28eNJTXCDpjEPAwqpcORIiJt1ByDeaatkY_K-U' };
 
-test('sym://room/{name} parses to the room and its service type', () => {
+test('sym://room/{name} parses to the room, and a room is not a service type', () => {
   const p = parseInviteURL('sym://room/backend-team');
   assert.strictEqual(p.room, 'backend-team');
-  assert.strictEqual(p.serviceType, '_backend-team._tcp');
+  assert.ok(!('serviceType' in p), 'nothing in this channel maps a room to `_<room>._tcp` (sym 0.14: _sym._tcp with TXT room)');
   assert.strictEqual(p.issuer, null);
+  assert.strictEqual(parseInviteURL('sym://room/acme.prod').room, 'acme.prod', 'a dotted room is a room (MMP §5.8)');
 });
 
 test('sym://team/{name}?relay=&token= parses the relay credentials', () => {
@@ -1187,134 +1204,76 @@ function resolveServerJs() {
 
 // ── Room grammar: one source, and the one permitted mirror cannot drift ──────
 //
-// A room name IS the Bonjour service type (MMP §5.8), so a validator that
-// disagrees with the SDK's by one character means two nodes disagree about
-// whether a room exists. That has now happened twice in this repo, and the
-// second time the divergent copy silently gated the room-PERSISTENCE path while
-// the runtime path accepted the same name — green tests, broken install.
+// A room is an MMP §5.8 identifier ([a-z0-9._-], 1 to 64 characters, and not `sym`), signed into every
+// record and the handshake, so a validator that disagrees with the SDK's by one character means two
+// nodes disagree about whether a room exists. That has happened in this repo three times: twice as a
+// kebab-case copy, and once more in relay-store.js, which kept its own pattern and refused every dotted
+// room a node may be in. Since sym 0.14 the SDK's `rooms.isValidRoom` is the grammar.
 //
-// server.js keeps NO copy (it imports the grammar). bin/install.js keeps one
-// last-resort mirror, because install must still validate when the SDK is not
-// resolvable. This test reads the mirror out of the SOURCE TEXT rather than
-// requiring the module — install.js runs its installer on require — and pins it
-// character-identical to the SDK's own exported regex.
-test('room grammar has one source, and install.js mirror matches the SDK exactly', () => {
-  const fs = require('fs');
-  const path = require('path');
-  const root = path.join(__dirname, '..');
+// The modules keep NO copy (they import it). bin/install.js keeps one last-resort mirror, because install
+// must still validate when the SDK is not resolvable. The mirror is read out of the SOURCE TEXT (install.js
+// runs its installer on require) and run against the SDK on a table of names.
+const ROOM_TABLE = [
+  'default', 'backend-team', 'acme.prod', 'team_x', 'a', 'x-review--team-02779b950c3d8d7378fd11d6', '-lead', 'x---y', '.', '..', '0',
+  'a'.repeat(64), 'a'.repeat(65), '', ' ', 'Backend', 'My Team', 'café', 'a/b', 'a\\b', 'sym', 'SYM', 'sym.', 'a\nb', 'ünï',
+];
 
-  const server = fs.readFileSync(path.join(root, 'server.js'), 'utf8') + fs.readFileSync(path.join(root, 'room-names.js'), 'utf8');
-  assert.ok(
-    !/const\s+KEBAB_CASE_RE\s*=\s*\//.test(server),
-    'server.js and room-names.js must not declare their own room-name regex — they import the SDK grammar'
-  );
-  assert.ok(
-    /= sdk\.rooms;/.test(server) && !/lib\/rooms\.js/.test(server),
-    'the room grammar comes from the SDK\'s rooms export, never a deep import'
-  );
+test('room grammar has one source, and install.js mirror matches the SDK on a table of names', () => {
+  const root = path.join(__dirname, '..');
+  for (const f of ['server.js', 'room-names.js', 'room-discovery.js', 'relay-store.js']) {
+    const src = fs.readFileSync(path.join(root, f), 'utf8').split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+    assert.ok(!/\[a-z0-9\._-\]|\[a-z0-9\]\[a-z0-9-\]|KEBAB_CASE_RE/.test(src), `${f} must not declare a room pattern of its own — it asks the SDK`);
+    assert.ok(!/lib\/rooms\.js|core\/room-id/.test(src), `${f}: the room grammar comes from the SDK's rooms export, never a deep import`);
+  }
+  assert.ok(/= require\('@sym-bot\/sym'\)\.rooms;/.test(fs.readFileSync(path.join(root, 'relay-store.js'), 'utf8')), 'relay-store.js asks the SDK');
+  assert.ok(/= sdk\.rooms;/.test(fs.readFileSync(path.join(root, 'room-names.js'), 'utf8')), 'room-names.js asks the SDK');
 
   const install = fs.readFileSync(path.join(root, 'bin', 'install.js'), 'utf8');
-  const mirror = install.match(/const\s+FALLBACK_KEBAB_CASE_RE\s*=\s*(\/.+\/);/);
+  const mirror = install.match(/const\s+FALLBACK_ROOM_RE\s*=\s*(\/.+\/);/);
   assert.ok(mirror, 'install.js must keep its mirror in a named FALLBACK_ constant');
+  const fallback = install.match(/const\s+fallbackIsRoom\s*=\s*\(v\)\s*=>\s*(.+);/);
+  assert.ok(fallback, 'install.js must keep the mirror\'s predicate');
+  const re = new Function(`return ${mirror[1]}`)();
+  const mirrorIsRoom = new Function('FALLBACK_ROOM_RE', `return (v) => ${fallback[1]}`)(re);
 
-  const sdkRooms = require('@sym-bot/sym').rooms;
-  const sdk = sdkRooms.KEBAB_CASE_RE;
-  assert.strictEqual(
-    mirror[1], sdk.toString(),
-    'install.js fallback regex has drifted from @sym-bot/sym rooms.KEBAB_CASE_RE'
-  );
-
-  // The grammar this pins is the tenant-suffix one: a scoped room name must pass.
-  const { isValidRoom } = sdkRooms;
-  assert.ok(isValidRoom('x-review--team-02779b950c3d8d7378fd11d6'), 'tenant-suffixed room must be valid');
-  assert.ok(isValidRoom('backend-team'), 'plain kebab room must be valid');
-  assert.ok(!isValidRoom('x---y'), 'triple hyphen must stay invalid');
-  assert.ok(!isValidRoom('-lead'), 'leading hyphen must stay invalid');
+  const { isValidRoom } = require('@sym-bot/sym').rooms;
+  for (const r of ROOM_TABLE) {
+    assert.strictEqual(mirrorIsRoom(r), isValidRoom(r), `install.js mirror and the SDK disagree about ${JSON.stringify(r.slice(0, 20))}`);
+  }
+  // What the table pins: the §5.8 grammar, not the kebab-case one.
+  assert.ok(isValidRoom('acme.prod') && isValidRoom('team_x') && isValidRoom('.') && isValidRoom('-lead') && isValidRoom('x---y'), '§5.8 admits dots, underscores and any hyphen placement');
+  assert.ok(isValidRoom('x-review--team-02779b950c3d8d7378fd11d6') && isValidRoom('a'.repeat(64)) && !isValidRoom('a'.repeat(65)));
+  assert.ok(!isValidRoom('Backend') && !isValidRoom('') && !isValidRoom('a b') && !isValidRoom('café'), 'uppercase, empty, spaces and non-ASCII are not rooms');
 });
 
-test('room names are canonical: `sym` is refused', () => {
-  const fs = require('fs');
-  const path = require('path');
-  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8') + fs.readFileSync(path.join(__dirname, '..', 'room-names.js'), 'utf8');
-
-  // Founder ruling 2026-08-27. The check must be the PROPERTY, computed from
-  // the SDK's own mapping in both directions -- not a second grammar. If this
-  // ever becomes a regex, the drift this file guards has come back.
-  assert.ok(
-    /serviceTypeToRoom\(roomServiceType\(room\)\) === room/.test(server),
-    'canonicity must be derived from the SDK mapping, not re-implemented'
-  );
-  assert.ok(
-    !/function isCanonicalRoom[\s\S]{0,400}\/\^\[a-z0-9\]/.test(server),
-    'isCanonicalRoom must not carry its own grammar'
-  );
-
-  // Both gates go through it, so neither can be canonical while the other is not.
-  const gates = server.match(/if \(!isCanonicalRoom\(room\)/g) || [];
-  assert.strictEqual(gates.length, 2, `both gates (invite and join) must enforce canonicity, found ${gates.length}`);
-  assert.ok(
-    !/^ {2}if \(!isValidRoom\(room\)/m.test(server),
-    'no gate may use the bare grammar check in place of canonicity'
-  );
-
-  // And the property itself, against whatever SDK is actually resolved here.
-  const rooms = require('@sym-bot/sym').rooms;
-  const canonical = (r) => rooms.isValidRoom(r)
-    && rooms.serviceTypeToRoom(rooms.roomServiceType(r)) === r;
-  assert.ok(!canonical('sym'), '`sym` aliases the global mesh and must not be canonical');
-  assert.ok(canonical('default'), 'the global mesh under its canonical name');
-  assert.ok(canonical('backend-team'));
-  assert.ok(canonical('x-review--team-02779b950c3d8d7378fd11d6'));
+test('room names: `sym` is refused, and both gates (invite and join) use the one predicate', () => {
+  const root = path.join(__dirname, '..');
+  const server = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
+  const { isRoom } = require('../room-names.js');
+  assert.ok(!isRoom('sym'), '`sym` is the service every room is advertised under; the SDK refuses it');
+  assert.ok(isRoom('default') && isRoom('backend-team') && isRoom('acme.prod') && isRoom('x-review--team-02779b950c3d8d7378fd11d6'));
+  assert.ok(!isRoom('Bad_Room') && !isRoom(' backend') && !isRoom('') && !isRoom(null) && !isRoom(42));
+  assert.strictEqual((server.match(/if \(!isRoom\(room\)/g) || []).length, 2, 'both tool gates (invite and join) enforce isRoom');
+  assert.ok(/if \(!isRoom\(ROOM\)\)/.test(server), 'the configured room is checked before the node is built');
 });
 
 test('a refusal names the cause that applies', () => {
-  // Regression guard. roomRefusalReason branched on isValidRoom, whose meaning
-  // CHANGED at sym 0.13.0 from "grammatical" to "grammatical AND canonical".
-  // After that, every canonicity failure was reported as a grammar failure --
-  // so the author of `sym`, which is impeccable kebab-case, was told it was not
-  // kebab-case. Only bumping the SDK exposed it; the source never changed.
-  const fs = require('fs');
-  const path = require('path');
-  const server = fs.readFileSync(path.join(__dirname, '..', 'room-names.js'), 'utf8');
   const { roomRefusalReason } = require('../room-names.js');
-  assert.match(roomRefusalReason('sym'), /is a second name for it/, '`sym` is kebab-case; the cause is canonicity');
-  assert.match(roomRefusalReason('Bad_Room'), /lowercase alphanumerics/);
-  assert.ok(
-    !/function roomRefusalReason[\s\S]{0,300}if \(!isValidRoom\(room\)\)/.test(server),
-    'roomRefusalReason must not branch on isValidRoom -- it conflates the two causes'
-  );
-  assert.ok(
-    /KEBAB_CASE_RE\.test\(room\)/.test(server),
-    'the grammar cause must be read from the grammar itself'
-  );
+  assert.match(roomRefusalReason('sym'), /"sym" is reserved/, '`sym` is grammatical; the cause is that it is reserved');
+  assert.match(roomRefusalReason('Bad_Room'), /1 to 64 characters from a-z, 0-9, "\.", "_" and "-", all lowercase \(MMP §5\.8\)/);
+  assert.match(roomRefusalReason('a'.repeat(65)), /at most 64 characters \(this one is 65\)/);
+  assert.match(roomRefusalReason(''), /cannot be empty/);
+  assert.ok(!/kebab/i.test(roomRefusalReason('Bad_Room')), 'the kebab-case grammar is gone');
 });
 
-test('room -> service-type mapping has one source: no inline `_${room}._tcp` in server.js', () => {
-  const fs = require('fs');
-  const path = require('path');
-  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-
-  // The drift class this pins: server.js once built the service type in four
-  // places, so a grammar change had to be made four times or the copies
-  // disagreed. Every mapping now goes through the SDK. Two escapes are
-  // deliberate and named: the app-scoped invite prefix (which builds a ROOM,
-  // not a service type) and the dns-sd output scanner (which parses external
-  // text rather than mapping a room).
-  const offenders = server
-    .split('\n')
-    .map((line, i) => [i + 1, line])
-    .filter(([, line]) => /`_\$\{[A-Za-z]/.test(line) || /'_sym\._tcp'/.test(line))
-    .filter(([, line]) => !/^\s*(\/\/|\*)/.test(line))
-    .filter(([, line]) => !/appScheme|typeRe|m\[1\]/.test(line));
-
-  assert.deepStrictEqual(
-    offenders, [],
-    'server.js must map room -> service type only via roomServiceType(): ' +
-      offenders.map(([n, l]) => `${n}: ${l.trim()}`).join(' | ')
-  );
-
-  assert.ok(
-    /serviceTypeToRoom/.test(server),
-    'the inverse mapping must also come from the SDK, not a hand-rolled strip'
-  );
+test('this channel builds no per-room service type: the SDK advertises _sym._tcp with TXT room', () => {
+  const root = path.join(__dirname, '..');
+  const offenders = [];
+  for (const f of ['server.js', 'node-host.js', 'room-names.js', 'room-discovery.js', 'interior-host.js']) {
+    fs.readFileSync(path.join(root, f), 'utf8').split('\n').forEach((line, i) => {
+      if (/^\s*(\/\/|\*|\/\*)/.test(line)) return;
+      if (/roomServiceType|serviceTypeToRoom|discoveryServiceType|discoveryBrowseTypes|`_\$\{[A-Za-z]|serviceType/.test(line)) offenders.push(`${f}:${i + 1}: ${line.trim()}`);
+    });
+  }
+  assert.deepStrictEqual(offenders, [], 'a per-room type would make this node invisible to every 0.14 node, which browses only _sym._tcp');
 });

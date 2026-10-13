@@ -18,7 +18,8 @@ const issuer = 'node=01a0fd15-52ca-726c-9ce1-5767a1379249&key=AIFMY28eNJTXCDpjEP
 const withIssuer = parseInviteURL(`sym://team/backend-team?relay=wss%3A%2F%2Fr.example&token=t&${issuer}`);
 assert.strictEqual(withIssuer.issuer.nodeId, '01a0fd15-52ca-726c-9ce1-5767a1379249');
 assert.strictEqual(withIssuer.relayUrl, 'wss://r.example');
-assert.strictEqual(withIssuer.serviceType, '_backend-team._tcp');
+assert.strictEqual(withIssuer.room, 'backend-team');
+assert.ok(!('serviceType' in withIssuer), 'a room is not a service type: nothing here builds `_<room>._tcp` (sym 0.14 advertises _sym._tcp with TXT room)');
 assert.match(parseInviteURL('sym://room/x?node=not-a-uuid&key=k').error, /names an issuer/);
 // The removed vocabulary stays removed — in parsing AND in emission.
 const legacyWord = 'gro' + 'up';

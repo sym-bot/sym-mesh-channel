@@ -66,51 +66,16 @@ function sdkVersion(node) {
   return typeof v === 'string' && v ? v : (SDK_PKG_VERSION || 'unknown');
 }
 
-// ── Rooms and invites: the SDK's one grammar (room-names.js) ──
-const { isCanonicalRoom, roomRefusalReason, parseInviteURL, keyFingerprint, roomServiceType, serviceTypeToRoom } = require('./room-names.js');
+// ── Rooms and invites: the SDK's one grammar, MMP §5.8 (room-names.js) ──
+const { isRoom, roomRefusalReason, parseInviteURL, keyFingerprint } = require('./room-names.js');
+const roomDiscovery = require('./room-discovery.js');
 
-// ── Bonjour discovery of live SYM rooms (observation only) ───
+// ── LAN discovery of live SYM rooms (observation only): _sym._tcp with TXT room (room-discovery.js) ──
 async function discoverRooms() {
-  const { spawn } = require('child_process');
-  const platform = process.platform;
-  const [cmd, argv] = platform === 'darwin' || platform === 'win32'
-    ? ['dns-sd', ['-B', '_services._dns-sd._udp', 'local.']]
-    : ['avahi-browse', ['-t', '-a', '-p']];
-  return new Promise((resolve) => {
-    let child;
-    try { child = spawn(cmd, argv, { stdio: ['ignore', 'pipe', 'pipe'] }); }
-    catch (e) {
-      return resolve({ isError: true, text: `Could not run discovery command '${cmd}': ${e?.message || e}\n\n` +
-        (platform === 'linux' ? 'On Linux, install avahi-utils: sudo apt install avahi-utils' : 'Bonjour should be built-in on macOS and Windows 10+.') });
-    }
-    const out = [];
-    child.stdout.on('data', (chunk) => out.push(chunk));
-    child.on('error', (e) => resolve({ isError: true, text: `Discovery command failed: ${e?.message || e}` }));
-    const timer = setTimeout(() => { try { child.kill('SIGTERM'); } catch {} }, 2000);
-    child.on('close', () => {
-      clearTimeout(timer);
-      const text = Buffer.concat(out).toString('utf8');
-      const typeRe = /_([a-z0-9][a-z0-9-]+)\._tcp/gi;
-      const seen = new Set();
-      let m;
-      while ((m = typeRe.exec(text)) !== null) {
-        const full = `_${m[1]}._tcp`;
-        if (/^_(sym|[a-z]+-[a-z0-9]+|[a-z]+-team|.*-team)\._tcp$/i.test(full)) seen.add(full);
-      }
-      if (seen.size === 0) {
-        return resolve({ text: 'No SYM-mesh rooms visible on the local network right now.\n\n' +
-          'This only shows rooms with at least one node currently online; there is no central directory.\n\n' +
-          `Your node is on: ${SERVICE_TYPE} (room "${ROOM}").` });
-      }
-      const lines = [`SYM-mesh rooms visible on LAN (${seen.size}):`];
-      for (const st of Array.from(seen).sort()) {
-        const name = st.replace(/^_/, '').replace(/\._tcp$/, '');
-        lines.push(`  ${st}   room="${name}"${st === SERVICE_TYPE ? '  (← your current room)' : ''}`);
-      }
-      lines.push('', 'To join one, call sym_join_room with room="<name>".');
-      resolve({ text: lines.join('\n') });
-    });
-  });
+  if (LAN_OFF) return { text: `LAN discovery is off on this node (SYM_LAN=off, relay only), so it browses nothing. Your node is in room "${ROOM}".` };
+  const r = await roomDiscovery.browseServices({ ms: 2000 });
+  const report = roomDiscovery.roomsReport(roomDiscovery.summarizeRooms(r.services, { ownNodeId: selfNodeId }), { ownRoom: ROOM, ownNodeId: selfNodeId });
+  return { text: r.error ? `${report}\n\nLAN discovery stopped early: ${r.error}.` : report, isError: false };
 }
 
 // ── Engineering-domain field weights (SVAF α_f) ──────────────
@@ -171,19 +136,22 @@ const IDENTITY = resolveIdentity({
 });
 const NODE_NAME = IDENTITY.name;
 
-function resolveServiceType() {
-  if (process.env.SYM_SERVICE_TYPE) return process.env.SYM_SERVICE_TYPE;
-  return roomServiceType(process.env.SYM_ROOM || PROJECT_CFG.room);
+// The room: SYM_ROOM, else the folder's .sym/node.json, else "default". A node is in a room, not on a service
+// type (sym 0.14: it advertises `_sym._tcp` with its room in TXT). SYM_SERVICE_TYPE, which set the room
+// through the per-room type before, is read as a room name only when nothing else names one, and said.
+function legacyServiceTypeRoom() {
+  const st = (process.env.SYM_SERVICE_TYPE || '').trim();
+  if (!st) return null;
+  return st === '_sym._tcp' ? 'default' : st.replace(/^_/, '').replace(/\._tcp$/, '');
 }
-function resolveRoom(serviceType) {
+function resolveRoom() {
   if (process.env.SYM_ROOM) return { room: process.env.SYM_ROOM, source: 'SYM_ROOM env' };
   if (PROJECT_CFG.room) return { room: PROJECT_CFG.room, source: PROJECT_CFG.file };
-  const fromServiceType = serviceTypeToRoom(serviceType);
-  if (fromServiceType !== 'default') return { room: fromServiceType, source: 'SYM_SERVICE_TYPE env' };
+  const fromServiceType = legacyServiceTypeRoom();
+  if (fromServiceType && fromServiceType !== 'default') return { room: fromServiceType, source: 'SYM_SERVICE_TYPE env (read as a room name)' };
   return { room: 'default', source: 'nothing configured — this is the fallback, not a choice' };
 }
-let SERVICE_TYPE = resolveServiceType();
-let { room: ROOM, source: ROOM_SOURCE } = resolveRoom(SERVICE_TYPE);
+let { room: ROOM, source: ROOM_SOURCE } = resolveRoom();
 
 function resolveRelay(room) {
   if (process.env.SYM_RELAY_URL) return { url: process.env.SYM_RELAY_URL, token: process.env.SYM_RELAY_TOKEN || null, source: 'SYM_RELAY_URL env' };
@@ -197,16 +165,21 @@ const HOSTED_RELAY_URL = process.env.SYM_HOSTED_RELAY_URL || 'wss://sym-relay.on
 const HOSTED_RELAY_MIN_TOKEN = 32;
 // SYM_LAN=off: a relay-only node (no Bonjour, no loopback discovery).
 const LAN_OFF = /^(off|0|false|no)$/i.test(String(process.env.SYM_LAN || '').trim());
+// What the SDK advertises a node on, whatever its room (MMP 2.0 update 1, §5.1): the room is in the TXT.
+const LAN_SERVICE = '_sym._tcp';
+// A room name as an error answer shows it: escaped and bounded, since it may come from an invite.
+const shownRoom = (r) => JSON.stringify(String(r === undefined || r === null ? '' : r).slice(0, 80));
 
 // One constructor for the startup node and every room move (design D10: a nodeId loads without minting).
-function buildNode({ serviceType, room, relay, relayToken, nodeId, create }) {
+function buildNode({ room, relay, relayToken, nodeId, create }) {
   return new sdk.SymNode({
     name: NODE_NAME,
     ...(nodeId ? { nodeId, create: create === true } : {}),
     cognitiveProfile: 'Engineering node. Code, architecture, debugging, technical decisions.',
     svafFieldWeights: CATEGORY_WEIGHTS,
     svafFreshnessSeconds: 7200,
-    discoveryServiceType: serviceType,
+    // No discoveryServiceType: the node advertises `_sym._tcp` with its room in TXT (MMP §5.1), the only
+    // service type sym 0.14 nodes browse. A per-room type here would make this node invisible to them.
     room,
     relay: relay || undefined,
     relayToken: relayToken || undefined,
@@ -215,8 +188,25 @@ function buildNode({ serviceType, room, relay, relayToken, nodeId, create }) {
   });
 }
 
+/**
+ * The words for a configured room that is not a room (MMP §5.8; sym 0.14 throws EBADROOM for it). The value
+ * is not repeated: it may come from a file in a repository (review L8), and the source names where to look.
+ */
+function roomFault() {
+  return `MESH NODE NOT RUNNING: the room named by ${ROOM_SOURCE} is not a room: ${roomRefusalReason(ROOM)}. ` +
+    'A room is signed into every record and the handshake, so this server does not repair it, and it does not fall back to ' +
+    '\'default\' (that is the global mesh). Fix the name, then restart this MCP server. Every mesh tool reports this until then.';
+}
+
 /** The words for a node that could not be built, by cause. Null for an error that is not about identity. */
 function identityFault(err) {
+  if (err && err.code === 'EBADROOM') return roomFault();
+  // A pin that does not parse stops the node (sym, MMP §6.6.1): it never runs without the root of trust it
+  // was asked for. The pin comes only from SYM_FOUNDER_ANCHOR here; it is operator configuration.
+  if (err && process.env.SYM_FOUNDER_ANCHOR && (/^anchor pin:/.test(String(err.message)) || err instanceof SyntaxError)) {
+    return `MESH NODE NOT RUNNING: the anchor pin in SYM_FOUNDER_ANCHOR does not parse (${String(err.message).slice(0, 160)}). sym stops a node whose pin ` +
+      'is malformed rather than run without the root of trust it was asked for. Fix the pin (nodeId:publicKey, or the pin as JSON) or unset it, then restart this MCP server. Every mesh tool reports this until then.';
+  }
   if (!err) return null;
   const where = process.env.SYM_NODE_ID ? 'SYM_NODE_ID' : (PROJECT_CFG.node_id ? `node_id in ${PROJECT_CFG.file}` :
     (process.env.SYM_NODE_NAME ? 'SYM_NODE_NAME in this MCP server\'s env' : (PROJECT_CFG.node_name ? `node_name in ${PROJECT_CFG.file}` : 'the default name')));
@@ -263,14 +253,22 @@ if (MODE === 'interior') {
   if (PROJECT_CFG.badNodeId) stderrLog(`${PROJECT_CFG.file} node_id ${JSON.stringify(PROJECT_CFG.badNodeId)} is not a nodeId (a UUID); ignoring it.`);
   if (process.env.SYM_NODE_ID && !isNodeId(process.env.SYM_NODE_ID)) stderrLog(`SYM_NODE_ID ${JSON.stringify(process.env.SYM_NODE_ID)} is not a nodeId (a UUID); ignoring it.`);
   const nh = new NodeHost({ build: buildNode, nodeDir: (id) => sdk.identity.nodeDirById(id), log: stderrLog });
-  try {
-    nh.open({ serviceType: SERVICE_TYPE, room: ROOM, relay: RELAY_URL, relayToken: RELAY_TOKEN, nodeId: IDENTITY.nodeId, create: false });
-    host = nh;
-    selfNodeId = nh.nodeId;
-  } catch (err) {
-    NODE_FAULT = identityFault(err);
-    if (!NODE_FAULT) throw err;
+  // A room is checked BEFORE the node is built: building a node mints its identity, and a node that cannot
+  // start in its room must not leave a new agent behind. Nor does it fall back to 'default': that would put
+  // this agent in the global mesh when it asked for a private room.
+  if (!isRoom(ROOM)) {
+    NODE_FAULT = roomFault();
     stderrLog(NODE_FAULT);
+  } else {
+    try {
+      nh.open({ room: ROOM, relay: RELAY_URL, relayToken: RELAY_TOKEN, nodeId: IDENTITY.nodeId, create: false });
+      host = nh;
+      selfNodeId = nh.nodeId;
+    } catch (err) {
+      NODE_FAULT = identityFault(err);
+      if (!NODE_FAULT) throw err;
+      stderrLog(NODE_FAULT);
+    }
   }
 }
 
@@ -322,6 +320,11 @@ function roomAdvisory() {
     lines.push('MESH ROOM ADVISORY: this node is in room \'default\', which nothing configured — it is the fallback. Peers in a named ' +
       'room are invisible from here and no error will be raised. Set SYM_ROOM in this MCP server\'s env, or call sym_join_room.');
   }
+  if ((process.env.SYM_SERVICE_TYPE || '').trim()) {
+    lines.push(ROOM_SOURCE.startsWith('SYM_SERVICE_TYPE')
+      ? `MESH ROOM ADVISORY: SYM_SERVICE_TYPE is set. A node is advertised on ${LAN_SERVICE} with its room in TXT, never on a per-room service type (sym 0.14), so this server reads it only as a room name: room '${ROOM}'. Set SYM_ROOM instead.`
+      : `MESH ROOM ADVISORY: SYM_SERVICE_TYPE is set and ignored: a node is advertised on ${LAN_SERVICE} with its room in TXT (sym 0.14), and this node's room comes from ${ROOM_SOURCE}.`);
+  }
   if (ALLOWED.ignored.length) {
     lines.push(`MESH PEER ADVISORY: SYM_ALLOWED_PEERS lists ${ALLOWED.ignored.length} entr${ALLOWED.ignored.length === 1 ? 'y' : 'ies'} that ` +
       `${ALLOWED.ignored.length === 1 ? 'is' : 'are'} not a nodeId, ignored: names are labels, not identities.` +
@@ -343,7 +346,7 @@ function daemonRoomAdvisory() {
     if (!daemonRoom || daemonRoom === ROOM) return null;
     return {
       pair: `${daemonRoom}|${ROOM}`,
-      line: isCanonicalRoom(daemonRoom)
+      line: isRoom(daemonRoom)
         ? `MESH ROOM ADVISORY: the sym daemon is in room '${daemonRoom}' but this node resolved '${ROOM}' from ${ROOM_SOURCE}. ` +
           `They cannot see each other. Call sym_join_room with room="${daemonRoom}", or fix the config to match. (Said once per session; sym_status repeats it.)`
         : `MESH ROOM ADVISORY: the sym daemon's room file names a room that is not a room name, so this node ('${ROOM}', from ${ROOM_SOURCE}) cannot be in it. (Said once per session; sym_status repeats it.)`,
@@ -530,7 +533,7 @@ function toolList() {
       description: 'Discard CMBs held for a peer that is not coming back: names the peer and reports what was dropped and how long it had been held. Held mail is never evicted on its own.',
       inputSchema: { type: 'object', properties: { peer: { type: 'string', description: 'The nodeId the outbox holds for (sym_peers names it), or for a 0.10 item held under a label, that label.' } }, required: ['peer'] },
     },
-    { name: 'sym_room_info', description: 'The mesh room this node is in (MMP §5.8): service type, room name and source, and its peers.', inputSchema: { type: 'object', properties: {} } },
+    { name: 'sym_room_info', description: 'The mesh room this node is in (MMP §5.8): room name and source, how it is advertised on the LAN, and its peers.', inputSchema: { type: 'object', properties: {} } },
     {
       name: 'sym_invite_create',
       description: 'An invite URL for a room. It names this node and its key as the issuer, so whoever accepts it pins this node\'s key (sym D5). LAN invite: room only. Cross-network: cross_network=true (hosted relay, token minted here), or relay_url / relay_token. The URL is a secret (a team invite carries the relay token) and integrity-sensitive.',
@@ -547,7 +550,7 @@ function toolList() {
     },
     {
       name: 'sym_invite_info',
-      description: 'Parse an invite URL: room, service type, relay credentials, and the issuer\'s nodeId and key fingerprint. Read-only; sym_join_room {invite} joins and pins the issuer.',
+      description: 'Parse an invite URL: room, relay credentials, and the issuer\'s nodeId and key fingerprint. Read-only; sym_join_room {invite} joins and pins the issuer.',
       inputSchema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] },
     },
     {
@@ -657,10 +660,9 @@ function emitAnswer(out, { to, parents }) {
         'That is not an error. To say something new, change what you say.');
     case 'already-said':
       return text(`Already said: identical to this node's latest record (${out.key}), so it is cited, not minted again (MMP §7.5). Nothing new went out.`);
-    case 'remix-refused':
-      return text('Not sent: this SDK refuses a record that cites a peer\'s (MMP §15.7, before spec draft #35) until this node publishes an ' +
-        'observation of its own since its last such record. Nothing was sent or held. Publish an observation of your own with sym_publish, ' +
-        'then send this again with the same parents: lineage is kept (MMP §14.3).', true);
+    case 'store-failed':
+      return text('Not sent: this node\'s store could not write the record, so nothing was stored and nothing went out. Nothing was held either. ' +
+        'This server\'s stderr has the store\'s own line; once the disk or the store directory is fixed, send it again.', true);
     case 'undelivered': {
       const why = cd.NOT_SENT_SAID[out.reason] || out.reason || 'no session took the frame';
       const base = `NOT DELIVERED — ${why}; CMB ${out.key} is in this node's memory only.`;
@@ -850,6 +852,20 @@ async function recallTool(args) {
 }
 
 // ── sym_status ───────────────────────────────────────────────
+/**
+ * What sym's authority store (MMP §6.6) says, as `node.authorityStatus()` gives it. This channel decides
+ * nothing from it: it shows the facts. With no anchor pinned nothing is in force.
+ */
+function authorityLine(a) {
+  if (!a.anchored) {
+    return 'Authority (MMP §6.6): no anchor pinned, so no statement is in force and every peer, this node included, resolves as a participant. ' +
+      'Pin one out of band with SYM_FOUNDER_ANCHOR in this server\'s env (nodeId:publicKey, or the pin as JSON). Role grants signed by sym 0.13 confer nothing.';
+  }
+  const roles = Array.isArray(a.roles) ? [...new Set(a.roles.map((r) => (r && typeof r.role === 'string' ? r.role : null)).filter(Boolean))] : [];
+  const short = (x) => (typeof x === 'string' && x ? `${x.slice(0, 16)}…` : 'none');
+  return `Authority (MMP §6.6): anchor pinned (digest ${short(a.pinDigest)}); ${a.inForce ?? '?'} statement(s) in force of ${a.held ?? '?'} held; root ${short(a.root)}; this node's roles: ${roles.length ? roles.join(', ') : 'participant'}.`;
+}
+
 async function statusTool() {
   const lines = [];
   if (MODE === 'interior') {
@@ -872,12 +888,15 @@ async function statusTool() {
     lines.push(`Node: ${NODE_NAME} — nodeId ${host.nodeId}, key fingerprint ${pub ? fullFingerprint(pub) : '(this SDK has no accessor for the node\'s own key)'}`);
     lines.push(`Versions: @sym-bot/mesh-channel ${PKG_VERSION}; @sym-bot/sym ${sdkVersion(host.node)}`);
     if (!IDENTITY.nodeId) lines.push(`  Pin this folder's agent so it is never re-minted: add "node_id": "${host.nodeId}" to ${PROJECT_CFG.file || '.sym/node.json'}.`);
-    lines.push(`Room: ${ROOM} (${SERVICE_TYPE})${LAN_OFF ? ' — relay only (SYM_LAN=off)' : ''}`);
+    lines.push(`Room: ${ROOM}${LAN_OFF ? ' — relay only (SYM_LAN=off)' : ` — advertised on the LAN as ${LAN_SERVICE}, TXT room=${ROOM}`}`);
     lines.push(`Relay: ${relayLine(s.relayStatus) || (s.relayConnected ? 'connected' : (RELAY_URL ? 'disconnected' : 'not configured'))}`);
     if (RELAY_SOURCE) lines.push(`Relay credential: ${RELAY_SOURCE}`);
     const sessions = cs.sessions || {};
     lines.push(`Core Secure: ${sessions.confirmed || 0} confirmed session(s), ${sessions.authenticating || 0} authenticating; ${cs.keyBindings ?? '?'} key binding(s)` +
       (Array.isArray(cs.keyConflicts) && cs.keyConflicts.length ? `; ${cs.keyConflicts.length} KEY CONFLICT(S) for the operator: ${cs.keyConflicts.map((c) => c.nodeId || JSON.stringify(c)).join(', ')} (sym keys resolve)` : '; no key conflicts'));
+    if (cs.authority && typeof cs.authority === 'object') lines.push(authorityLine(cs.authority));
+    const dropped = host.inboxDropped();
+    if (dropped > 0) lines.push(`Inbox: ${dropped} delivery(ies) since this server started got no id, because the inbox already held too many unread deliveries; their records are in this node's memory if it admitted them (sym_recall). Read what waits with sym_receive.`);
     if (s.legacyImport && s.legacyImport.routes) lines.push(`Legacy Import: ${s.legacyImport.routes} route(s) — what they deliver is withheld here as unverified.`);
     lines.push(`Peers: ${s.peerCount || 0}`);
     lines.push(`Memories: ${s.memoryCount || 0}`);
@@ -940,7 +959,7 @@ function roomInfoTool() {
   const peers = Array.isArray(s.peers) ? s.peers : [];
   const peerLines = peers.length ? peers.map((p) => `  ${deliveryPolicy.displayName(p.name)} (${p.peerId}) via ${(p.sessions || []).map((x) => x.transport).join('+') || p.source || '?'}`).join('\n') : '  (no peers in this room)';
   return text('Mesh room (MMP §5.8):\n' +
-    `  room: ${ROOM}\n  room source: ${ROOM_SOURCE}\n  service type: ${SERVICE_TYPE}\n  node: ${NODE_NAME} (${host.nodeId})\n  peers in room: ${s.peerCount || 0}\n` +
+    `  room: ${ROOM}\n  room source: ${ROOM_SOURCE}\n  LAN: ${LAN_OFF ? 'off (relay only, SYM_LAN=off)' : `${LAN_SERVICE} with TXT room=${ROOM}, mmp=2.0; dials only advertisements whose TXT room is this room and whose mmp lists 2.0`}\n  node: ${NODE_NAME} (${host.nodeId})\n  peers in room: ${s.peerCount || 0}\n` +
     peerLines + '\n\n' +
     (ROOM === 'default' && !process.env.SYM_ROOM ? 'NOTE: \'default\' is the fallback, not a configured choice. A teammate in a named room is invisible from here.\n' : '') +
     'To change rooms, call sym_join_room.');
@@ -950,7 +969,7 @@ function roomInfoTool() {
 function inviteCreateTool(args) {
   const room = args.room;
   if (!room || typeof room !== 'string') return text('Missing required argument: room', true);
-  if (!isCanonicalRoom(room) || room === 'default') return text(`Invalid room name: "${room}" — ${roomRefusalReason(room)}.`, true);
+  if (!isRoom(room) || room === 'default') return text(`Invalid room name: ${shownRoom(room)} — ${room === 'default' ? 'an invite needs a named room' : roomRefusalReason(room)}.`, true);
   const crossNetwork = !!(args.cross_network || args.relay_url || args.relay_token);
   const relayUrl = crossNetwork ? (args.relay_url || HOSTED_RELAY_URL) : undefined;
   const minted = crossNetwork && !args.relay_token;
@@ -961,7 +980,7 @@ function inviteCreateTool(args) {
   const url = host.inviteURL({ room, relay: relayUrl, token: relayToken });
   const alreadyHere = ROOM === room && (!crossNetwork || (RELAY_URL === relayUrl && RELAY_TOKEN === relayToken));
   const joinCall = { room, ...(crossNetwork ? { relay_url: relayUrl, relay_token: relayToken } : {}) };
-  return text(`Invite URL (${crossNetwork ? 'cross-network (relay)' : 'LAN-only (Bonjour)'}):\n\n    ${url}\n\n` +
+  return text(`Invite URL (${crossNetwork ? 'cross-network (relay)' : 'LAN-only (mDNS)'}):\n\n    ${url}\n\n` +
     `It names this node as the issuer (nodeId ${host.nodeId}): whoever accepts it pins this node's key, so their node knows it is you (sym D5). ` +
     'Share it over a channel you trust for both secrecy and integrity: whoever edits it before it is accepted chooses whom the acceptor pins.' +
     (crossNetwork ? ` ${minted ? 'The token was minted just now; it' : 'The token'} names a channel on ${relayUrl}, and anyone holding the URL can join it — share it as you would a password. To lock a device out, mint a new invite.` : '') +
@@ -975,7 +994,7 @@ function inviteInfoTool(args) {
   const p = parseInviteURL(url);
   if (p.error) return text(p.error, true);
   const out = {
-    app: p.appScheme, room: p.room, service_type: p.serviceType,
+    app: p.appScheme, room: p.room,
     room_id: p.appScheme === 'sym' ? undefined : p.roomId, room_name: p.appScheme === 'sym' ? undefined : p.roomName,
     relay_url: p.relayUrl || undefined, relay_token: p.relayToken || undefined,
     issuer_node_id: p.issuer ? p.issuer.nodeId : undefined, issuer_key_fingerprint: p.issuer ? keyFingerprint(p.issuer.publicKey) : undefined,
@@ -1000,7 +1019,7 @@ async function joinRoomTool(args) {
     relayToken = relayToken || invite.relayToken;
   }
   if (!room || typeof room !== 'string') return text('Missing required argument: room (or invite)', true);
-  if (!isCanonicalRoom(room)) return text(`Invalid room name: "${room}" — ${roomRefusalReason(room)}.`, true);
+  if (!isRoom(room)) return text(`Invalid room name: ${shownRoom(room)} — ${roomRefusalReason(room)}.`, true);
   let relaySource = relayUrl ? (invite && !args.relay_url ? 'the invite' : 'this call') : null;
   if (args.lan_only) {
     relayUrl = null; relayToken = null;
@@ -1013,9 +1032,7 @@ async function joinRoomTool(args) {
     return text(`relay_token is ${relayToken.length} characters; ${HOSTED_RELAY_URL} admits ${HOSTED_RELAY_MIN_TOKEN} or more, so this join would be refused on every attempt. ` +
       `Nothing was changed — this node is still in room '${ROOM}'.`, true);
   }
-  const newServiceType = roomServiceType(room);
   const prevRoom = ROOM;
-  const prevServiceType = SERVICE_TYPE;
   // The pin comes BEFORE the move, so it precedes the first session in the new room: a squatter
   // racing the issuer to that first session would otherwise be bound first. The key registry is
   // persisted in the node's directory, so the rebuilt node reads it.
@@ -1026,7 +1043,7 @@ async function joinRoomTool(args) {
       ? `Pinned the issuer's key for ${invite.issuer.nodeId} (fingerprint ${keyFingerprint(invite.issuer.publicKey)}): a session from that nodeId must prove this key.\n`
       : `The issuer's key was not pinned: ${a.reason || 'unknown reason'}${a.reason === 'conflict' ? ' — this node holds a different key for that nodeId; the operator resolves it (sym keys resolve)' : ''}.\n`;
   }
-  const r = await host.rebuild({ serviceType: newServiceType, room, relay: relayUrl, relayToken });
+  const r = await host.rebuild({ room, relay: relayUrl, relayToken });
   if (!r.ok) {
     if (r.restored) return text(`Could not join room "${room}": ${r.error}\n\nRestored the previous room "${prevRoom}"; this node is back where it was.`, true);
     NODE_FAULT = `MESH NODE NOT RUNNING: sym_join_room "${room}" failed (${r.error}) and the previous room "${prevRoom}" could not be restored (${r.restoreError}). Restart this MCP server.`;
@@ -1035,7 +1052,6 @@ async function joinRoomTool(args) {
   }
   ROOM = room;
   ROOM_SOURCE = 'sym_join_room at runtime (not persisted to this server\'s env)';
-  SERVICE_TYPE = newServiceType;
   RELAY_URL = relayUrl;
   RELAY_TOKEN = relayToken;
   let remembered = null;
@@ -1045,10 +1061,10 @@ async function joinRoomTool(args) {
   } else RELAY_SOURCE = relayUrl ? relaySource : null;
   publishRoomBeacon();
 
-  const swapped = `Moved from room "${prevRoom}" (${prevServiceType}) to "${room}" (${newServiceType}), same identity.\n${pinLine}`;
+  const swapped = `Moved from room "${prevRoom}" to "${room}", same identity.\n${pinLine}`;
   if (!relayUrl) {
     return text(swapped + (relaySource === 'forgotten' ? `The relay credential remembered for "${room}" has been forgotten; this node is LAN-only.\n` : '') +
-      'Discovering peers in the new room. Call sym_peers in a moment to see who has a session.');
+      `Discovering peers in the new room${LAN_OFF ? ' (relay only: no LAN)' : ` (the node now advertises ${LAN_SERVICE} with TXT room=${room}, and dials advertisements of that room)`}. Call sym_peers in a moment to see who has a session.`);
   }
   const credentialLine = remembered
     ? `Relay credential remembered for room "${room}" (${remembered}, mode 0600) — the next start re-joins it; sym_join_room {room, lan_only: true} forgets it.\n`
@@ -1191,25 +1207,18 @@ process.stdin.on('close', () => shutdown());
 process.stdin.on('error', () => shutdown());
 
 // ── Room discovery beacon (MMP §5.8), node mode ──────────────
-let roomBeacon = null;
+// The `_symrooms._tcp` beacon is what the `sym rooms` command of the sym CLI lists. It carries the room and the
+// node's name in TXT and no session; the node itself is advertised by the SDK on `_sym._tcp`.
+const roomBeacon = roomDiscovery.createRoomBeacon({ log: stderrLog });
 function publishRoomBeacon() {
   if (MODE !== 'node' || LAN_OFF || !host) return;
-  try {
-    const { Bonjour } = require('bonjour-service');
-    if (roomBeacon) { try { roomBeacon.unpublishAll(); roomBeacon.destroy(); } catch {} roomBeacon = null; }
-    roomBeacon = new Bonjour();
-    roomBeacon.publish({ name: NODE_NAME, type: 'symrooms', port: (host.status().port) || 7777, txt: { room: ROOM, node: NODE_NAME } });
-  } catch (e) { stderrLog(`room beacon unavailable: ${e?.message || e}`); }
+  roomBeacon.publish({ name: NODE_NAME, port: host.status().port, room: ROOM });
 }
-function stopRoomBeacon() {
-  if (!roomBeacon) return;
-  try { roomBeacon.unpublishAll(() => { try { roomBeacon.destroy(); } catch {} }); } catch {}
-  roomBeacon = null;
-}
+function stopRoomBeacon() { roomBeacon.stop(); }
 
 function announce() {
   if (MODE === 'interior') { stderrLog(`interior mode: attached to ${INTERIOR_SOCKET}`); return; }
-  stderrLog(`node '${NODE_NAME}' (${selfNodeId}) in room '${ROOM}' (${SERVICE_TYPE}) — room source: ${ROOM_SOURCE}`);
+  stderrLog(`node '${NODE_NAME}' (${selfNodeId}) in room '${ROOM}' — room source: ${ROOM_SOURCE}`);
   if (RELAY_URL) stderrLog(`relay ${RELAY_URL} — credential source: ${RELAY_SOURCE}`);
   try {
     const ob = host.outbox.summary();

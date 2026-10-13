@@ -1,8 +1,8 @@
 'use strict';
 
 /**
- * signed-parts.js — the parts of a record a line may show: what its author signed (design D6; spec
- * draft #34). The seven CAT7 categories, each as its text, and the record's signed application data
+ * signed-parts.js — the parts of a record a line may show: what its author signed (design D6; MMP 2.0 update 1,
+ * §8.8). The seven CAT7 categories, each as its text, and the record's signed application data
  * when it is sym's payload schema (JSON). A non-CAT7 key, a mood's valence and arousal, per-category
  * metadata and the SDK's rendered `content` string were not signed, so nothing a line shows is built
  * from them.

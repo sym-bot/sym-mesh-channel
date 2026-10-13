@@ -374,10 +374,10 @@ function receiveLine(d, ctx) {
 }
 
 const KEY_SOURCE_SAID = {
-  pinned: 'pinned out of band (an invite or the configured anchor)',
+  pinned: 'pinned out of band (an accepted invite, a Legacy Import route or an operator\'s resolution)',
   anchor: 'the configured anchor',
   proven: 'proven by a Core Secure session with it',
-  grant: 'vouched by a grant rooted at the anchor',
+  grant: 'named by a grant in force under the anchor (MMP §6.6.9)',
   session: 'proven by the session that delivered it',
 };
 

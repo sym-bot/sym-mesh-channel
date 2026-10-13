@@ -4,10 +4,11 @@
  * node-host.js — NODE MODE: this session is the agent, and the agent is its own SymNode.
  *
  * Only sym 0.14's public host API: the constructor with `nodeId` / `create`, `remember`, `recall`,
- * `peers`, `status`, `canRemix`, `inbox` / `inboxGet` / `inboxAck` / `inboxStatus`, `inviteURL` /
- * `acceptInvite`, `awaitRelayOutcome`, `publicKey`, `keyBindings()`, `remix` when present (spec draft
- * #35), and the events `cmb-accepted`, `message`, `mood-delivered`, `legacy-record`, `peer-joined`,
- * `metric`, `relay-auth-refused` and `identity-collision`.
+ * `peers`, `status`, `inbox` / `inboxGet` / `inboxAck` / `inboxStatus`, `inviteURL` / `acceptInvite`,
+ * `awaitRelayOutcome`, `publicKey`, `keyBindings()`, and the events `cmb-accepted`, `message`,
+ * `mood-delivered`, `legacy-record`, `peer-joined`, `relay-auth-refused` and `identity-collision`.
+ * It never calls `remix()` (asynchronous and §15.8-tethered in 0.14): a reply that cites a delivery is the
+ * agent's own record through `remember()`, which sym never gates on its parents (MMP §15.7).
  *
  * Deliveries (design D2, D4). Every one is decided by provenance.js from the delivery itself:
  *   - `cmb-accepted`   → the SDK has put it in its durable inbox with its provenance and stamped
@@ -169,7 +170,7 @@ class NodeHost extends EventEmitter {
     node.on('message', (fromName, text, meta) => {
       try {
         const m = meta || {};
-        // The event carries the inbox entry's frozen facts by the same names (sym 569cad5): one rule.
+        // The event carries the inbox entry's frozen facts by the same names (sym 0.14.0): one rule.
         const entry = { verified: m.verified, profile: m.profile, verification: m.verification, session: m.session, assertionId: m.assertionId, key: m.key, author: { nodeId: m.from, via: { nodeId: m.via } } };
         const verdict = gate(entry, entryFacts(entry));
         const d = this.feed.add(this._delivery({ kind: 'message', text: typeof text === 'string' ? text : '', categories: {}, payload: null, key: typeof m.key === 'string' ? m.key : null, directed: true, remixed: false }, verdict));
@@ -212,7 +213,7 @@ class NodeHost extends EventEmitter {
   }
 
   /**
-   * A mood (design D4, review M1), from the event's own facts (sym 569cad5):
+   * A mood (design D4, review M1), from the event's own facts (sym 0.14.0):
    *   - from a record that verified: `verification` and `session` as an inbox entry has them, gated by
    *     the same rule, and the record's key and assertion must be the ones the facts name;
    *   - a mood frame: no record, so `verification: null` and the facts of the session it travelled
@@ -286,6 +287,11 @@ class NodeHost extends EventEmitter {
     return this.feed.markRead(id);
   }
 
+  /** Deliveries since this process started that got no inbox id, the inbox being full of unread ones (sym 0.14). */
+  inboxDropped() {
+    try { return Number(this.node.inboxStatus().dropped) || 0; } catch { return 0; }
+  }
+
   unreadCount() {
     let n = 0;
     try { n = this.node.inboxStatus().undrained || 0; } catch { /* none */ }
@@ -316,38 +322,23 @@ class NodeHost extends EventEmitter {
 
   // ── Emitting ───────────────────────────────────────────────
 
-  /** Whether this SDK still gates a cited record with §15.7 (before spec draft #35, which adds `remix()`). */
-  remixGated() { return !!this.node && typeof this.node.remix !== 'function'; }
-
   /**
    * One remember(), and the node's own account of it (channel-delivery.emitOutcome). Not `emit`: that
    * is EventEmitter's. A directed send to a nodeId with no session is held when this node has had a
-   * Core Secure session with it — unless this SDK would refuse to send it at all (design D7).
+   * Core Secure session with it (design D7).
    */
   emitRecord({ categories, to = null, parents = [], payload }) {
     const node = this.node;
     if (to) {
       const connected = node.peers().some((p) => p.peerId === to);
-      if (!connected) {
-        // The guard is checked at hold time: a held reply the SDK will refuse would never flush.
-        if (parents.length && this.remixGated() && typeof node.canRemix === 'function' && !node.canRemix()) return { outcome: 'remix-refused' };
-        return this._holdOrRefuse(to, { categories, parents, payload }, 'no-session');
-      }
+      if (!connected) return this._holdOrRefuse(to, { categories, parents, payload }, 'no-session');
     }
-    const metrics = [];
-    const onMetric = (m) => { metrics.push(m && m.type); };
-    node.on('metric', onMetric);
-    let entry;
-    try {
-      entry = node.remember(categories, {
-        ...(to ? { to } : {}),
-        ...(parents.length ? { parents: parents.map((key) => ({ key })) } : {}),
-        ...(payload !== undefined && payload !== null ? { payload } : {}),
-      });
-    } finally {
-      node.removeListener('metric', onMetric);
-    }
-    const out = cd.emitOutcome(entry, metrics, !!to);
+    const entry = node.remember(categories, {
+      ...(to ? { to } : {}),
+      ...(parents.length ? { parents: parents.map((key) => ({ key })) } : {}),
+      ...(payload !== undefined && payload !== null ? { payload } : {}),
+    });
+    const out = cd.emitOutcome(entry, !!to);
     if (out.outcome === 'undelivered') {
       const h = this._holdOrRefuse(to, { categories, parents, payload }, out.reason || 'undelivered');
       return { ...out, held: h.held === true ? h : null, holdRefused: h.held === true ? null : h };
@@ -364,8 +355,9 @@ class NodeHost extends EventEmitter {
 
   /**
    * Flush what is held for a nodeId whose Core Secure session has just been confirmed. In order; never
-   * past a failure. An item the SDK refuses to send is marked stuck, with its reason, and sym_peers
-   * reports it as stuck rather than as waiting (design D7, review r12).
+   * past a failure. An item the SDK refuses to send (it throws: a record over a size bound, a key that
+   * cannot sign) is marked stuck, with its reason, and sym_peers reports it as stuck rather than as
+   * waiting (design D7, review r12).
    */
   async _flushOutbox(nodeId) {
     const pending = this.outbox.pendingFor(nodeId).filter((i) => !i.stuck);
@@ -378,7 +370,6 @@ class NodeHost extends EventEmitter {
       if (out.outcome === 'sent') { sent.push(item.seq); continue; }
       // An undelivered send held itself again; that copy goes, and the original stays held.
       if (out.held && out.held.seq) this.outbox.drop([out.held.seq]);
-      if (out.outcome === 'remix-refused') this.outbox.markStuck(item.seq, 'this SDK refuses a record that cites a peer\'s (MMP §15.7, before spec draft #35) until this node publishes an observation of its own');
       break;
     }
     if (sent.length) {
