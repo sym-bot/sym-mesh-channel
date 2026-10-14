@@ -394,3 +394,137 @@ test('deliveries that got no inbox id are the node\'s count to give (sym 0.14 in
   node.inboxStatus = () => { throw new Error('closed'); };
   assert.strictEqual(host.inboxDropped(), 0);
 });
+
+// ── R4-2: a receive never moves the cursor past a delivery it did not show ──────────────────────────────
+// 0.11.0 drained the SDK inbox with inbox({ limit: Math.max(1, unread taken) }): when every inbox item in
+// the batch had been read by id already (sym_fetch acks it), the max(1, 0) drained one unread item the
+// batch did not hold, and no line ever showed it. The limit also counted read items, so a batch could be
+// all read items.
+
+/** Drain until nothing is left (bounded), and the ids each unread delivery was LISTED under, in order. */
+function drainAll(host, limit, between = () => {}) {
+  const shown = [];
+  for (let round = 0; round < 40; round++) {
+    const r = host.drain({ limit });
+    for (const d of r.items) if (!d.acked) shown.push(d.id);
+    between(round);
+    if (!r.items.length && !r.remaining && round > 2) return shown;
+  }
+  return shown;
+}
+
+test('R4-2: a delivery read by id first does not cost the next one its place: a receive with limit 1 shows it', async () => {
+  const alice = new sdk.SymNode({ name: uniq('alice'), room: ROOM, relayOnly: true, silent: true });
+  const bob = hostFor(uniq('bob'));
+  const got = deliveries(bob);
+  try {
+    await alice.start(); await bob.start();
+    await h.connectNodes(alice, bob.node);
+    alice.remember({ focus: 'FIRST directed record' }, { to: bob.nodeId });
+    await h.until(() => got.length >= 1, 5000);
+    const first = got[0];
+    assert.ok(bob.markRead(first.id), 'read in full by id, as sym_fetch does');
+    alice.remember({ focus: 'SECOND directed record, never read' }, { to: bob.nodeId });
+    await h.until(() => got.length >= 2, 5000);
+    const second = got[1];
+    const r = bob.drain({ limit: 1 });
+    assert.ok(r.items.some((d) => d.id === second.id && !d.acked), `the unread one is listed: ${JSON.stringify(r.items.map((d) => [d.id, d.acked]))}`);
+    assert.ok(!bob.drain({}).items.some((d) => !d.acked), 'and nothing unread is left behind');
+    assert.strictEqual(bob.unreadCount(), 0);
+  } finally { await alice.stop(); await bob.stop(); }
+});
+
+test('R4-2: read and unread deliveries interleaved, records and messages, with arrivals between receives: each unread one is listed exactly once', async () => {
+  const alice = new sdk.SymNode({ name: uniq('alice'), room: ROOM, relayOnly: true, silent: true });
+  const bob = hostFor(uniq('bob'));
+  const got = deliveries(bob);
+  const wait = (n) => h.until(() => got.length >= n, 5000);
+  try {
+    await alice.start(); await bob.start();
+    await h.connectNodes(alice, bob.node);
+    // in order: r1 (read by id), m1, m2, m3, r2, r3 (read by id), m4, r4
+    alice.remember({ focus: 'r1' }, { to: bob.nodeId }); await wait(1); bob.markRead(got[0].id);
+    for (const t of ['m1', 'm2', 'm3']) { alice.send(t, { to: bob.nodeId }); await wait(got.length + 1); }
+    alice.remember({ focus: 'r2' }, { to: bob.nodeId }); await wait(5);
+    alice.remember({ focus: 'r3' }, { to: bob.nodeId }); await wait(6); bob.markRead(got[5].id);
+    alice.send('m4', { to: bob.nodeId }); await wait(7);
+    alice.remember({ focus: 'r4' }, { to: bob.nodeId }); await wait(8);
+    const read = new Set([got[0].id, got[5].id]);
+    let arrivals = 0;
+    const shown = drainAll(bob, 2, (round) => {
+      // new deliveries land between receives
+      if (round === 0) { alice.remember({ focus: 'r5 after the first receive' }, { to: bob.nodeId }); alice.send('m5 after the first receive', { to: bob.nodeId }); arrivals = 2; }
+    });
+    await h.until(() => got.length >= 8 + arrivals, 5000);
+    shown.push(...drainAll(bob, 2));
+    const unread = got.map((d) => d.id).filter((id) => !read.has(id));
+    assert.deepStrictEqual([...shown].sort(), [...unread].sort(), `every unread delivery listed once, none read listed as unread\n shown: ${shown}\n unread: ${unread}`);
+    assert.strictEqual(new Set(shown).size, shown.length, 'none twice');
+    assert.strictEqual(bob.unreadCount(), 0);
+  } finally { await alice.stop(); await bob.stop(); }
+});
+
+test('R4-2: all the read items before a run of messages, then a record: the record is listed, not drained unseen', async () => {
+  const alice = new sdk.SymNode({ name: uniq('alice'), room: ROOM, relayOnly: true, silent: true });
+  const bob = hostFor(uniq('bob'));
+  const got = deliveries(bob);
+  try {
+    await alice.start(); await bob.start();
+    await h.connectNodes(alice, bob.node);
+    alice.remember({ focus: 'X read by id' }, { to: bob.nodeId });
+    await h.until(() => got.length >= 1, 5000);
+    bob.markRead(got[0].id);
+    for (let i = 1; i <= 4; i++) { alice.send(`message ${i}`, { to: bob.nodeId }); await h.until(() => got.length >= 1 + i, 5000); }
+    alice.remember({ focus: 'Y the one that matters' }, { to: bob.nodeId });
+    await h.until(() => got.length >= 6, 5000);
+    const y = got[5];
+    // A batch whose inbox part is only the read X (the messages fill it): X must not be drained with Y.
+    const first = bob.drain({ limit: 4 });
+    assert.ok(!first.items.some((d) => d.id === y.id), 'Y is not in this batch');
+    assert.strictEqual(first.remaining, 1, 'and it is counted as waiting');
+    const second = bob.drain({ limit: 4 });
+    assert.ok(second.items.some((d) => d.id === y.id && !d.acked), `Y is listed by the next receive: ${JSON.stringify(second.items.map((d) => d.id))}`);
+  } finally { await alice.stop(); await bob.stop(); }
+});
+
+test('R4-2: the batch is a merge, so what it takes from each source is a prefix in that source\'s order, even when a clock stepped back', () => {
+  const { chooseBatch } = require('../node-host.js');
+  const I = (id, t, acked = false) => ({ id, receivedAt: t, acked });
+  const F = (id, t, acked = false) => ({ id, receivedAt: t, acked, local: true });
+  // the inbox's clock stepped back between in0002 and in0003
+  const inbox = [I('in0001', 100), I('in0002', 300), I('in0003', 50), I('in0004', 400)];
+  const feed = [F('m001', 200), F('m002', 350)];
+  const b = chooseBatch(inbox, feed, 3).map((d) => d.id);
+  assert.deepStrictEqual(b, ['in0001', 'm001', 'in0002'], 'three unread, oldest first');
+  const takenInbox = b.filter((id) => id.startsWith('in'));
+  assert.deepStrictEqual(takenInbox, inbox.slice(0, takenInbox.length).map((d) => d.id), 'a prefix of the inbox, in seq order');
+  // a read item takes no place
+  assert.deepStrictEqual(chooseBatch([I('in0001', 1, true), I('in0002', 2)], [], 1).map((d) => d.id), ['in0001', 'in0002']);
+  assert.deepStrictEqual(chooseBatch([I('in0001', 1, true)], [F('m001', 0), F('m002', 2)], 1).map((d) => d.id), ['m001', 'in0001']);
+});
+
+// ── R4-7: "(2 keys)" is counted from what this node wrote down, not from this process's memory ──────────
+
+test('R4-7: a label another key used in an earlier run is still said to be shared after a restart', async () => {
+  const aliceName = uniq('alice');
+  const bobName = uniq('bob');
+  const alice = new sdk.SymNode({ name: aliceName, room: ROOM, relayOnly: true, silent: true });
+  let bob = hostFor(bobName);
+  const got = deliveries(bob);
+  try {
+    await alice.start(); await bob.start();
+    await h.connectNodes(alice, bob.node);
+    alice.remember({ focus: 'the real alice' }, { to: bob.nodeId });
+    await h.until(() => got.length >= 1, 5000);
+    assert.match(bob.keys.tag({ key: alice.publicKey, label: aliceName, nodeId: alice.nodeId }), new RegExp(`^${aliceName} ⟨`), 'one key, said plainly');
+  } finally { await alice.stop(); await bob.stop(); }
+  // The same agent, restarted: a new host and a new node for the same identity.
+  bob = hostFor(bobName);
+  try {
+    const impostorKey = crypto.randomBytes(32).toString('base64url');
+    const tag = bob.keys.tag({ key: impostorKey, label: aliceName, nodeId: '01a0fd15-52ca-7111-8222-000000000bad' });
+    assert.match(tag, new RegExp(`^${aliceName} \\(2 keys\\) ⟨`), `the first line of the other key says the label is shared: ${tag}`);
+    const looks = bob.keys.tag({ key: crypto.randomBytes(32).toString('base64url'), label: aliceName.replace('a', '\u0430'), nodeId: '01a0fd15-52ca-7111-8222-000000000bae' });
+    assert.match(looks, /\(3 keys\)/, `a lookalike label counts as the same label: ${looks}`);
+  } finally { await bob.stop(); }
+});
