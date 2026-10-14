@@ -13,6 +13,11 @@ const assert = require('node:assert');
 const rd = require('../room-discovery.js');
 
 const ID = (n) => `01a0fd15-52ca-726c-9ce1-${String(n).padStart(12, '0')}`;
+// A real browser holds an open mDNS socket until it is destroyed, and that socket is what keeps the process
+// alive while a browse waits (room-discovery unrefs its own timer, so it never holds a server up). A stand-in
+// holds a handle the same way, or node:test sees an empty event loop mid-browse and cancels every test left
+// (review R4-11: tests 6 to 8 were cancelled on every run).
+const socketLike = () => { const t = setInterval(() => {}, 1 << 30); return () => clearInterval(t); };
 const svc = (n, txt, extra = {}) => ({ name: ID(n), port: 7000 + n, txt: { 'node-id': ID(n), ...txt }, ...extra });
 
 test('txtOf reads TXT as RFC 6763 §6.4 and MMP §5.1 do: keys case-insensitive, the first occurrence wins', () => {
@@ -84,10 +89,13 @@ test('with no other node, the answer says so and where this node is', () => {
 
 test('browseServices browses `sym` (_sym._tcp) only, for the time asked, and tears the browser down', async () => {
   const seen = { finds: [], stopped: 0, destroyed: 0 };
-  const make = (onError) => ({
-    find(opts, up) { seen.finds.push(opts); setImmediate(() => { up(svc(1, { room: 'r1', mmp: '2.0' })); up(svc(2, { room: 'r2', mmp: '2.0' })); }); return { stop() { seen.stopped++; } }; },
-    destroy() { seen.destroyed++; },
-  });
+  const make = (onError) => {
+    const close = socketLike();
+    return {
+      find(opts, up) { seen.finds.push(opts); setImmediate(() => { up(svc(1, { room: 'r1', mmp: '2.0' })); up(svc(2, { room: 'r2', mmp: '2.0' })); }); return { stop() { seen.stopped++; } }; },
+      destroy() { seen.destroyed++; close(); },
+    };
+  };
   const r = await rd.browseServices({ ms: 30, make });
   assert.deepStrictEqual(seen.finds, [{ type: 'sym' }], 'one browse, of the one service type');
   assert.strictEqual(r.error, undefined);
@@ -97,7 +105,7 @@ test('browseServices browses `sym` (_sym._tcp) only, for the time asked, and tea
 
 test('an mDNS failure ends the browse with its words; it never throws', async () => {
   let report;
-  const make = (onError) => { report = onError; return { find() { setImmediate(() => report(new Error('send EHOSTUNREACH 224.0.0.251:5353'))); return { stop() {} }; }, destroy() {} }; };
+  const make = (onError) => { report = onError; const close = socketLike(); return { find() { setImmediate(() => report(new Error('send EHOSTUNREACH 224.0.0.251:5353'))); return { stop() {} }; }, destroy() { close(); } }; };
   const r = await rd.browseServices({ ms: 1000, make });
   assert.match(r.error, /LAN discovery error: send EHOSTUNREACH/);
   const boom = await rd.browseServices({ ms: 10, make: () => { throw new Error('no multicast'); } });
