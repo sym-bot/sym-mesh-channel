@@ -25,7 +25,7 @@ const { scanClassifierRisk, quarantineHeader, neutralizeSurface } = require('./c
 const { hiddenFieldsTag } = require('./surface-truth.js');
 const { isNodeId } = require('./identity.js');
 const { WITHHELD_REASONS } = require('./provenance.js');
-const { createKeyBook, fullFingerprint, plainLabel } = require('./key-display.js');
+const { createKeyBook, fullFingerprint, plainLabel, fingerprint } = require('./key-display.js');
 
 // ── Prompt-injection patterns ────────────────────────────────
 // A verified signature proves who wrote a record, not that it is safe to read. A match withholds the
@@ -76,13 +76,32 @@ function readRateLimit(raw) {
   return { limit: Number(s) };
 }
 
-/** SYM_ALLOWED_PEERS: nodeIds; names ignored and reported; a list with no nodeId fails closed. */
+/**
+ * SYM_ALLOWED_PEERS (review R4-8). A nodeId is public and its owner's own choice, and sym binds an unbound
+ * nodeId to whatever key its first session proves, so "allowed by nodeId" allows whoever claims that
+ * nodeId first. An entry therefore names a KEY:
+ *   sha256:<64 hex>               a key fingerprint (sym_peers and sym_fetch print it): that key, under any nodeId
+ *   <nodeId>@sha256:<64 hex>      that nodeId, only while it proves that key
+ *   <nodeId>                      0.11.0's form, still honoured, and said loudly: it is not pinned to a key
+ * Anything else (a name) is ignored and reported; a list with no usable entry fails closed.
+ * `nodeIds` are the unpinned entries, `keys` the fingerprints (hex), `pairs` the pinned nodeIds.
+ */
+const FP_RE = /^(?:sha256:)?([0-9a-f]{64})$/i;
 function readAllowedPeers(raw) {
   const entries = String(raw ?? '').split(',').map((s) => s.trim()).filter(Boolean);
   const nodeIds = [];
+  const keys = [];
+  const pairs = [];
   const ignored = [];
-  for (const e of entries) (isNodeId(e) ? nodeIds : ignored).push(isNodeId(e) ? e.toLowerCase() : e);
-  return { nodeIds, ignored, failClosed: entries.length > 0 && nodeIds.length === 0, set: entries.length > 0 };
+  for (const e of entries) {
+    const at = e.indexOf('@');
+    const fp = FP_RE.exec(at === -1 ? e : e.slice(at + 1));
+    if (at === -1 && fp) keys.push(fp[1].toLowerCase());
+    else if (at !== -1 && fp && isNodeId(e.slice(0, at))) pairs.push({ nodeId: e.slice(0, at).trim().toLowerCase(), fp: fp[1].toLowerCase() });
+    else if (at === -1 && isNodeId(e)) nodeIds.push(e.toLowerCase());
+    else ignored.push(e);
+  }
+  return { nodeIds, keys, pairs, ignored, failClosed: entries.length > 0 && nodeIds.length + keys.length + pairs.length === 0, set: entries.length > 0 };
 }
 
 const RISK_SCAN_CHARS = 64 * 1024;
@@ -107,7 +126,7 @@ function prepare(d) {
   let compact, indented;
   return {
     [PREPARED]: true,
-    from: d.from, content: d.content, categories: d.categories || {}, payload,
+    from: d.from, fromKey: d.fromKey, content: d.content, categories: d.categories || {}, payload,
     get compact() { return compact === undefined ? (compact = serialise(payload, false)) : compact; },
     get indented() { return indented === undefined ? (indented = serialise(payload, true)) : indented; },
   };
@@ -142,14 +161,23 @@ function textSurfaces(p) {
  * withheld line names; `detail` is our own words; `counts` holds only numbers of ours (XMesh World,
  * agent-c: a withheld delivery names why, never the peer's text — not even in the operator's log).
  */
-function createDeliveryPolicy({ allowedPeers = [], failClosed = false, maxPayloadBytes = DEFAULT_MAX_PAYLOAD_BYTES } = {}) {
+function createDeliveryPolicy({ allowedPeers = [], allowedKeys = [], allowedPairs = [], failClosed = false, maxPayloadBytes = DEFAULT_MAX_PAYLOAD_BYTES } = {}) {
   const allowed = new Set(allowedPeers.filter(Boolean).map((s) => String(s).toLowerCase()));
+  const keys = new Set(allowedKeys.filter(Boolean).map((s) => String(s).toLowerCase().replace(/^sha256:/, '')));
+  const pairs = new Set(allowedPairs.filter((x) => x && x.nodeId && x.fp).map((x) => `${String(x.nodeId).toLowerCase()}@${String(x.fp).toLowerCase().replace(/^sha256:/, '')}`));
+  const listed = allowed.size + keys.size + pairs.size;
+  /** Whether the verified signer (`from`, its nodeId; `fromKey`, the key it proved) is one the list names. */
+  function isAllowed(p) {
+    const id = String(p.from || '').toLowerCase();
+    const fp = typeof p.fromKey === 'string' && p.fromKey ? fingerprint(p.fromKey) : null;
+    return (fp && keys.has(fp)) || (fp && pairs.has(`${id}@${fp}`)) || allowed.has(id);
+  }
   function judge(d, { self = false } = {}) {
     const p = prepare(d);
     if (!self && failClosed) {
-      return { show: false, reason: 'sender-not-allowed', detail: 'SYM_ALLOWED_PEERS is set but lists no nodeId, so it allows nothing (names are labels since 0.11; list nodeIds)', counts: {} };
+      return { show: false, reason: 'sender-not-allowed', detail: 'SYM_ALLOWED_PEERS is set but lists no key or nodeId, so it allows nothing (names are labels since 0.11; list key fingerprints)', counts: {} };
     }
-    if (!self && allowed.size && !allowed.has(String(p.from || '').toLowerCase())) {
+    if (!self && listed && !isAllowed(p)) {
       return { show: false, reason: 'sender-not-allowed', detail: 'its signer is not in SYM_ALLOWED_PEERS', counts: {} };
     }
     const bytes = payloadBytes(p);
@@ -169,7 +197,7 @@ function createDeliveryPolicy({ allowedPeers = [], failClosed = false, maxPayloa
     }
     return { show: true };
   }
-  return { judge, maxPayloadBytes, allowedPeers: [...allowed], failClosed };
+  return { judge, maxPayloadBytes, allowedPeers: [...allowed], allowedKeys: [...keys], allowedPairs: [...pairs], failClosed };
 }
 
 // ── The push ─────────────────────────────────────────────────
@@ -213,7 +241,26 @@ function displayName(name) {
 function escapeLead(t, max) {
   const flat = String(t ?? '').replace(/\s+/g, ' ').trim();
   const cut = flat.length > max ? `${flat.slice(0, max)}…` : flat;
-  return JSON.stringify(cut);
+  return escapeInvisible(JSON.stringify(cut));
+}
+
+/**
+ * Characters a reader cannot see, or that change how the text around them reads (review R4-13): C0 and C1
+ * controls, format characters (bidi overrides and isolates, zero-width spaces and joiners, the BOM, the
+ * invisible tag characters that can spell a hidden instruction), the line and paragraph separators,
+ * private-use and unassigned code points, variation selectors and the Hangul fillers. JSON.stringify
+ * escapes only C0, the quote and the backslash; these are escaped as \u too, so they are seen.
+ */
+const INVISIBLE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Co}\p{Cn}\u034f\u115f\u1160\u17b4\u17b5\u180b-\u180f\u3164\ufe00-\ufe0f\uffa0\u{e0100}-\u{e01ef}]/gu;
+function escapeInvisible(s, { keep = '' } = {}) {
+  return String(s).replace(INVISIBLE, (c) => {
+    if (keep.includes(c)) return c;
+    const cp = c.codePointAt(0);
+    const hex = (n) => `\\u${n.toString(16).padStart(4, '0')}`;
+    if (cp <= 0xffff) return hex(cp);
+    const v = cp - 0x10000;
+    return hex(0xd800 + (v >> 10)) + hex(0xdc00 + (v & 0x3ff));
+  });
 }
 
 /** The signed text a line leads with (design D6): a CMB's focus, a message's text, a mood's text. */
@@ -242,7 +289,8 @@ function signedBody(d, p) {
   }
   const pay = prepare(p).indented;
   if (pay !== null) lines.push('', '(payload — signed application data)', pay);
-  return lines.join('\n');
+  // Inside the fence too, what a reader cannot see is shown as an escape (R4-13); lines and tabs stay.
+  return escapeInvisible(lines.join('\n'), { keep: '\n\t' });
 }
 
 function keyBook(ctx) { return (ctx && ctx.keys) || DEFAULT_KEYS; }
@@ -307,7 +355,7 @@ function judgeDelivery(d, { policy, selfNodeId }) {
   if (!d.facts) return { bucket: 'unverified' };
   const signer = d.facts.signer.nodeId;
   if (selfNodeId && signer === selfNodeId) return { bucket: 'own' };
-  const p = prepare({ from: signer, content: d.kind === 'cmb' ? undefined : d.text, categories: d.categories, payload: d.payload });
+  const p = prepare({ from: signer, fromKey: d.facts.signer.key, content: d.kind === 'cmb' ? undefined : d.text, categories: d.categories, payload: d.payload });
   const verdict = policy.judge(p, { self: false });
   if (verdict.reason === 'sender-not-allowed') return { bucket: 'not-allowed', verdict, prepared: p };
   if (!verdict.show) return { bucket: 'withheld', verdict, prepared: p };
@@ -434,7 +482,7 @@ function recallLine(r, ctx) {
     const cats = r.cmb && r.cmb.categories;
     const focusV = cats && cats.focus;
     const focus = String((focusV && typeof focusV === 'object' ? focusV.text : focusV) ?? '');
-    const verdict = policy.judge({ from: own ? null : authorId, categories: cats, payload: r.cmb && r.cmb.payload }, { self: own });
+    const verdict = policy.judge({ from: own ? null : authorId, fromKey: own ? null : r.author.key, categories: cats, payload: r.cmb && r.cmb.payload }, { self: own });
     if (!verdict.show) return { line: `${head}${key}\n  withheld · ${reasonWord(verdict.reason)} — ${verdict.detail}`, audit: [verdict.reason, verdict.counts] };
     const risk = scanClassifierRisk(focus);
     if (risk.risky) return { line: `${head}${key}\n  ${escapeLead(neutralizeSurface(focus), RECALL_LEAD_CHARS)} [${risk.terms.length} flagged term(s) defanged]`, audit: ['classifier-risk', { flagged: risk.terms.length }] };
@@ -503,6 +551,6 @@ module.exports = {
   INJECTION_PATTERNS, DEFAULT_MAX_PAYLOAD_BYTES, FETCH_PAGE_CHARS, PUSH_LEAD_CHARS, RECEIVE_LEAD_CHARS,
   readMaxPayloadBytes, DEFAULT_RATE_LIMIT, readRateLimit, readAllowedPeers, RISK_SCAN_CHARS, riskText,
   prepare, payloadBytes, payloadTag, createDeliveryPolicy, createRateLimiter, pushAction,
-  displayName, escapeLead, leadText, signedBody, deliveryTag, withheldLine, unverifiedLine, auditLine,
+  displayName, escapeLead, escapeInvisible, leadText, signedBody, deliveryTag, withheldLine, unverifiedLine, auditLine,
   keyTag, judgeDelivery, pushOf, receiveLine, fetchHead, newFence, recallLine, receiveReport, readOffset, fetchPart,
 };

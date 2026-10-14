@@ -21,6 +21,7 @@
  */
 
 const crypto = require('crypto');
+const { nodeNameProblem } = require('./identity.js');
 
 const MIN_SUFFIX = 8;
 const MAX_KEYS = 20_000;
@@ -42,17 +43,77 @@ function fullFingerprint(key) {
   return fp ? `sha256:${fp}` : null;
 }
 
-/** A label as a line prints it: one line, no brackets, no control characters, no line markers. */
+/**
+ * A label as a line prints it, by an ALLOWLIST (review R4-5). A label is the peer's own choice, so it is
+ * printed bare only when it is a plain name: words of `A-Z a-z 0-9 . _ @ + # -` joined by single spaces, at
+ * most 64 characters, no word "via" (the relay marker), and a name this host would accept (identity.js
+ * nodeNameProblem). Anything else is printed QUOTED, as a JSON string in which every character outside
+ * printable ASCII is a \u escape: a lookalike bracket or arrow (U+3008, U+27F6), a zero-width or bidi
+ * control, NBSP, a C1 control are all visible as what they are, and nothing in it reads as the line's
+ * own markup (the brackets, the fingerprint, the arrow, "via", "(2 keys)"). A label is never dropped.
+ */
+const PLAIN_LABEL = /^[A-Za-z0-9._@+#-]+(?: [A-Za-z0-9._@+#-]+)*$/;
+const LABEL_MAX = 64;
+
+/** One code point as a JSON \u escape (an astral one as its surrogate pair). */
+function uEscape(cp) {
+  const hex = (n) => `\\u${n.toString(16).padStart(4, '0')}`;
+  if (cp <= 0xffff) return hex(cp);
+  const v = cp - 0x10000;
+  return hex(0xd800 + (v >> 10)) + hex(0xdc00 + (v & 0x3ff));
+}
+
 function plainLabel(name) {
-  const s = String(name ?? '').replace(/[\r\n\t\v\f[\]\u0000-\u001f\u007f-\u009f\u2028\u2029→·⟨⟩"]/g, '_').replace(/ via /gi, ' via_').slice(0, 64);
-  return s || 'unknown';
+  const s = String(name ?? '');
+  if (!s) return 'unknown';
+  if (s.length <= LABEL_MAX && PLAIN_LABEL.test(s) && !/(?:^| )via(?: |$)/i.test(s) && !nodeNameProblem(s)) return s;
+  const cps = [...s];
+  const cut = cps.length > LABEL_MAX;
+  let out = '';
+  cps.slice(0, LABEL_MAX).forEach((c, i, arr) => {
+    const cp = c.codePointAt(0);
+    // The spaces around a word "via" are escaped too, so even a quoted label never reads " via ".
+    const viaSpace = cp === 0x20 && ((/^via$/i.test(arr.slice(i + 1, i + 4).join('')) && (arr[i + 4] === undefined || arr[i + 4] === ' '))
+      || (/^via$/i.test(arr.slice(i - 3, i).join('')) && (i - 4 < 0 || arr[i - 4] === ' ')));
+    if (c === '"') out += '\\"';
+    else if (c === '\\') out += '\\\\';
+    // The line's own brackets are escaped too, so a quoted label cannot hold a bracket of the line.
+    else if (cp >= 0x20 && cp <= 0x7e && !viaSpace && c !== '[' && c !== ']') out += c;
+    else out += uEscape(cp);
+  });
+  return `"${out}${cut ? '...' : ''}"`;
 }
 
 /**
- * @param {{ bindings?: function(): Array<{ nodeId: string, key: string }> }} [opts] — the SDK's known
- *   bindings, read at render time
+ * What a label LOOKS like, for counting the keys that use it (review R4-5, R4-7): Unicode-compatibility
+ * folded, invisible and combining characters removed, lower-cased, and the common lookalikes of Latin
+ * letters (Cyrillic, Greek, and the digits and capitals that pass for l and o) mapped to them. Two labels
+ * with one skeleton are "the same label" to whoever reads the line, so "(2 keys)" says so.
  */
-function createKeyBook({ bindings = () => [] } = {}) {
+const CONFUSABLE = new Map(Object.entries({
+  // Cyrillic
+  '\u0430': 'a', '\u0432': 'b', '\u0435': 'e', '\u0451': 'e', '\u043a': 'k', '\u043c': 'm', '\u043d': 'h', '\u043e': 'o', '\u0440': 'p', '\u0441': 'c', '\u0442': 't', '\u0443': 'y', '\u0445': 'x',
+  '\u0455': 's', '\u0456': 'l', '\u0457': 'l', '\u0458': 'j', '\u0501': 'd', '\u04bb': 'h', '\u051b': 'q', '\u051d': 'w', '\u04cf': 'l', '\u0578': 'n', '\u057d': 'u', '\u0585': 'o',
+  // Greek
+  '\u03b1': 'a', '\u03b2': 'b', '\u03b5': 'e', '\u03b7': 'n', '\u03b9': 'l', '\u03ba': 'k', '\u03bd': 'v', '\u03bf': 'o', '\u03c1': 'p', '\u03c4': 't', '\u03c5': 'u', '\u03c7': 'x', '\u03c9': 'w',
+  // i, l, I, 1 and | pass for one another in many fonts, and 0 for o: each is one letter here.
+  'i': 'l', '\u0131': 'l', '\u0261': 'g', '\u2113': 'l', '0': 'o', '1': 'l', '|': 'l', '\u01c0': 'l',
+}));
+function labelSkeleton(name) {
+  let s = String(name ?? '').normalize('NFKC');
+  s = s.replace(/[\p{Cf}\p{Cc}\p{Mn}\p{Me}]/gu, '');
+  s = s.toLowerCase();
+  s = [...s].map((c) => CONFUSABLE.get(c) || c).join('');
+  return s.replace(/rn/g, 'm').replace(/vv/g, 'w').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * @param {{ bindings?: function(): Array<{ nodeId: string, key: string }>,
+ *           persisted?: function(): Array<{ key: string, nodeId?: string, labels?: string[] }> }} [opts]
+ *   — the SDK's known bindings, and the keys and labels this node wrote down in earlier runs
+ *   (known-peers.json, outbox.js; review R4-7), both read at render time
+ */
+function createKeyBook({ bindings = () => [], persisted = () => [] } = {}) {
   const byFp = new Map();   // fingerprint → { key, labels: Set, nodeIds: Set }
 
   function entry(key) {
@@ -72,7 +133,7 @@ function createKeyBook({ bindings = () => [] } = {}) {
     const e = entry(key);
     if (!e) return null;
     if (typeof nodeId === 'string' && nodeId) e.nodeIds.add(nodeId.toLowerCase());
-    if (typeof label === 'string' && label) { e.labels.add(plainLabel(label)); if (e.labels.size > 16) e.labels.delete(e.labels.values().next().value); }
+    if (typeof label === 'string' && label) { e.labels.add(labelSkeleton(label)); if (e.labels.size > 16) e.labels.delete(e.labels.values().next().value); }
     return e.fp;
   }
 
@@ -106,12 +167,27 @@ function createKeyBook({ bindings = () => [] } = {}) {
     return fp.slice(-n);
   }
 
-  /** How many known keys use this label. */
+  function persistedEntries() {
+    let list = [];
+    try { list = persisted() || []; } catch { list = []; }
+    return Array.isArray(list) ? list.filter((p) => p && typeof p.key === 'string' && p.key) : [];
+  }
+
+  /**
+   * How many known keys use this label, or one that looks the same (labelSkeleton): the keys learned in
+   * this process and the ones written down in earlier runs, so a restart does not forget that a label is
+   * another key's (review R4-7).
+   */
   function keysWithLabel(label) {
-    const l = plainLabel(label);
-    let n = 0;
-    for (const e of byFp.values()) if (e.labels.has(l)) n++;
-    return n;
+    const l = labelSkeleton(label);
+    const fps = new Set();
+    for (const e of byFp.values()) if (e.labels.has(l)) fps.add(e.fp);
+    for (const p of persistedEntries()) {
+      if (!(Array.isArray(p.labels) ? p.labels : []).some((x) => typeof x === 'string' && labelSkeleton(x) === l)) continue;
+      const fp = fingerprint(p.key);
+      if (fp) fps.add(fp);
+    }
+    return fps.size;
   }
 
   /**
@@ -144,4 +220,4 @@ function createKeyBook({ bindings = () => [] } = {}) {
   return { learn, tag, suffixOf, fingerprint, allFingerprints, nodeIdsOf, keysWithLabel, keyForNode, size: () => byFp.size };
 }
 
-module.exports = { createKeyBook, fingerprint, fullFingerprint, plainLabel, MIN_SUFFIX };
+module.exports = { createKeyBook, fingerprint, fullFingerprint, plainLabel, labelSkeleton, MIN_SUFFIX };
