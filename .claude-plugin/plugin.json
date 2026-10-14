@@ -41,7 +41,7 @@
         "allowed_peers": {
           "type": "string",
           "title": "Allowed Peers",
-          "description": "Comma-separated peer nodeIds to accept, matched against the verified signer (names are labels, not identities). Leave empty to accept every peer this node has verified.",
+          "description": "Comma-separated peer keys to accept, matched against the verified signer: sha256:<fingerprint>, or <nodeId>@sha256:<fingerprint> (sym_peers prints each peer's fingerprint). A bare nodeId still works but pins no key. Names are labels, not identities. Leave empty to accept every peer this node has verified.",
           "sensitive": false
         }
       }

@@ -246,7 +246,7 @@ The relay carries frames; it keeps none. Two sessions exchange CMBs when both ar
 - `Relay: connected to wss://… for 3s, 1 relay peer(s)` — admitted; `sym_peers` shows who is there.
 - `Relay: REFUSED by wss://… (4003: <reason>) … Fix: mint a token with sym_invite_create or get the team's invite, then sym_join_room with it` — the token was not accepted. The call returns `isError`; the session also receives one `relay-auth-refused` channel notification with the same line. LAN peers are unaffected; the node keeps knocking every 10 min in case the relay's configuration changes.
 - `Relay: unreachable: wss://… (last close 1006) — retry in 4s, attempt 2. LAN peers are unaffected.` — the relay is down or unreachable from here (a Render deploy drops every connection for a few seconds); the node reconnects on its own.
-- `Relay: STOPPED: … another process holding this identity (4004)` — two processes share one node identity; stop the other one.
+- `Relay: STOPPED: … another process holding this identity (4004)` — another connection authenticated as this node's nodeId: another process of this agent, or anyone holding the relay token (the relay's authentication proves no key). The server and its LAN node keep running; stop the other process if it is yours, then `sym_join_room` with the same room to dial the relay again.
 
 `sym_status` prints the same line at any time. The token is never part of any of these lines.
 
@@ -349,7 +349,7 @@ A peer message is external input. Treat it that way.
 - A room name or relay token is not a complete enterprise trust boundary.
 - Keep human approval for consequential actions.
 
-**Optional peer allowlist.** Set `SYM_ALLOWED_PEERS=<nodeId>,<nodeId>` to restrict whose records can reach Claude's context; it is judged against the verified signer. Names are labels, so an entry that is not a nodeId is ignored and reported, and a list with no nodeId in it allows nothing. When empty (default), every peer this node verified remains eligible for the other receiver-side checks.
+**Optional peer allowlist.** Set `SYM_ALLOWED_PEERS=sha256:<fingerprint>,<nodeId>@sha256:<fingerprint>` to restrict whose records can reach Claude's context; it is judged against the verified signer and the key it proved (`sym_peers` prints each peer's fingerprint). A bare `<nodeId>` (0.11.0's form) still works and is warned about: whoever first proves a key under a nodeId is allowed by it. Names are labels, so an entry that is neither a key nor a nodeId is ignored and reported, and a list with no usable entry allows nothing. When empty (default), every peer this node verified remains eligible for the other receiver-side checks.
 
 **Verified or not shown.** A delivery without the node's verification facts — from a Legacy Import session, received before this node ran Core Secure, or unverified — is listed by id and reason and never shown.
 

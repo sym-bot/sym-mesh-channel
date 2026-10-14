@@ -38,13 +38,52 @@ function roomRefusalReason(room) {
     + '"backend-team" or "acme.prod", or "default" for the global mesh';
 }
 
-/** An invite, parsed by the SDK. `{ error }` for anything that is not one. */
+/**
+ * A relay token in any text built from an invite or a relay URL, redacted (review R4-6): `token=<value>` as
+ * a query parameter, and a `relay_token` JSON field. An invite is a secret; an error, a status line or a
+ * parse result that repeats one hands the token to whatever reads the answer (the model, a transcript,
+ * a log).
+ */
+function redactSecrets(text) {
+  return String(text ?? '')
+    .replace(/(token=)[^&#\s"'<>]*/gi, '$1<redacted>')
+    .replace(/("relay_token"\s*:\s*")[^"]*(")/gi, '$1<redacted>$2');
+}
+
+/** Why `url` is not a relay URL a node can dial (ws:// or wss://, with a host), or null when it is one (R4-3). */
+function relayUrlProblem(url) {
+  if (typeof url !== 'string' || !url.trim()) return 'it is empty';
+  let u;
+  try { u = new URL(url.trim()); } catch { return /^[a-z][a-z0-9+.-]*:\/\//i.test(url.trim()) ? 'it does not parse as a URL' : 'it has no ws:// or wss:// scheme'; }
+  if (u.protocol !== 'ws:' && u.protocol !== 'wss:') return `its scheme is ${JSON.stringify(u.protocol.replace(/:$/, '').slice(0, 16))}, not ws or wss`;
+  if (!u.hostname) return 'it names no host';
+  return null;
+}
+
+/** What makes `text` not an invite, in the reader's terms; never the text itself (it may carry a token). */
+function inviteShapeHint(text) {
+  const t = typeof text === 'string' ? text.trim() : '';
+  if (!t) return 'it is empty';
+  if (/^<.*>$/s.test(t)) return 'it is wrapped in < >; pass the URL alone';
+  if (/\s/.test(t)) return 'it contains a line break or a space (a mail or chat client may have wrapped it; join it into one line)';
+  if (t.includes('#')) return 'it has a #fragment, which an invite does not carry';
+  if (!/^[a-z][a-z0-9-]+:\/\//i.test(t)) return 'it does not start with sym:// (or an app scheme)';
+  return 'it does not have the shape of an invite';
+}
+
+/** An invite, parsed by the SDK. `{ error }` for anything that is not one; no error repeats a token (R4-6). */
 function parseInviteURL(url) {
-  const p = sdk.invite.parseInvite(url);
+  // An invite never holds a space or a line break (every part is URL-encoded); sym's parser would take one
+  // wrapped by a mail client, with the break inside the token.
+  const p = typeof url === 'string' && /\s/.test(url.trim()) ? { error: 'not an invite URL' } : sdk.invite.parseInvite(url);
   if (p.error) {
+    // sym's own words for "not an invite" repeat the first 120 characters of the text, token and all.
+    const why = /^not an invite URL/.test(p.error)
+      ? `Not an invite URL: ${inviteShapeHint(url)}. (The text is not repeated here: an invite can carry a relay token.)`
+      : redactSecrets(p.error);
     return {
       error:
-        `${p.error}\n\nExpected shapes:\n` +
+        `${why}\n\nExpected shapes:\n` +
         '  sym://room/{name}?node=…&key=…                        (LAN)\n' +
         '  sym://team/{name}?relay=…&token=…&node=…&key=…        (cross-network via relay)\n' +
         '  melotune://room/{id}/{name}                           (app-specific room)',
@@ -58,4 +97,4 @@ function keyFingerprint(key) {
   return fullFingerprint(key) || '?';
 }
 
-module.exports = { isRoom, roomRefusalReason, parseInviteURL, keyFingerprint };
+module.exports = { isRoom, roomRefusalReason, parseInviteURL, keyFingerprint, redactSecrets, relayUrlProblem, inviteShapeHint };

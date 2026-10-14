@@ -31,14 +31,14 @@
     "outbox.js",
     "relay-store.js",
     "surface-truth.js",
+    "relay-stop.js",
     "bin/",
     ".claude-plugin/",
     ".mcp.json",
     "SECURITY.md",
     "README.md",
     "CHANGELOG.md",
-    "LICENSE",
-    "scripts/"
+    "LICENSE"
   ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",

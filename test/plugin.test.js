@@ -252,11 +252,11 @@ test('the room beacon reads the port from status(), not an SDK internal', () => 
   assert.ok(!code.includes('_port'));
 });
 
-test('identity collision exits cleanly', () => {
+test('identity collision is said, never an exit (R4-1: any relay token holder can cause one)', () => {
   const serverPath = resolveServerJs();
   const code = fs.readFileSync(serverPath, 'utf8');
-  assert.ok(code.includes('identity-collision'), 'identity-collision handler missing');
-  assert.ok(code.includes('process.exit(2)'), 'should exit with code 2 on identity collision');
+  assert.ok(code.includes("h.on('identity-collision', (info) => relayStops.onStop(info));"), 'identity-collision handler missing');
+  assert.ok(!code.includes('process.exit(2)'), 'the server must not exit on an identity collision');
 });
 
 // ── 6. Installer: project-scoped mode (--project flag) ─────

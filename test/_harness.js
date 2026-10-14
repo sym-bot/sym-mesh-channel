@@ -150,9 +150,11 @@ async function until(cond, ms = 10000, step = 50) {
 /**
  * A fake sym-relay: relay-auth, relay-peers, relay-peer-joined/left, and envelope routing
  * ({ to, payload } → { from, fromName, payload }). Enough for the Core Secure relay handshake.
- * Resolves once it listens.
+ * A second relay-auth for a nodeId closes the first connection with 4004 (`duplicate: 'replace'`, the
+ * default), or the newcomer with 4006 (`duplicate: 'reject'`). Like the real relay's, its relay-auth
+ * proves no key: a token and a nodeId are enough. Resolves once it listens.
  */
-async function fakeRelay({ tap } = {}) {
+async function fakeRelay({ tap, duplicate = 'replace' } = {}) {
   const { WebSocketServer } = require('ws');
   const wss = new WebSocketServer({ port: 0, host: '127.0.0.1' });
   await new Promise((r) => wss.once('listening', r));
@@ -165,8 +167,10 @@ async function fakeRelay({ tap } = {}) {
       try { msg = JSON.parse(String(data)); } catch { return; }
       if (!me) {
         if (msg.type !== 'relay-auth') return;
+        const prev = conns.get(msg.nodeId);
+        // duplicate: 'reject' is the real relay's first-writer window: the newcomer is closed with 4006.
+        if (prev && duplicate === 'reject') { try { ws.close(4006, 'Duplicate connection rejected'); } catch { /* */ } return; }
         me = { nodeId: msg.nodeId, name: msg.name, ws };
-        const prev = conns.get(me.nodeId);
         if (prev) { try { prev.ws.close(4004, 'Replaced by new connection'); } catch { /* */ } }
         conns.set(me.nodeId, me);
         send(ws, { type: 'relay-peers', peers: [...conns.values()].filter((c) => c.nodeId !== me.nodeId).map((c) => ({ nodeId: c.nodeId, name: c.name, offline: false })) });
