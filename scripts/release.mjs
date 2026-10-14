@@ -91,7 +91,10 @@ run("git add package.json package-lock.json CHANGELOG.md .mcp.json .claude-plugi
 // `sym-mesh-channel start` and `npm test` straight out of its CHANGELOG notes and committed their
 // output as the message. execFileSync passes the text untouched.
 const git = (...args) => execFileSync("git", args, { stdio: "pipe", encoding: "utf8" });
-git("commit", "-m", `${version}\n\n${notes}\n\nCo-Authored-By: Claude Fable 5 <noreply@anthropic.com>`);
+// The release commit names no author model: whoever runs the release supplies any trailer lines (Co-Authored-By, session
+// link) in RELEASE_COMMIT_TRAILER, so the commit says who actually made it rather than a name written into this script.
+const trailer = process.env.RELEASE_COMMIT_TRAILER?.trim();
+git("commit", "-m", `${version}\n\n${notes}${trailer ? `\n\n${trailer}` : ""}`);
 
 step(`tag v${version} + push`);
 git("tag", "-a", `v${version}`, "-m", `v${version}\n\n${notes}`);
