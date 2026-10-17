@@ -197,7 +197,7 @@ a mood) carries the same frozen facts by the same names, and is gated by the sam
   it and refuses it on any other (`capability-bound-to-another-connection`). The channel holds one
   connection; when it closes, the mind is detached and says so, and it never reconnects with the
   capability.
-- **The read side is the mission's** (sym ruling C). A mind reads only what arrived after it started
+- **The read side is the mission's** (sym's interior rule C). A mind reads only what arrived after it started
   (a directed delivery only from a nodeId the mission may address), with its own cursor and acks;
   its recall and its `parents` are limited to that view, its own submissions and the mission's
   context. The instructions say so.
@@ -344,7 +344,7 @@ sym's names, one name and no aliases):
 7. **The kind is signed.** The node writes the submission's kind as the record's intent and refuses
    a submission whose intent differs (`intent-is-not-the-kind`).
 8. **Windows:** interior `listen` refuses without `{ allowDefaultPipeAcl: true }`.
-9. **The interior read side is scoped to the mission** (sym ruling C, after 72daeb6): a mind reads
+9. **The interior read side is scoped to the mission** (sym's interior rule C, after 72daeb6): a mind reads
    only deliveries that arrived after it started, a directed one only from a nodeId in the mission's
    `allowTo`; recall and `parents` are limited to that view, its own submissions and the mission's
    `context`. Reads are rate-limited (refused `rate`), and an ack outside the view is refused
@@ -435,7 +435,7 @@ survivor, M20 (the host feed's floor for ids taken by evicted items), which had 
 ## Parked 2026-10-02, resumed 2026-10-07, finished 2026-10-13
 
 Parked on 2026-10-02 with the move onto sym 72daeb6 half done (WIP 56f992d). It was resumed on
-2026-10-07 with the founder's go-ahead and merged with `fix/0.11.0-feed-ids` (9340d31, the journalled
+2026-10-07 and merged with `fix/0.11.0-feed-ids` (9340d31, the journalled
 feed). Every step of the parked list was done on 2026-10-07:
 
 1. The tests are on the new code: the provenance tests have no join, and test the event facts and

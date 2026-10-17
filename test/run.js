@@ -23,7 +23,7 @@ const { spawnSync } = require('child_process');
 // sym 0.14.0 added relay-store, room-discovery, rooms-surface, redelivery-e2e and lan-discovery (which is
 // opt-in and skips itself): 32. 0.11.1 (review R4) added installer-modes, relay-stop and
 // server-hardening-e2e: 35.
-const MIN_FILES = 36;
+const MIN_FILES = 37;
 
 // EVERY FILE RUNS SANDBOXED. HOME, USERPROFILE and SYM_STATE_DIR point into a temp dir made for that
 // file, so no test can write an identity, a key or a store into the real ~/.sym, or read the real

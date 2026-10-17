@@ -87,6 +87,7 @@ const CHECKS = [
   ['M52', 'a claude killed by a signal makes start exit 0 again', 'bin/install.js', '(run.signal ? 128 + (os.constants.signals[run.signal] || 0) : 0)', '0', 'claude-bin.test.js'],
   ['M53', 'claude-bin.js is left out of the package, which only install.js requires', 'package.json', '    "server.js",\n    "claude-bin.js",', '    "server.js",', 'packaging.test.js'],
   ['M54', 'a password in a relay URL is printed as typed', 'room-names.js', "    .replace(/(\\/\\/)[^\\/\\s:@\"'<>]+:[^\\/\\s@\"'<>]*@/g, '$1<redacted>@')\n", '', 'server-hardening-e2e.test.js'],
+  ['M55', 'a decision is attributed to the owner again in the changelog', 'CHANGELOG.md', 'Decision, 2026-08-27: one name per room, one room per name.', 'Founder ruling, 2026-08-27: one name per room, one room per name.', 'no-owner-citings.test.js'],
 ];
 
 const arg = (n) => { const i = process.argv.indexOf(n); return i === -1 ? null : (process.argv[i + 1] || ''); };

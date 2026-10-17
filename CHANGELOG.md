@@ -115,6 +115,13 @@ mesh with each other.
 
 ### Fixed — low
 
+- **The library no longer cites its owner.** Comments, documentation, the changelog and the tests recorded some decisions as
+  someone's ruling, and a few named a person or a machine. They now record the decision (with its date where that matters)
+  and nothing else, and a test (`test/no-owner-citings.test.js`) scans every tracked text file so none comes back. The names
+  of real settings (`SYM_FOUNDER_ANCHOR`) and the package author field are unchanged. A stray developer preview config
+  (`.claude/launch.json`, a local path to another project) is no longer tracked. Versions already published keep the text they
+  were published with.
+
 - **Invisible characters in peer text are escaped (R4-13).** A lead was JSON-quoted, which escapes only
   C0 controls; C1 controls (U+0085), bidi overrides and isolates (U+202E, U+2066), zero-width characters
   (U+200B), the invisible tag characters, the line separators, private-use and unassigned code points and
@@ -330,7 +337,7 @@ with the ledger removed too the same case fails with the field bug.
   and says so. When the host's stdin closes, the mind is ended and its capability revoked.
 - The node's deliveries are read through the interior, gated as in node mode. The node gives a mind
   only what arrived for its mission while it runs, and lets it cite only those, its own submissions
-  and the mission's context (sym ruling C). The node signs the kind as the record's intent and refuses
+  and the mission's context (sym's interior rule C). The node signs the kind as the record's intent and refuses
   a differing intent. A capability presented on a second connection is refused
   (`capability-bound-to-another-connection`). A node that serves no read side, and a request it
   refuses, are each reported as what they are.
@@ -771,7 +778,7 @@ someone joins a room.
 
 ### Added — room names must be canonical
 
-Founder ruling, 2026-08-27: one name per room, one room per name. Both join gates now
+Decision, 2026-08-27: one name per room, one room per name. Both join gates now
 require the round trip through the service type to be identity, so **`sym` is refused** — it
 satisfies the grammar but maps to `_sym._tcp`, whose inverse is `default`, so joining it put
 this node in the global mesh while it reported being somewhere specific.
@@ -927,7 +934,7 @@ longer serve anyone.
 on is gone. It now exits on stdin `end`/`close`/`error`, leaving the mesh cleanly and releasing the
 identity lock.
 
-### Changed — NEVER `-2`, NEVER `-3` (founder ruling)
+### Changed — NEVER `-2`, NEVER `-3`
 
 `autoSuffix` is now **off for every identity**, pinned or not. It was previously on for unpinned
 sessions.

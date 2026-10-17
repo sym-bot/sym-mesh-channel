@@ -440,7 +440,7 @@ async function runProjectInstallTests() {
     // Project-scoped mcpServers entries under ~/.claude.json's `projects`
     // key override the user-global entry when Claude Code is launched from
     // that directory. A stale project entry silently shadows a fresh
-    // user-global heal — the exact bug Hongwei hit on 2026-04-23 where
+    // user-global heal — the exact bug seen on 2026-04-23 where
     // `~/code` was moved from `~/Documents/dev`. The installer now scans
     // every project and rewrites stale claude-sym-mesh args, preserving
     // each project's SYM_NODE_NAME.
@@ -701,7 +701,7 @@ async function runProjectInstallTests() {
   // `start --room` must reach the plugin node too. The plugin's .mcp.json has
   // no SYM_ROOM, so with only the server: entry carrying the room, a session
   // ran one node in the named room and its plugin sibling in `default`.
-  // The folder IS the agent: `sym-agent-x` runs as `claude-sym-agent-x` (user ruling, 2026-10-01).
+  // The folder IS the agent: `sym-agent-x` runs as `claude-sym-agent-x` (decision 2026-10-01).
   const expectedFolderName = (dir) => `claude-${path.basename(dir).toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-+|-+$/g, '')}`;
 
   // Returns the installer's result plus the fake home's ~/.claude.json and its backups afterwards.

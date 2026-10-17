@@ -235,7 +235,7 @@ the record's signed intent, parents in the mind's scope) and signs as itself.
   When the host's stdin closes, the channel ends the mind, which revokes the capability.
 - Deliveries the node serves through its interior are gated exactly as in node mode: shown as
   verified only when their own facts make them so. The node serves a mind only what arrived for its
-  mission while it runs (sym ruling C). A node that does not serve its deliveries is reported as
+  mission while it runs (sym's interior rule C). A node that does not serve its deliveries is reported as
   such, never as an empty inbox.
 
 ## Token Handling

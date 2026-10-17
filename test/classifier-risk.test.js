@@ -59,8 +59,8 @@ test('returns DISTINCT terms', () => {
 });
 
 test('quarantine header carries no peer free-text and no term names', () => {
-  const h = quarantineHeader('claude-sym-research@hongwei-mac', ' →you', 2, ' ·not-stored');
-  assert.ok(h.includes('claude-sym-research@hongwei-mac'), 'keeps source');
+  const h = quarantineHeader('claude-sym-research@dev-mac', ' →you', 2, ' ·not-stored');
+  assert.ok(h.includes('claude-sym-research@dev-mac'), 'keeps source');
   assert.ok(h.includes('quarantined'), 'marks quarantine');
   assert.ok(h.includes('2 flagged terms'), 'reports count');
   // The header itself must be clean — surfacing it must not re-introduce risk.

@@ -1,7 +1,7 @@
 'use strict';
 
 // Interior mode (design D9; XMesh C2; sym D8, D9.3): the channel attaches as a node's mind. Against a
-// real sym 0.14 node's interior: the mission, the read side scoped to it (sym ruling C), deliveries gated
+// real sym 0.14 node's interior: the mission, the read side scoped to it (sym's interior rule C), deliveries gated
 // by their own facts, the push, fetch, citing a delivery, recall, the kind signed as the intent, the
 // refusals in plain words, the capability bound to its one connection (sym's name for the refusal:
 // capability-bound-to-another-connection), and the mind ended when the host's stdin closes. One small
@@ -56,7 +56,7 @@ t('against a real node: the mission, its read view, push, fetch, cite, recall, t
   const { cog, alice, sock, start } = await cogWithMind({ id: 'mission-7', kinds: ['observe', 'report'] });
   const arrived = [];
   alice.on('verified-record', (e) => arrived.push(e));
-  // Delivered before the mind started: not in its view (sym ruling C).
+  // Delivered before the mind started: not in its view (sym's interior rule C).
   alice.remember({ focus: 'MARKER-BEFORE the mind started' }, { to: cog.nodeId });
   await h.until(() => cog.inbox({ peek: true }).messages.length >= 1, 5000);
   const mind = start();
