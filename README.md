@@ -100,7 +100,7 @@ A room name is 1 to 64 characters from `a-z`, `0-9`, `.`, `_` and `-`, all lower
 
 ## Requirements and what it cannot mesh with
 
-`@sym-bot/mesh-channel` 0.11 needs `@sym-bot/sym` `^0.14.0` and Node.js 20 or later. sym 0.14 speaks only MMP v2.0 Core Secure, so **a 0.11 channel cannot mesh with 0.10 channels, or any node on sym 0.13 or older, on a LAN or over a relay**: such a node lists no `mmp` 2.0 in its LAN advertisement, so it is never dialled, and a relay handshake with it never completes. Upgrade every node of a room together. A 0.13 node is heard only through a Legacy Import route configured on the sym side, and what it delivers is withheld here as unverified. Role grants signed by sym 0.13 confer nothing under 0.14's authority rules (MMP §6.6) until re-issued; the channel itself decides nothing from roles.
+`@sym-bot/mesh-channel` 0.11 needs `@sym-bot/sym` `^0.14.2` and Node.js 20 or later. sym 0.14 speaks only MMP v2.0 Core Secure, so **a 0.11 channel cannot mesh with 0.10 channels, or any node on sym 0.13 or older, on a LAN or over a relay**: such a node lists no `mmp` 2.0 in its LAN advertisement, so it is never dialled, and a relay handshake with it never completes. Upgrade every node of a room together. A 0.13 node is heard only through a Legacy Import route configured on the sym side, and what it delivers is withheld here as unverified. Role grants signed by sym 0.13 confer nothing under 0.14's authority rules (MMP §6.6) until re-issued; the channel itself decides nothing from roles.
 
 ## Multi-vendor operation
 

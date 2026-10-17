@@ -24,7 +24,7 @@ const pkg = require('../package.json');
 // it from the registry. The tests below hold the three together, and test the sym that is actually
 // installed against it (review R4-12: they used to demand the lockfile's exact version of whatever was
 // installed, so a newer sym in node_modules failed the gate while every other test ran on it).
-const SYM_RANGE = '^0.14.0';
+const SYM_RANGE = '^0.14.2';
 
 /** Whether `version` satisfies a caret range `^M.m.p` (npm's caret: below 1.0 the minor is fixed). */
 function satisfiesCaret(version, range) {

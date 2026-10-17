@@ -3,7 +3,7 @@
 ## 0.11.1
 
 A stability and security release on the 0.11 line, from an independent review of 0.11.0 (R4). Requires
-`@sym-bot/sym` `^0.14.0` and Node.js 20 or later; nothing changes on the wire, and 0.11.0 and 0.11.1 nodes
+`@sym-bot/sym` `^0.14.2` (0.14.0 and 0.14.1 have start-lock and daemon bugs; this release is tested against 0.14.2, and the lockfile now pins it) and Node.js 20 or later; nothing changes on the wire, and 0.11.0 and 0.11.1 nodes
 mesh with each other.
 
 ### Fixed — critical
