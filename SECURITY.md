@@ -38,7 +38,7 @@ environment, and a pin that does not parse stops the node (the server then start
 why on every tool). `.sym/node.json` cannot set a pin: a file in a repository would choose its own root
 of trust. With no pin nothing is in force and every peer resolves as a participant; role grants signed by
 sym 0.13 confer nothing until they are re-issued under §6.6. `sym_status` prints what the store says
-(pinned or not, statements in force, this node's roles); the channel's allowlist is nodeIds, not roles.
+(pinned or not, statements in force, this node's roles); the channel's allowlist is keys, not roles.
 
 **What the channel adds (design D2, D3, D8).**
 
@@ -57,12 +57,21 @@ sym 0.13 confer nothing until they are re-issued under §6.6. `sym_status` print
   mint a nodeId whose last characters equal another node's. A line shows the signer's label and the
   shortest suffix of its key fingerprint (SHA-256 of the public key) that is unique among the key
   bindings this node knows, at least 8 hex characters. When two known keys use the same label, the
-  line says so ("alice (2 keys)") and shows the longer suffix that tells them apart; when one key is
+  line says so ("alice (2 keys)") and shows the longer suffix that tells them apart. Labels that look
+  the same count as one ("аlice" with a Cyrillic а, "a1ice", "ALICE"), and the keys are counted from
+  what this node wrote down in earlier runs too (`known-peers.json`), so the warning survives a
+  restart. When one key is
   seen or bound under two nodeIds, it says that ("one key, 2 nodeIds"). `sym_fetch` shows the full
   nodeId and the full fingerprint, `sha256:<hex>` as sym gives it. A first-contact peer's key is held
   for its session only until a verified record from it is admitted, and the fetch account says so.
-- Names are labels. `to`, the allowlist, the own-record check and the outbox key on nodeIds; the
-  push rate counts per proven sender.
+- Names are labels. `to`, the own-record check and the outbox key on nodeIds, the allowlist on keys;
+  the push rate counts per proven sender.
+- **A label is printed by an allowlist.** It is printed bare only when it is a plain name (words of
+  `A-Z a-z 0-9 . _ @ + # -`, single spaces, at most 64 characters, no word "via", and a name this host
+  would accept). Anything else is printed in quotes, with every character outside printable ASCII as
+  a `\u` escape, so lookalike brackets and arrows (U+3008, U+27F6), zero-width and bidi characters
+  and NBSP are visible as what they are and cannot copy another peer's tag. This holds on every
+  surface: the push, `sym_receive`, `sym_peers`, `sym_fetch`, `sym_recall`.
 - **A room is an MMP §5.8 identifier, refused rather than repaired.** A room configured in
   `SYM_ROOM` or `.sym/node.json` that is not one (1 to 64 characters from `a-z0-9._-`, and not the
   reserved `sym`) stops the node from being built: nothing falls back to `default`, which is the global
@@ -73,9 +82,14 @@ sym 0.13 confer nothing until they are re-issued under §6.6. `sym_status` print
   mood at most 1,024 characters and no sender in it. The label is the name the session proved, never one
   the frame carries, and the frame's `context` is never read.
 
-**Known limits (sym design §5).** `relay-auth` is not yet proven, so whoever holds a relay token can
-evict a node from that relay (it then re-handshakes, and the evicting party gets no session). There
-is no key rotation. A process running as the same user can read identity files.
+**Known limits (sym design §5).** `relay-auth` carries no key proof, so whoever holds a relay token can
+evict a node from that relay by authenticating as its (public) nodeId: the relay closes the node with
+4004 ("replaced"), or refuses it with 4006 when the other connection was there first. The evicting party
+gets no session in the node's name (every session must prove the node's key), but the node is off that
+relay until it dials again: sym 0.14.2 does not dial again on its own after these closes, and
+`sym_join_room` with the same room does. The channel keeps running through it, with its LAN node (see
+Identity Collision below). There is no key rotation. A process running as the same user can read
+identity files.
 
 ## Layer 2: Protocol-Level Content Gating (SVAF)
 
@@ -156,9 +170,11 @@ policy-adjacent terms) is **quarantined** rather than withheld: its push and its
 name the category and how many terms were flagged (`classifier-risk (2 flagged terms)`), never its
 text, and `sym_fetch` shows it on request.
 
-A sender chooses its own label, so every line prints it with line breaks,
-brackets, control characters and this server's own line markers replaced, and so does the audit
-line. A record signed by this node's own nodeId is not
+A sender chooses its own label, so every line prints it by an allowlist (a plain name bare,
+anything else quoted and escaped, see above), and so does the audit line. Peer text in a lead and in
+a fetched body has its invisible characters escaped too: C0 and C1 controls, bidi overrides and
+isolates, zero-width characters, the invisible tag characters, the line separators, private-use and
+unassigned code points and variation selectors. A record signed by this node's own nodeId is not
 shown in `sym_receive`; its id is listed.
 
 A payload within the limit is announced on the header with its size and read on
@@ -178,19 +194,29 @@ who wrote a message, not that it is safe to act on. Treat every peer message as 
 
 ## Optional: Peer Allowlist
 
-Set `SYM_ALLOWED_PEERS` (comma-separated **nodeIds**) to restrict whose records can reach Claude's
+Set `SYM_ALLOWED_PEERS` (comma-separated entries) to restrict whose records can reach Claude's
 context. It is judged against the verified signer, so a listed peer's record relayed by another
 peer is still that peer's. When set, only listed signers pass, and `sym_receive` counts the rest by
 signer, so a delivery from an unlisted peer is never reported as no delivery. When empty (default),
 every peer this node verified is eligible — SVAF still gates on content relevance.
 
-Names are labels, not identities, so an entry that is not a nodeId is ignored and reported. A list
-that holds no nodeId at all allows **nothing**: an operator who set it meant to restrict, and a 0.10
-list of names must not silently allow everyone. `sym_peers` shows each peer's nodeId.
+An entry names a **key** (0.11.1):
+
+- `sha256:<64 hex>` — a key fingerprint: that key, under whatever nodeId it signs.
+- `<nodeId>@sha256:<64 hex>` — that nodeId, only while it proves that key.
+- `<nodeId>` alone — 0.11.0's form, still honoured and warned about loudly (stderr, the instructions,
+  `sym_status`): a nodeId is public and chosen by its owner, and sym binds an unbound nodeId to the
+  key its first session proves, so whoever reaches this node first under a listed nodeId is allowed.
+  `sym_status` prints the fingerprint each listed nodeId proves now, to pin it with.
+
+`sym_peers` prints each peer's full key fingerprint, and `sym_fetch` the signer's. Names are labels,
+not identities, so an entry that is neither a key nor a nodeId is ignored and reported. A list that
+holds no usable entry allows **nothing**: an operator who set it meant to restrict, and a 0.10 list of
+names must not silently allow everyone.
 
 Example:
 ```
-SYM_ALLOWED_PEERS=01a0fd15-52ca-726c-9ce1-5767a1379249,01a0fd15-52ca-77cd-bc1c-8eef67a748e6
+SYM_ALLOWED_PEERS=sha256:9f2c…(64 hex),01a0fd15-52ca-77cd-bc1c-8eef67a748e6@sha256:3e1a…(64 hex)
 ```
 
 ## Interior mode
@@ -209,7 +235,7 @@ the record's signed intent, parents in the mind's scope) and signs as itself.
   When the host's stdin closes, the channel ends the mind, which revokes the capability.
 - Deliveries the node serves through its interior are gated exactly as in node mode: shown as
   verified only when their own facts make them so. The node serves a mind only what arrived for its
-  mission while it runs (sym ruling C). A node that does not serve its deliveries is reported as
+  mission while it runs (sym's interior rule C). A node that does not serve its deliveries is reported as
   such, never as an empty inbox.
 
 ## Token Handling
@@ -234,10 +260,16 @@ without minting, and a missing or tombstoned one stops the node instead of creat
 - **Windows:** the lock cannot yet tell a live holder from a crashed session whose PID has been
   reused. If no process with that PID is this agent, delete the lock file named in the message.
 - **Relay:** when the relay reports another connection holding this node's identity (close code
-  4004), the server exits with code 2 rather than competing for it.
+  4004, or 4006 when that connection was there first), the server and its LAN node **keep running**.
+  The close may be another process of this agent, or anyone holding the relay token (relay-auth proves
+  no key), so it is never a reason to give up the session's tools: until 0.11.1 the server exited with
+  code 2, which handed any token holder a way to stop a peer's every mesh tool, LAN included. The stop is
+  said on stderr, in one push (`relay-stopped`), once in the next tool answer, and in `sym_status` for
+  as long as it lasts, with whether sym dials the relay again. `sym_join_room` with the same room dials
+  it again; if the other connection is this agent's, stop that one first.
 
 ## References
 
 - [MMP v2.0 Specification](https://meshcognition.org/spec/mmp) — Sections 5 (Connection), 8 (CAT7 and §8.8 records), 9 (SVAF, §9.2.2 delivery), 18 (Core Secure)
-- [docs/DESIGN-0.11.0.md](docs/DESIGN-0.11.0.md) — the channel's design on sym 0.14
+- [docs/DESIGN-0.11.0.md](https://github.com/sym-bot/sym-mesh-channel/blob/main/docs/DESIGN-0.11.0.md) — the channel's design on sym 0.14
 - [SVAF Paper](https://arxiv.org/abs/2604.03955) — Xu, 2026

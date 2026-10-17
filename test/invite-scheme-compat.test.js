@@ -1,6 +1,6 @@
 'use strict';
 
-// ONE VOCABULARY on the invite wire: room (LAN) and team (relay). Founder ruling 2026-08-12. Since 0.11
+// ONE VOCABULARY on the invite wire: room (LAN) and team (relay). Decision 2026-08-12. Since 0.11
 // the grammar is the SDK's (sym 0.14 `invite`), so this channel keeps no copy: room-names.js asks the
 // SDK, and invites carry the issuer (node, key) that an acceptor pins (sym D5).
 
@@ -23,7 +23,7 @@ assert.ok(!('serviceType' in withIssuer), 'a room is not a service type: nothing
 assert.match(parseInviteURL('sym://room/x?node=not-a-uuid&key=k').error, /names an issuer/);
 // The removed vocabulary stays removed — in parsing AND in emission.
 const legacyWord = 'gro' + 'up';
-assert.ok(parseInviteURL(`sym://${legacyWord}/backend-team`).error, 'the legacy scheme is removed by ruling');
+assert.ok(parseInviteURL(`sym://${legacyWord}/backend-team`).error, 'the legacy scheme is removed by design');
 for (const f of ['server.js', 'room-names.js']) {
   const src = fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
   assert.ok(!src.toLowerCase().includes(`sym://${legacyWord}/`), `${f}: no emission or example of the legacy scheme`);

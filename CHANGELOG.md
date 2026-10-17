@@ -1,11 +1,172 @@
 # Changelog
 
+## 0.11.1
+
+A stability and security release on the 0.11 line, from an independent review of 0.11.0 (R4). Requires
+`@sym-bot/sym` `^0.14.2` (0.14.0 and 0.14.1 have start-lock and daemon bugs; this release is tested against 0.14.2, and the lockfile now pins it) and Node.js 20 or later; nothing changes on the wire, and 0.11.0 and 0.11.1 nodes
+mesh with each other.
+
+### Fixed — critical
+
+- **A relay close 4004 no longer stops the server (R4-1).** The relay's authentication carries no key
+  proof, so anyone holding a relay token could authenticate as a peer's (public) nodeId, have the relay
+  close that peer with 4004, and the peer's MCP server exited with code 2: every mesh tool of that
+  session was gone, LAN included. The server and its LAN node now keep running through 4004 and 4006.
+  The stop is said on stderr, in one push (`relay-stopped`), once in the next tool answer and in
+  `sym_status` for as long as it lasts, with what sym does next: sym 0.14.2 does not dial the relay
+  again; sym 0.14.3 retries on a long backoff, and when it finds a ping-pong (two processes replacing
+  each other, `pingPong` on the event) the channel pushes that once more and says another process is
+  probably running as this agent. `sym_join_room` with the room the node is in, and no relay named, now
+  keeps the relay it had, so it dials the relay again without a restart.
+  SECURITY.md said both "it then re-handshakes" and "the server exits with code 2"; it now says what
+  happens.
+- **`sym_receive` no longer moves past a delivery it never showed (R4-2).** It drained the SDK inbox with
+  `inbox({ limit: Math.max(1, unread taken) })`: when every inbox item in the batch had already been read
+  by id (`sym_fetch` acknowledges it), the `max(1, 0)` drained one unread delivery the batch did not
+  hold, and no line ever listed it. The limit now counts unread deliveries, as sym's own does; the batch
+  is a merge that takes a prefix of the inbox and of the host's feed in their own order (a clock that
+  stepped back cannot reorder them); the inbox is drained by exactly the unread items taken, and when
+  none were, only if it holds no unread item at all (it then passes read items only); and what the drain
+  returns is checked against the batch, so an unread item it took is listed rather than lost. No sym API
+  change.
+
+### Fixed — high
+
+- **`start` finds Claude Code itself, so it starts on Windows after an update.** On Windows `start` failed with
+  `'claude' is not recognized as an internal or external command` once Claude Code had been updated (or moved
+  by an installer): it ran the bare name `claude` through a shell, which finds Claude Code only where THIS
+  process's PATH reaches. A terminal opened before the PATH changed keeps the old one for every process it
+  starts (npx included), and a `claude` that only the user's own shell defines as an alias or a function is
+  invisible to a child process. `claude-bin.js` now looks where Claude Code can be, first hit wins:
+  `SYM_CLAUDE_BIN` (explicit; a wrong value is an error, never a fall-through to another claude), this
+  process's PATH (by PATHEXT on Windows), the system PATH as the registry holds it now (Windows), the folders
+  Claude Code installs into (`~/.local/bin`, `~/.claude/local`, the npm global folder, winget), and last
+  `CLAUDE_CODE_EXECPATH` (a versioned file an update may have removed, so the launcher beats it). A `.exe` or a
+  POSIX file is started directly, with no shell; an npm `.cmd` shim goes through cmd.exe with every word quoted
+  (Node refuses a batch file otherwise). When `claude` is found anywhere but on PATH the launch says where;
+  when it is found nowhere the error lists every place it looked and the three ways out (`Get-Command
+  claude`, `SYM_CLAUDE_BIN`, a new terminal). Not checked: a real Windows machine (the Windows cases are
+  decided with the platform, the environment and the file system injected); the winget and local-install
+  folders are best-effort and an absent one costs one stat.
+  Hardened by the pre-publish review: an npm `.cmd` shim's arguments are escaped for BOTH parsers that read them (the
+  C runtime, then cmd.exe twice, as the shim forwards `%*`), so a passthrough argument like `--add-dir "C:\My Projects\"`,
+  `%PATH%`, `a&b`, `x^y` or a quote reaches `claude` as typed (tested on a real Windows runner against a shim that
+  forwards `%*` to node); `reg.exe` is run by its absolute path (a bare name is looked for in the project folder first
+  on Windows); `SYM_CLAUDE_BIN` may also be a path without its extension (Windows) or a bare name looked up on PATH; a
+  `claude` killed by a signal makes `start` exit 128 plus the signal, not 0.
+- **An `http://` or `https://` relay URL works again (review B2).** 0.11.0 accepted them (the WebSocket client dials
+  them as `ws` and `wss`) and users paste `https://`; an earlier draft of this release treated them as not a relay
+  and turned the relay off without saying why. A new test connects through an `http://` URL.
+
+- **A fault at startup no longer kills the server before MCP connects (R4-3).** Only a closed list of
+  identity errors became a fault the tools report; anything else (a read-only or non-directory
+  `SYM_STATE_DIR`, an identity file that does not parse, a start that throws) ended in a stack trace
+  and exit 1. Every build or start error is now said in the instructions and by every tool, and the
+  server connects. A relay URL that is not `ws://`, `wss://`, `http://` or `https://` (no scheme, `ftp://`,
+  not a URL) turns off only the relay: the node runs, LAN peers only, and the instructions and `sym_status`
+  say why without repeating the value. `sym_join_room` refuses such a relay before it touches the node.
+  An uncaught error before MCP connects is counted and said, as after, not fatal.
+- **The installer keeps `~/.claude.json` owner-only (R4-4).** It wrote a tmp file with the default mode
+  and renamed it over the original, so a 0600 file holding `SYM_RELAY_TOKEN` came back 0644. Every write
+  (`~/.claude.json`, a project's `.mcp.json` and `.claude/settings.local.json`, the folder's
+  `.sym/node.json`, the removed-pin note) now creates the tmp file with the original's mode (0600 for a
+  new file), chmods it before the rename, and keeps `~/.claude.json` and its backups owner-only.
+- **A peer label cannot copy another peer's tag (R4-5).** The label filter was a denylist, and lookalike
+  brackets and arrows (U+3008, U+3009, U+27F6), zero-width and bidi characters passed it. A label is now
+  printed by an allowlist: bare only when it is a plain name (words of `A-Z a-z 0-9 . _ @ + # -`, single
+  spaces, at most 64 characters, no word "via", and a name this host's `nodeNameProblem` accepts);
+  anything else in quotes, with every character outside printable ASCII as a `\u` escape. It holds on
+  every surface: the push, `sym_receive`, `sym_peers`, `sym_fetch`, `sym_recall`, the outbox lines.
+  "(2 keys)" now also counts labels that look the same (Cyrillic and Greek lookalikes, `1`/`l`/`I`,
+  `0`/`o`, invisible characters removed).
+
+### Fixed — medium
+
+- **No answer built from an invite repeats its relay token (R4-6).** sym's parse error repeated the
+  first 120 characters of the text, token included, and `sym_invite_info` printed the token three times.
+  A text that is not an invite is now described (wrapped in `< >`, a line break, a `#fragment`, no
+  scheme), never repeated; an invite with a space or a line break in it is refused before sym's parser,
+  which took a wrapped one with the break inside the token; `sym_invite_info` shows the token's length
+  only; `token=` is redacted in every error, relay line and log line the channel builds. (sym's own echo
+  is fixed in sym.) `sym_invite_create` still prints the invite it was asked to make.
+- **"(2 keys)" survives a restart (R4-7).** The labels each key was seen with were counted from this
+  process's memory, so after a restart an impostor's first line under a known label looked like the real
+  peer's. The keys, their labels and nodeIds are now written down in the node's `known-peers.json`
+  (bounded) and counted with the ones learned in this run.
+- **`SYM_ALLOWED_PEERS` allows by key (R4-8).** It allowed whoever first proved a key for a listed nodeId
+  (a nodeId is public, and sym binds an unbound one to the key its first session proves). An entry is now
+  `sha256:<fingerprint>` (that key, under any nodeId) or `<nodeId>@sha256:<fingerprint>` (that pair only).
+  A bare nodeId, 0.11.0's form, still works and is warned about on stderr, in the instructions and in
+  `sym_status`, which prints the fingerprint each listed nodeId proves now. `sym_peers` prints each
+  peer's full key fingerprint.
+- **Records sym drops past a peer's budget are said (R4-10).** sym evaluates at most 8 records a second
+  per session (a burst of 32) and drops the rest before delivery, saying so only in its own log, which
+  this server silences; the sender was told its message was handed to a session. The channel now counts
+  sym's `cmb-over-budget` and `cmb-over-verify-budget` metric events: `sym_status` says how many and from
+  whom, and the next tool answer says it once (at most every 10 minutes).
+- **room-discovery's tests 6 to 8 ran (R4-11).** They were cancelled on every run: the browse's timer is
+  unref'd (right for a server, whose stdin holds the process), and the stand-in browser held no handle,
+  so node:test saw an empty event loop mid-browse. The stand-ins now hold one, as a real socket does.
+- **The release gate tests the sym that is installed (R4-12).** It demanded that the installed sym be the
+  lockfile's exact version, so a newer sym in range failed the gate while every other test ran on it. It
+  now holds package.json, the lockfile and one constant (`SYM_RANGE` in test/release-gate.test.js, the
+  place to set the sym a release is built on) together, and checks the locked and the installed sym
+  against that range.
+
+### Fixed — low
+
+- **The library no longer cites its owner.** Comments, documentation, the changelog and the tests recorded some decisions as
+  someone's ruling, and a few named a person or a machine. They now record the decision (with its date where that matters)
+  and nothing else, and a test (`test/no-owner-citings.test.js`) scans every tracked text file so none comes back. The names
+  of real settings (`SYM_FOUNDER_ANCHOR`) and the package author field are unchanged. A stray developer preview config
+  (`.claude/launch.json`, a local path to another project) is no longer tracked. Versions already published keep the text they
+  were published with.
+
+- **Invisible characters in peer text are escaped (R4-13).** A lead was JSON-quoted, which escapes only
+  C0 controls; C1 controls (U+0085), bidi overrides and isolates (U+202E, U+2066), zero-width characters
+  (U+200B), the invisible tag characters, the line separators, private-use and unassigned code points and
+  variation selectors now are `\u` escapes too, in a lead and inside a fetched body's fence. A label's
+  " via " rule could be passed with NBSP; labels are quoted and escaped now (R4-5).
+- **The package ships what a user needs (R4-14).** `files` no longer ships `scripts/` (the release script
+  and the packed-artifact gate), and the README's and CHANGELOG's links to `docs/` (images, the reference,
+  the design) are absolute GitHub URLs, since `docs/` is not in the package. A test checks that every
+  relative link in a shipped document resolves to a shipped file.
+
+### Known, not fixed here
+
+Found by the pre-publish review of this release and left for 0.11.2 on purpose (none loses a message or opens a
+hole; each is a readability, cost or hardening item that needs its own validation):
+
+- A peer label or message body with non-ASCII text is shown escaped (`Zo\u00eb`, `\u674e\u96f7`, `\u000d` for a CRLF, ZWJ
+  and variation selectors in an emoji): safe and complete, but noisier than 0.11.0 for non-English names. A label
+  with letters of a left-to-right script will be shown as it is, once the confusable check (the "(2 keys)" skeleton)
+  is validated for it.
+- Counting the keys that share a label recomputes each stored label's skeleton on every line (23 ms per line at
+  2000 keys with 8 labels each): it will be cached.
+- The installer still drops `SYM_ALLOWED_PEERS` from a `~/.claude.json` env when it rewrites a stale entry (as 0.11.0
+  does; it fails open): carry it over or warn.
+- A `~/.claude.json` that is already 0644 and its old `.bak-*` files stay 0644 until the installer next rewrites
+  that file; the fix is not retroactive.
+- `start` takes the `claude` its PATH names before an install folder, as your shell would: a stale `claude` earlier on
+  PATH (an old npm-global install) wins over the newer native one. Remove the stale one or set `SYM_CLAUDE_BIN`.
+- Joining back to the original environment room after a detour does not restore the environment's relay (as 0.11.0).
+
+- **R4-9** (a folder that pins another agent's nodeId under this folder's name re-points this folder's
+  agent) is sym's name index; it is fixed in sym 0.14.3. The end-to-end test for it runs once sym 0.14.3
+  is installed and is skipped before.
+- **R4-15**: the push confirmation (`sym_push_confirm`) is this process's, not the conversation's. A host
+  that starts a new conversation on the same server keeps it, so a delivery pushed before is named, not
+  repeated, to a conversation that never saw the push; a server restart loses it (the safe direction).
+  This server cannot see a conversation boundary.
+- With sym 0.14.2, a relay that closed this node with 4004 or 4006 is not dialled again until
+  `sym_join_room` or a restart.
+
 ## 0.11.0
 
 Requires `@sym-bot/sym` `^0.14.0` (published 2026-10-13, npm tag `next`), MMP v2.0 Core Secure, and
 Node.js 20 or later. A peer is now a proven session, and every record is signed and verified before
 the channel sees it. The channel is rebuilt around that: it shows what the node verified, and nothing
-else. Design: [docs/DESIGN-0.11.0.md](docs/DESIGN-0.11.0.md). This release supersedes the unreleased
+else. Design: [docs/DESIGN-0.11.0.md](https://github.com/sym-bot/sym-mesh-channel/blob/main/docs/DESIGN-0.11.0.md). This release supersedes the unreleased
 0.10.2 branch.
 
 **Breaking: it cannot mesh with 0.13.17 or older peers on a LAN, nor with a 0.10 channel.** sym 0.14
@@ -176,7 +337,7 @@ with the ledger removed too the same case fails with the field bug.
   and says so. When the host's stdin closes, the mind is ended and its capability revoked.
 - The node's deliveries are read through the interior, gated as in node mode. The node gives a mind
   only what arrived for its mission while it runs, and lets it cite only those, its own submissions
-  and the mission's context (sym ruling C). The node signs the kind as the record's intent and refuses
+  and the mission's context (sym's interior rule C). The node signs the kind as the record's intent and refuses
   a differing intent. A capability presented on a second connection is refused
   (`capability-bound-to-another-connection`). A node that serves no read side, and a request it
   refuses, are each reported as what they are.
@@ -617,7 +778,7 @@ someone joins a room.
 
 ### Added — room names must be canonical
 
-Founder ruling, 2026-08-27: one name per room, one room per name. Both join gates now
+Decision, 2026-08-27: one name per room, one room per name. Both join gates now
 require the round trip through the service type to be identity, so **`sym` is refused** — it
 satisfies the grammar but maps to `_sym._tcp`, whose inverse is `default`, so joining it put
 this node in the global mesh while it reported being somewhere specific.
@@ -773,7 +934,7 @@ longer serve anyone.
 on is gone. It now exits on stdin `end`/`close`/`error`, leaving the mesh cleanly and releasing the
 identity lock.
 
-### Changed — NEVER `-2`, NEVER `-3` (founder ruling)
+### Changed — NEVER `-2`, NEVER `-3`
 
 `autoSuffix` is now **off for every identity**, pinned or not. It was previously on for unpinned
 sessions.

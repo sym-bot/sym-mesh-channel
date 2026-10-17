@@ -23,7 +23,7 @@
  * its provenance and its signed projection. It is gated by provenance.js exactly as node mode's are,
  * and only the projection's signed parts are shown.
  *
- * THE READ SIDE IS THE MISSION'S (sym ruling C). The node gives a mind only what arrived while it runs
+ * THE READ SIDE IS THE MISSION'S (sym's interior rule C). The node gives a mind only what arrived while it runs
  * (a directed delivery only from a nodeId the mission may address), its own cursor and acks, recall
  * within that scope, and `parents` within it. The channel shows what is served and says the rest.
  *

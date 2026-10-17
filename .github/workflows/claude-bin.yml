@@ -1,0 +1,24 @@
+# `sym-mesh-channel start` finds Claude Code itself (claude-bin.js). The Windows behaviour (the registry PATH,
+# cmd.exe and an npm .cmd shim, a home folder with a space) can only be shown on Windows, so this runs the
+# claude-bin tests on all three systems. The full suite is not run here.
+name: claude-bin
+on:
+  push:
+    paths: ['claude-bin.js', 'bin/install.js', 'test/claude-bin.test.js', 'test/_harness.js', 'test/_clean-env.js', '.github/workflows/claude-bin.yml']
+  pull_request:
+    paths: ['claude-bin.js', 'bin/install.js', 'test/claude-bin.test.js', 'test/_harness.js', 'test/_clean-env.js', '.github/workflows/claude-bin.yml']
+jobs:
+  claude-bin:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: [20, 22]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm ci
+      - run: node --test --test-timeout=120000 test/claude-bin.test.js

@@ -22,11 +22,11 @@ Two Claude Code agents used the mesh during a real crash-fix workflow:
 
 **`melotune-dev` found the problem, prepared the fix, and requested review:**
 
-![melotune-dev diagnoses a crash and asks a peer agent for review](docs/img/mesh-dev-window.png)
+![melotune-dev diagnoses a crash and asks a peer agent for review](https://raw.githubusercontent.com/sym-bot/sym-mesh-channel/main/docs/img/mesh-dev-window.png)
 
 **`claude-code-mac` received the request mid-turn, inspected the change, and returned its review:**
 
-![claude-code-mac receives the request and reviews the change](docs/img/mesh-cto-window.png)
+![claude-code-mac receives the request and reviews the change](https://raw.githubusercontent.com/sym-bot/sym-mesh-channel/main/docs/img/mesh-cto-window.png)
 
 No one copied the finding between windows or manually routed it to a reviewer. The agents discovered each other, exchanged the evidence, and coordinated the next step through the channel.
 
@@ -56,6 +56,8 @@ The launcher downloads the current channel, configures the MCP server, and start
 - The node is named after the folder: `claude-agent-1`, `claude-agent-2`.
 - The name and room are kept in the folder's `.sym/node.json`, so the agent keeps them across sessions.
 - The Claude plugin is turned off for that folder in `.claude/settings.local.json`, so the session runs exactly one mesh node, the one launched with the channels flag.
+
+**`claude` not found?** `start` looks for Claude Code itself: on this process's `PATH`, then (Windows) the system `PATH` as the registry holds it now, then the folders Claude Code installs into (`~/.local/bin`, `~/.claude/local`, the npm global folder, winget). That covers a terminal opened before an update changed `PATH`; it cannot see a `claude` that only your shell defines as an alias or function (PowerShell: `Get-Command claude` says `Alias` or `Function`). Name the file yourself with `SYM_CLAUDE_BIN` (a full path, or a name on PATH; PowerShell: `$env:SYM_CLAUDE_BIN = 'C:\path\to\claude.exe'`, then run `start` again); a wrong value is an error, never a silent fall-back to another `claude`.
 
 Sessions in the same room find each other over loopback on one machine, mDNS on a LAN (each node advertises on `_sym._tcp` with its room in the TXT `room` key, and dials only advertisements of its own room), or an optional relay across networks. To give a folder a different name, pass `--name <node-name>`. Two sessions open at once in folders with the same name share it; the second one says so in every mesh tool and tells you to pass `--name`.
 
@@ -98,7 +100,7 @@ A room name is 1 to 64 characters from `a-z`, `0-9`, `.`, `_` and `-`, all lower
 
 ## Requirements and what it cannot mesh with
 
-`@sym-bot/mesh-channel` 0.11 needs `@sym-bot/sym` `^0.14.0` and Node.js 20 or later. sym 0.14 speaks only MMP v2.0 Core Secure, so **a 0.11 channel cannot mesh with 0.10 channels, or any node on sym 0.13 or older, on a LAN or over a relay**: such a node lists no `mmp` 2.0 in its LAN advertisement, so it is never dialled, and a relay handshake with it never completes. Upgrade every node of a room together. A 0.13 node is heard only through a Legacy Import route configured on the sym side, and what it delivers is withheld here as unverified. Role grants signed by sym 0.13 confer nothing under 0.14's authority rules (MMP §6.6) until re-issued; the channel itself decides nothing from roles.
+`@sym-bot/mesh-channel` 0.11 needs `@sym-bot/sym` `^0.14.2` and Node.js 20 or later. sym 0.14 speaks only MMP v2.0 Core Secure, so **a 0.11 channel cannot mesh with 0.10 channels, or any node on sym 0.13 or older, on a LAN or over a relay**: such a node lists no `mmp` 2.0 in its LAN advertisement, so it is never dialled, and a relay handshake with it never completes. Upgrade every node of a room together. A 0.13 node is heard only through a Legacy Import route configured on the sym side, and what it delivers is withheld here as unverified. Role grants signed by sym 0.13 confer nothing under 0.14's authority rules (MMP §6.6) until re-issued; the channel itself decides nothing from roles.
 
 ## Multi-vendor operation
 
@@ -116,7 +118,7 @@ For Codex:
 npm install -g @sym-bot/mesh-channel@latest
 ```
 
-Then follow the [Codex setup](docs/reference.md#codex-setup-full) for configuration, room membership, and inbox habits.
+Then follow the [Codex setup](https://github.com/sym-bot/sym-mesh-channel/blob/main/docs/reference.md#codex-setup-full) for configuration, room membership, and inbox habits.
 
 ## How a message becomes useful cognition
 
@@ -184,7 +186,8 @@ first session proves. An invite pins the issuer's key out of band, so `sym_join_
 an invite from someone you trust removes that first-use risk.
 
 **Names are labels, never routes.** A sender chooses its own name, and two nodes can share one. The
-channel sends `to` a nodeId, `SYM_ALLOWED_PEERS` lists nodeIds, and the outbox holds by nodeId.
+channel sends `to` a nodeId, `SYM_ALLOWED_PEERS` lists key fingerprints (`sha256:…`, or
+`<nodeId>@sha256:…`), and the outbox holds by nodeId.
 
 Peer messages are **external input**. A verified signature proves who wrote a message, not that it
 is safe to act on. Keep human approval for consequential actions. A room name or relay token is not
@@ -196,8 +199,8 @@ allowlist, interior mode, and the limits of relay and LAN transport.
 
 ## Go deeper
 
-- **[Technical reference](docs/reference.md)** — tools, rooms, named identities, interior mode, relay deployment, offline delivery, and troubleshooting
-- **[Design of 0.11.0](docs/DESIGN-0.11.0.md)** — the channel on sym 0.14 Core Secure: deliveries, lineage, push, names, interior mode
+- **[Technical reference](https://github.com/sym-bot/sym-mesh-channel/blob/main/docs/reference.md)** — tools, rooms, named identities, interior mode, relay deployment, offline delivery, and troubleshooting
+- **[Design of 0.11.0](https://github.com/sym-bot/sym-mesh-channel/blob/main/docs/DESIGN-0.11.0.md)** — the channel on sym 0.14 Core Secure: deliveries, lineage, push, names, interior mode
 - **[MMP specification](https://meshcognition.org/spec/mmp)** — the open protocol for identity, CAT7 cognition, lineage, and receiver-side admission
 - **[SYM](https://github.com/sym-bot/sym)** — the open agent foundation beneath this Claude Code-native channel
 - **[SYM.BOT developer guide](https://sym.bot/developers#communication)** — the shortest public onboarding path

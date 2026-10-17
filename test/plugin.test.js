@@ -252,11 +252,11 @@ test('the room beacon reads the port from status(), not an SDK internal', () => 
   assert.ok(!code.includes('_port'));
 });
 
-test('identity collision exits cleanly', () => {
+test('identity collision is said, never an exit (R4-1: any relay token holder can cause one)', () => {
   const serverPath = resolveServerJs();
   const code = fs.readFileSync(serverPath, 'utf8');
-  assert.ok(code.includes('identity-collision'), 'identity-collision handler missing');
-  assert.ok(code.includes('process.exit(2)'), 'should exit with code 2 on identity collision');
+  assert.ok(code.includes("h.on('identity-collision', (info) => relayStops.onStop(info));"), 'identity-collision handler missing');
+  assert.ok(!code.includes('process.exit(2)'), 'the server must not exit on an identity collision');
 });
 
 // ── 6. Installer: project-scoped mode (--project flag) ─────
@@ -440,7 +440,7 @@ async function runProjectInstallTests() {
     // Project-scoped mcpServers entries under ~/.claude.json's `projects`
     // key override the user-global entry when Claude Code is launched from
     // that directory. A stale project entry silently shadows a fresh
-    // user-global heal — the exact bug Hongwei hit on 2026-04-23 where
+    // user-global heal — the exact bug seen on 2026-04-23 where
     // `~/code` was moved from `~/Documents/dev`. The installer now scans
     // every project and rewrites stale claude-sym-mesh args, preserving
     // each project's SYM_NODE_NAME.
@@ -701,7 +701,7 @@ async function runProjectInstallTests() {
   // `start --room` must reach the plugin node too. The plugin's .mcp.json has
   // no SYM_ROOM, so with only the server: entry carrying the room, a session
   // ran one node in the named room and its plugin sibling in `default`.
-  // The folder IS the agent: `sym-agent-x` runs as `claude-sym-agent-x` (user ruling, 2026-10-01).
+  // The folder IS the agent: `sym-agent-x` runs as `claude-sym-agent-x` (decision 2026-10-01).
   const expectedFolderName = (dir) => `claude-${path.basename(dir).toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-+|-+$/g, '')}`;
 
   // Returns the installer's result plus the fake home's ~/.claude.json and its backups afterwards.
@@ -809,7 +809,10 @@ async function runProjectInstallTests() {
       const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-bin-'));
       try {
         fs.mkdirSync(path.join(pkgDir, 'bin'), { recursive: true });
-        for (const f of ['package.json', 'server.js', 'identity.js']) fs.copyFileSync(path.join(__dirname, '..', f), path.join(pkgDir, f));
+        // every root module the package ships (its `files` list), not a fixed few: install.js requires ../claude-bin.js,
+        // server.js requires the rest, and a list written here goes stale the next time a module is added (0.11.1 review B1)
+        const shipped = require('../package.json').files.filter((f) => /^[A-Za-z0-9._-]+\.js$/.test(f));
+        for (const f of ['package.json', ...shipped]) fs.copyFileSync(path.join(__dirname, '..', f), path.join(pkgDir, f));
         fs.copyFileSync(path.join(__dirname, '..', 'bin', 'install.js'), path.join(pkgDir, 'bin', 'install.js'));
         fs.writeFileSync(path.join(home, '.claude.json'), '{}');
         fs.writeFileSync(path.join(binDir, 'claude'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });

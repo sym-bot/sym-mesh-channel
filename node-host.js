@@ -95,6 +95,26 @@ function createLocalFeed(max = FEED_MAX, file = null) {
   };
 }
 
+/**
+ * The batch one receive takes from the SDK inbox's items (by seq) and the feed's (by seq), oldest first
+ * (review R4-2): a MERGE of the two lists by receivedAt, never a sort, so what it takes from each is a
+ * prefix of that list in its own order, even when a clock stepped back. It stops before the unread item
+ * past `lim` unread ones; a read (acked) item takes no place.
+ */
+function chooseBatch(fromInbox, fromFeed, lim) {
+  const out = [];
+  let i = 0, j = 0, unread = 0;
+  while (i < fromInbox.length || j < fromFeed.length) {
+    const a = fromInbox[i], b = fromFeed[j];
+    const fromA = b === undefined || (a !== undefined && (a.receivedAt || 0) <= (b.receivedAt || 0));
+    const d = fromA ? a : b;
+    if (!d.acked) { if (unread >= lim) break; unread++; }
+    out.push(d);
+    if (fromA) i++; else j++;
+  }
+  return out;
+}
+
 class NodeHost extends EventEmitter {
   /**
    * @param {object} o
@@ -111,8 +131,14 @@ class NodeHost extends EventEmitter {
     this.node = null;
     this.outbox = null;
     this.feed = createLocalFeed();
-    this.keys = createKeyBook({ bindings: () => (this.node && typeof this.node.keyBindings === 'function' ? this.node.keyBindings() : []) });
+    this.keys = createKeyBook({
+      bindings: () => (this.node && typeof this.node.keyBindings === 'function' ? this.node.keyBindings() : []),
+      // The keys and labels earlier runs wrote down (known-peers.json), so "(2 keys)" survives a restart (R4-7).
+      persisted: () => (this.outbox && typeof this.outbox.knownKeys === 'function' ? this.outbox.knownKeys() : []),
+    });
     this._cfg = null;
+    // Records sym dropped past a peer's budget (its 'metric' events; sym says nothing else of them): R4-10.
+    this._budget = { total: 0, byType: {}, byPeer: new Map(), last: null };
   }
 
   /** Build the node (synchronous: an identity problem throws here, before anything starts). */
@@ -146,8 +172,12 @@ class NodeHost extends EventEmitter {
 
   _learn(facts) {
     if (!facts) return;
-    if (facts.signer) this.keys.learn({ key: facts.signer.key, nodeId: facts.signer.nodeId, label: facts.signer.label });
-    if (facts.deliverer) this.keys.learn({ key: facts.deliverer.key, nodeId: facts.deliverer.nodeId, label: facts.deliverer.label });
+    for (const who of [facts.signer, facts.deliverer]) {
+      if (!who) continue;
+      this.keys.learn({ key: who.key, nodeId: who.nodeId, label: who.label });
+      // Written down with its label, so a later run still knows this label is this key's (R4-7).
+      try { if (this.outbox) this.outbox.rememberKey({ key: who.key, nodeId: who.nodeId, label: who.label }); } catch { /* bookkeeping */ }
+    }
   }
 
   /** A delivery as every surface reads it, from an entry and what the gate decided. */
@@ -203,9 +233,29 @@ class NodeHost extends EventEmitter {
         const peer = node.peers().find((x) => x.peerId === p.id);
         const proven = !!peer && peer.profile === 'core-secure' && Array.isArray(peer.sessions) && peer.sessions.length > 0 && peer.sessions.every((s) => !s.legacy);
         if (!proven) return;
-        this.outbox.rememberPeer(p.id, p.name);
+        let key = null;
+        try { const b = (node.keyBindings() || []).find((x) => x && x.nodeId === p.id); key = b ? b.key : null; } catch { key = null; }
+        this.outbox.rememberPeer(p.id, p.name, key);
         this._flushOutbox(p.id).catch(() => {});
       } catch { /* bookkeeping never breaks peer handling */ }
+    });
+
+    // sym drops a session's records past its budget (8/s, burst 32) or its verification budget, before
+    // anything is delivered, and says so only in its own log, which this server silences: a directed
+    // record or message the sender was told was handed to its session is then simply gone (R4-10). The
+    // 'metric' event is all sym gives of it: the type, the peer's label and the record's key.
+    node.on('metric', (m) => {
+      try {
+        if (!m || (m.type !== 'cmb-over-budget' && m.type !== 'cmb-over-verify-budget')) return;
+        const b = this._budget;
+        b.total++;
+        b.byType[m.type] = (b.byType[m.type] || 0) + 1;
+        const label = typeof m.from === 'string' ? m.from.slice(0, 256) : '';
+        b.byPeer.set(label, (b.byPeer.get(label) || 0) + 1);
+        if (b.byPeer.size > 64) b.byPeer.delete(b.byPeer.keys().next().value);
+        b.last = { at: Date.now(), type: m.type, label, key: typeof m.key === 'string' ? m.key.slice(0, 128) : null };
+        this.emit('budget-drop', { ...b.last, total: b.total });
+      } catch { /* a metric never breaks delivery */ }
     });
 
     node.on('relay-auth-refused', (info) => this.emit('relay-auth-refused', info));
@@ -250,26 +300,52 @@ class NodeHost extends EventEmitter {
   }
 
   /**
-   * Drain the SDK inbox and this host's feed, oldest first, at most `limit` in all (review L10). Each
-   * source is peeked, the batch is chosen, and only then is each source's cursor moved past what the
-   * batch took from it.
+   * Drain the SDK inbox and this host's feed, oldest first (review L10, R4-2). The limit counts UNREAD
+   * deliveries, as sym's inbox() does: an item already read in full by id (acked) is listed as such but
+   * takes no place a new delivery needs. Each source is peeked, the batch is chosen (chooseBatch: a merge
+   * that takes a PREFIX of each source in its own order), and only then is each cursor moved, by exactly
+   * what the batch took:
+   *   - the feed's cursor to the last item taken (it is this host's own, and exact);
+   *   - the inbox's through inbox({ limit: n }) with n the unread items taken. sym's inbox() takes the
+   *     first n unread items past its cursor and the read ones between them, so with a prefix it takes the
+   *     batch's own, never one the batch left out. With n = 0, inbox() would still take one unread item,
+   *     so it is called only when the inbox holds no unread item at all (it then passes read items only);
+   *     otherwise the read items stay before the cursor and are listed when it passes them (until 0.11.1,
+   *     `Math.max(1, n)` drained one unread item no line showed).
+   * Peek, choice and drain run in one synchronous turn, so no delivery arrives between them. What the
+   * drain returns is checked against the batch anyway: an unread item it took that the batch did not
+   * hold is added to the batch, so nothing drained goes unshown.
    */
   drain({ peek = false, limit = 50 } = {}) {
     const lim = Math.max(1, Math.min(Number.isInteger(limit) ? limit : 50, 500));
+    const before = this.unreadCount();
     const a = this.node.inbox({ peek: true, limit: lim });
     const fromInbox = a.messages.map((m) => this._fromInbox(m));
-    const feedPending = this.feed.pending();
-    const fromFeed = this.feed.peek(lim);
-    const batch = [...fromInbox, ...fromFeed].sort((x, y) => (x.receivedAt || 0) - (y.receivedAt || 0)).slice(0, lim);
+    const fromFeed = this.feed.peek(Infinity);
+    const batch = chooseBatch(fromInbox, fromFeed, lim);
     const tookInbox = batch.filter((d) => !d.local);
     const tookFeed = batch.filter((d) => d.local);
+    const inboxUnread = tookInbox.filter((d) => !d.acked).length;
+    // Only read items taken from the inbox: they can be passed when nothing unread waits behind them
+    // there (inbox({ limit: 1 }) then takes read items only); otherwise they stay for a later receive.
+    let inboxUndrained = 1;
+    try { inboxUndrained = this.node.inboxStatus().undrained || 0; } catch { inboxUndrained = 1; }
+    const passReadOnly = !inboxUnread && tookInbox.length > 0 && inboxUndrained === 0;
+    let items = inboxUnread || passReadOnly ? batch : batch.filter((d) => d.local);
     if (!peek) {
-      // inbox() drains oldest first, the same items the peek listed, up to this many unread ones.
-      if (tookInbox.length) this.node.inbox({ limit: Math.max(1, tookInbox.filter((d) => !d.acked).length) });
+      if (inboxUnread || passReadOnly) {
+        const drained = this.node.inbox({ limit: Math.max(1, inboxUnread) });
+        const inBatch = new Set(tookInbox.map((d) => d.id));
+        const extra = ((drained && drained.messages) || []).filter((m) => m && !m.acked && !inBatch.has(m.id));
+        if (extra.length) {
+          this._log(`the inbox drained ${extra.length} unread delivery(ies) the batch did not hold; they are listed now`);
+          items = [...items, ...extra.map((m) => this._fromInbox(m))];
+        }
+      }
       if (tookFeed.length) this.feed.advanceTo(tookFeed[tookFeed.length - 1].seq);
     }
-    const remaining = (a.remaining || 0) + (fromInbox.length - tookInbox.length) + (feedPending - tookFeed.length);
-    return { items: batch, remaining: Math.max(0, remaining) };
+    const unreadListed = items.filter((d) => !d.acked).length;
+    return { items, remaining: Math.max(0, before - unreadListed) };
   }
 
   get(id) {
@@ -285,6 +361,12 @@ class NodeHost extends EventEmitter {
   markRead(id) {
     if (id.startsWith('in')) { try { return this.node.inboxAck(id); } catch { return false; } }
     return this.feed.markRead(id);
+  }
+
+  /** Records sym dropped past a peer's budget since this server started (its 'metric' events): R4-10. */
+  budgetDrops() {
+    const b = this._budget;
+    return { total: b.total, byType: { ...b.byType }, byPeer: [...b.byPeer.entries()].sort((x, y) => y[1] - x[1]), last: b.last };
   }
 
   /** Deliveries since this process started that got no inbox id, the inbox being full of unread ones (sym 0.14). */
@@ -431,4 +513,4 @@ class NodeHost extends EventEmitter {
   awaitRelayOutcome(ms) { return typeof this.node.awaitRelayOutcome === 'function' ? this.node.awaitRelayOutcome(ms) : Promise.resolve(null); }
 }
 
-module.exports = { NodeHost, createLocalFeed };
+module.exports = { NodeHost, createLocalFeed, chooseBatch };

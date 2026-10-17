@@ -1,6 +1,6 @@
 {
   "name": "sym-mesh-channel",
-  "version": "0.11.0",
+  "version": "0.11.1",
   "description": "Real-time, full-duplex messaging among Claude Code sessions and other coding agents. A session becomes a peer node on the SYM mesh: peers on one machine (loopback), a shared LAN (Bonjour), or across networks (WebSocket relay) discover each other and exchange typed cognitive signals \u2014 pushed as channel notifications where the host shows them, with sym_receive for the rest. Any MCP-capable agent joins the same mesh through the open @sym-bot/mesh-channel SDK; every peer keeps its own Ed25519 identity, proven on every session (MMP v2.0 Core Secure), its own SVAF admission, and local memory, on the open Mesh Memory Protocol (MMP).",
   "author": {
     "name": "Hongwei Xu",
@@ -41,7 +41,7 @@
         "allowed_peers": {
           "type": "string",
           "title": "Allowed Peers",
-          "description": "Comma-separated peer nodeIds to accept, matched against the verified signer (names are labels, not identities). Leave empty to accept every peer this node has verified.",
+          "description": "Comma-separated peer keys to accept, matched against the verified signer: sha256:<fingerprint>, or <nodeId>@sha256:<fingerprint> (sym_peers prints each peer's fingerprint). A bare nodeId still works but pins no key. Names are labels, not identities. Leave empty to accept every peer this node has verified.",
           "sensitive": false
         }
       }

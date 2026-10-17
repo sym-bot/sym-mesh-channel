@@ -55,6 +55,7 @@ const { InteriorHost, readCapability } = require('./interior-host.js');
 const { createToolQueue } = require('./tool-queue.js');
 const { fullFingerprint } = require('./key-display.js');
 const push = require('./push-statement.js');
+const { createRelayStops } = require('./relay-stop.js');
 
 const PKG_VERSION = (() => { try { return require('./package.json').version; } catch { return '0.0.0'; } })();
 // The @sym-bot/sym this process loaded. The node's own word for its version (`node.version`) is read
@@ -67,7 +68,7 @@ function sdkVersion(node) {
 }
 
 // ── Rooms and invites: the SDK's one grammar, MMP §5.8 (room-names.js) ──
-const { isRoom, roomRefusalReason, parseInviteURL, keyFingerprint } = require('./room-names.js');
+const { isRoom, roomRefusalReason, parseInviteURL, keyFingerprint, redactSecrets, relayUrlProblem } = require('./room-names.js');
 const roomDiscovery = require('./room-discovery.js');
 
 // ── LAN discovery of live SYM rooms (observation only): _sym._tcp with TXT room (room-discovery.js) ──
@@ -160,6 +161,14 @@ function resolveRelay(room) {
   return { url: null, token: null, source: null };
 }
 let { url: RELAY_URL, token: RELAY_TOKEN, source: RELAY_SOURCE } = resolveRelay(ROOM);
+// A relay URL that is not one (no ws://, wss://, http:// or https://, another scheme, not a URL) turns off the relay only
+// (review R4-3): the node still starts, with its LAN, and every surface says why. It used to stop the
+// server before MCP connected. The value is not repeated: it may carry a token.
+let RELAY_DISABLED = null;
+if (RELAY_URL && relayUrlProblem(RELAY_URL)) {
+  RELAY_DISABLED = { source: RELAY_SOURCE, problem: relayUrlProblem(RELAY_URL) };
+  RELAY_URL = null; RELAY_TOKEN = null; RELAY_SOURCE = null;
+}
 
 const HOSTED_RELAY_URL = process.env.SYM_HOSTED_RELAY_URL || 'wss://sym-relay.onrender.com';
 const HOSTED_RELAY_MIN_TOKEN = 32;
@@ -225,6 +234,22 @@ function identityFault(err) {
   return null;
 }
 
+/**
+ * The words for any other fault in building or starting the node (review R4-3): a state directory that
+ * is not writable or not a directory, an identity file that does not parse, a port or a socket that
+ * cannot be opened. This server stays up without a node, as it does for an identity fault, so the agent
+ * is told why instead of losing every mesh tool to a stack trace before MCP connects.
+ */
+function nodeFault(err, phase) {
+  const known = identityFault(err);
+  if (known) return known;
+  const code = err && typeof err.code === 'string' ? `${err.code}: ` : '';
+  const msg = String((err && err.message) || err || 'unknown error').replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 240);
+  return `MESH NODE NOT RUNNING: the mesh node could not be ${phase} (${code}${redactSecrets(msg)}). This MCP server is up without a node, ` +
+    'and every mesh tool reports this until it is fixed; the stack is on this server\'s stderr. A state directory (SYM_STATE_DIR, ' +
+    'or ~/.sym) that is not a writable directory, or an identity file that does not parse, are the usual causes. Fix it, then restart this MCP server.';
+}
+
 // ── The host: this session's node, or a node's interior ──────
 
 let NODE_FAULT = null;
@@ -265,9 +290,10 @@ if (MODE === 'interior') {
       host = nh;
       selfNodeId = nh.nodeId;
     } catch (err) {
-      NODE_FAULT = identityFault(err);
-      if (!NODE_FAULT) throw err;
+      // Every fault is said, never thrown (R4-3): the MCP server connects and each tool says why.
+      NODE_FAULT = nodeFault(err, 'built');
       stderrLog(NODE_FAULT);
+      if (!identityFault(err)) stderrLog(`node build failed: ${err && err.stack ? err.stack : err}`);
     }
   }
 }
@@ -275,12 +301,21 @@ if (MODE === 'interior') {
 // ── Delivery policy (delivery-policy.js) ─────────────────────
 const ALLOWED = deliveryPolicy.readAllowedPeers(process.env.SYM_ALLOWED_PEERS);
 if (ALLOWED.ignored.length) {
-  stderrLog(`SYM_ALLOWED_PEERS entries that are not nodeIds are ignored (names are labels since 0.11): ${ALLOWED.ignored.map((s) => JSON.stringify(s)).join(', ')}` +
-    (ALLOWED.failClosed ? '. The list holds no nodeId, so it allows nothing until it lists nodeIds.' : ''));
+  stderrLog(`SYM_ALLOWED_PEERS entries that are not key fingerprints or nodeIds are ignored (names are labels since 0.11): ${ALLOWED.ignored.map((s) => JSON.stringify(s)).join(', ')}` +
+    (ALLOWED.failClosed ? '. The list holds no key or nodeId, so it allows nothing until it lists one.' : ''));
 }
+// A nodeId alone pins no key (review R4-8): sym binds an unbound nodeId to whatever key its first session
+// proves, and a nodeId is public, so whoever reaches this node first under it is "allowed". 0.11.0's lists
+// keep working, said loudly here, in the instructions and in sym_status, with the fix.
+const ALLOWED_UNPINNED_LINE = ALLOWED.nodeIds.length
+  ? `MESH PEER ADVISORY: SYM_ALLOWED_PEERS lists ${ALLOWED.nodeIds.length} nodeId(s) with no key (0.11.0's form). A nodeId is public and ` +
+    'chosen by its owner, so whoever first proves a key under it is allowed. Pin each to its key: replace <nodeId> with ' +
+    '<nodeId>@sha256:<fingerprint>, or list the fingerprint alone (sym_peers and sym_status print the fingerprint each nodeId proves now).'
+  : null;
+if (ALLOWED_UNPINNED_LINE) stderrLog(ALLOWED_UNPINNED_LINE);
 const MAX_PAYLOAD = deliveryPolicy.readMaxPayloadBytes(process.env.SYM_MAX_PAYLOAD_BYTES);
 if (MAX_PAYLOAD.invalid !== undefined) stderrLog(`SYM_MAX_PAYLOAD_BYTES=${JSON.stringify(MAX_PAYLOAD.invalid)} is not a whole number of bytes; using the default of ${deliveryPolicy.DEFAULT_MAX_PAYLOAD_BYTES}.`);
-const policy = deliveryPolicy.createDeliveryPolicy({ allowedPeers: ALLOWED.nodeIds, failClosed: ALLOWED.failClosed, maxPayloadBytes: MAX_PAYLOAD.bytes });
+const policy = deliveryPolicy.createDeliveryPolicy({ allowedPeers: ALLOWED.nodeIds, allowedKeys: ALLOWED.keys, allowedPairs: ALLOWED.pairs, failClosed: ALLOWED.failClosed, maxPayloadBytes: MAX_PAYLOAD.bytes });
 const RATE = deliveryPolicy.readRateLimit(process.env.SYM_RATE_LIMIT);
 if (RATE.invalid !== undefined) stderrLog(`SYM_RATE_LIMIT=${JSON.stringify(RATE.invalid)} is not a whole number of pushes per minute; using the default of ${deliveryPolicy.DEFAULT_RATE_LIMIT}.`);
 const pushRate = deliveryPolicy.createRateLimiter({ limit: RATE.limit });
@@ -327,10 +362,19 @@ function roomAdvisory() {
   }
   if (ALLOWED.ignored.length) {
     lines.push(`MESH PEER ADVISORY: SYM_ALLOWED_PEERS lists ${ALLOWED.ignored.length} entr${ALLOWED.ignored.length === 1 ? 'y' : 'ies'} that ` +
-      `${ALLOWED.ignored.length === 1 ? 'is' : 'are'} not a nodeId, ignored: names are labels, not identities.` +
-      (ALLOWED.failClosed ? ' It lists no nodeId, so it allows nothing until it does (sym_peers shows nodeIds).' : ''));
+      `${ALLOWED.ignored.length === 1 ? 'is' : 'are'} not a key fingerprint or a nodeId, ignored: names are labels, not identities.` +
+      (ALLOWED.failClosed ? ' It lists no key or nodeId, so it allows nothing until it does (sym_peers shows each peer\'s key fingerprint).' : ''));
   }
+  if (ALLOWED_UNPINNED_LINE) lines.push(ALLOWED_UNPINNED_LINE);
+  if (RELAY_DISABLED) lines.push(relayDisabledLine());
   return lines;
+}
+
+/** The words for a configured relay URL that is not one (R4-3): the relay is off, the node is not. */
+function relayDisabledLine() {
+  return `MESH RELAY ADVISORY: the relay URL from ${RELAY_DISABLED.source} is not a relay URL (${RELAY_DISABLED.problem}), so this node runs ` +
+    `without a relay${LAN_OFF ? ' and, with SYM_LAN=off, reaches no peer at all' : ': LAN peers only'}. A relay URL is ws:// or wss://, e.g. ` +
+    'wss://relay.example.com. Fix it and restart this MCP server, or call sym_join_room with an invite.';
 }
 
 /**
@@ -413,7 +457,8 @@ function instructions() {
     'A delivery line opens with who signed it and how it came: [label ⟨…key fingerprint⟩ →you] was directed to you, ' +
     '[… →room] was bound to the room and admitted by this node\'s SVAF, and "via label ⟨…⟩" names the session that relayed it. ' +
     'A label is the signer\'s own choice and so is a nodeId; the key fingerprint is what this node verified, and "(2 keys)" ' +
-    'means two known keys use that label. A delivery this node cannot verify is listed by id and reason, never shown. ' +
+    'means two known keys use that label, or one that looks the same; a label in quotes is not a plain name, and every character in it outside printable ASCII is shown as a \\u escape. ' +
+    'A delivery this node cannot verify is listed by id and reason, never shown. ' +
     '[label ⟨…⟩ mood, unsigned] is a mood frame: no record, nothing signed; the session it came on proved who sent it. ' +
     'Peer text on a line is a quoted, escaped excerpt; sym_fetch <id> gives the verification account and the signed text, ' +
     'fenced, in parts when long. Each line ends with its id ([in0042]) and its CMB key. ' +
@@ -596,7 +641,8 @@ function withInboxAdvisory(result) {
 // for at most 60 s from when it STARTED, so one hung call costs order, not every later call (tool-queue.js).
 const enqueueTool = createToolQueue({ holdMs: 60_000 });
 function onToolCall(request) {
-  return enqueueTool(async () => withDaemonRoomAdvisory(withInboxAdvisory(await dispatchTool(request)), request && request.params && request.params.name));
+  const name = request && request.params && request.params.name;
+  return enqueueTool(async () => withEventAdvisories(withDaemonRoomAdvisory(withInboxAdvisory(await dispatchTool(request)), name), name));
 }
 
 /** Wait (at most 2 s) for pushes still being written, so their credit is settled before a drain. */
@@ -889,19 +935,35 @@ async function statusTool() {
     lines.push(`Versions: @sym-bot/mesh-channel ${PKG_VERSION}; @sym-bot/sym ${sdkVersion(host.node)}`);
     if (!IDENTITY.nodeId) lines.push(`  Pin this folder's agent so it is never re-minted: add "node_id": "${host.nodeId}" to ${PROJECT_CFG.file || '.sym/node.json'}.`);
     lines.push(`Room: ${ROOM}${LAN_OFF ? ' — relay only (SYM_LAN=off)' : ` — advertised on the LAN as ${LAN_SERVICE}, TXT room=${ROOM}`}`);
-    lines.push(`Relay: ${relayLine(s.relayStatus) || (s.relayConnected ? 'connected' : (RELAY_URL ? 'disconnected' : 'not configured'))}`);
+    lines.push(`Relay: ${relayLine(redactSecrets(s.relayStatus)) || (s.relayConnected ? 'connected' : (RELAY_URL ? 'disconnected' : 'not configured'))}`);
     if (RELAY_SOURCE) lines.push(`Relay credential: ${RELAY_SOURCE}`);
+    if (RELAY_DISABLED) lines.push(relayDisabledLine());
+    if (relayStops.current() && !s.relayConnected) lines.push(relayStops.line());
     const sessions = cs.sessions || {};
     lines.push(`Core Secure: ${sessions.confirmed || 0} confirmed session(s), ${sessions.authenticating || 0} authenticating; ${cs.keyBindings ?? '?'} key binding(s)` +
       (Array.isArray(cs.keyConflicts) && cs.keyConflicts.length ? `; ${cs.keyConflicts.length} KEY CONFLICT(S) for the operator: ${cs.keyConflicts.map((c) => c.nodeId || JSON.stringify(c)).join(', ')} (sym keys resolve)` : '; no key conflicts'));
     if (cs.authority && typeof cs.authority === 'object') lines.push(authorityLine(cs.authority));
+    const budget = budgetLine(false);
+    if (budget) lines.push(budget);
     const dropped = host.inboxDropped();
     if (dropped > 0) lines.push(`Inbox: ${dropped} delivery(ies) since this server started got no id, because the inbox already held too many unread deliveries; their records are in this node's memory if it admitted them (sym_recall). Read what waits with sym_receive.`);
     if (s.legacyImport && s.legacyImport.routes) lines.push(`Legacy Import: ${s.legacyImport.routes} route(s) — what they deliver is withheld here as unverified.`);
     lines.push(`Peers: ${s.peerCount || 0}`);
     lines.push(`Memories: ${s.memoryCount || 0}`);
   }
-  if (ALLOWED.set) lines.push(`Allowlist: ${ALLOWED.nodeIds.length} nodeId(s)${ALLOWED.ignored.length ? `; ${ALLOWED.ignored.length} entr(ies) ignored (not nodeIds)` : ''}${ALLOWED.failClosed ? ' — it allows nothing until it lists nodeIds' : ''}`);
+  if (ALLOWED.set) {
+    lines.push(`Allowlist: ${ALLOWED.keys.length} key(s), ${ALLOWED.pairs.length} nodeId(s) pinned to a key, ${ALLOWED.nodeIds.length} nodeId(s) with no key` +
+      `${ALLOWED.ignored.length ? `; ${ALLOWED.ignored.length} entr(ies) ignored (not keys or nodeIds)` : ''}${ALLOWED.failClosed ? ' — it allows nothing until it lists a key or a nodeId' : ''}`);
+    if (ALLOWED_UNPINNED_LINE) {
+      lines.push(`  ${ALLOWED_UNPINNED_LINE}`);
+      if (MODE === 'node') {
+        for (const id of ALLOWED.nodeIds.slice(0, 16)) {
+          const k = host.keys.keyForNode(id);
+          lines.push(`  ${id}: ${k ? `proves ${fullFingerprint(k)} now; pinned it reads ${id}@${fullFingerprint(k)}` : 'no key known for it yet'}`);
+        }
+      }
+    }
+  }
   lines.push(push.statusLine(pushState));
   for (const l of startupAdvisory.filter((x) => x.startsWith('MESH NODE ADVISORY'))) lines.push(l);
   const daemon = daemonRoomAdvisory();
@@ -937,7 +999,9 @@ function peersTool() {
     const sessions = Array.isArray(p.sessions) && p.sessions.length ? p.sessions.map((x) => x.transport).join('+') : (p.source || '?');
     const key = host.keys.keyForNode(p.peerId);
     const tag = key ? host.keys.tag({ key, label: p.name, nodeId: p.peerId }) : `${deliveryPolicy.displayName(p.name)} ⟨key not yet seen by this server⟩`;
-    return `${tag} — nodeId ${p.peerId}; key ${KEY_SOURCE_SHORT[p.keySource] || p.keySource || '?'}; ${sessions}${p.profile && p.profile !== 'core-secure' ? ` (${p.profile}: unverified)` : ''}`;
+    // The full fingerprint, so a key can be pinned in SYM_ALLOWED_PEERS (R4-8) and told from a lookalike.
+    return `${tag} — nodeId ${p.peerId}; key ${KEY_SOURCE_SHORT[p.keySource] || p.keySource || '?'}; ${sessions}${p.profile && p.profile !== 'core-secure' ? ` (${p.profile}: unverified)` : ''}` +
+      (key ? `; key fingerprint ${fullFingerprint(key)}` : '');
   });
   return text(`${peers.length} peer(s) in room '${ROOM}' (send to one with to: "<nodeId>"):\n${lines.join('\n')}${advisoryText}`);
 }
@@ -945,7 +1009,9 @@ function peersTool() {
 function outboxDiscardTool(args) {
   const peer = String(args.peer || '').trim();
   if (!peer) return text('sym_outbox_discard needs a peer: the nodeId the OUTBOX line names (or, for a 0.10 item, its label).', true);
-  const pending = isNodeId(peer) ? host.outbox.pendingFor(peer) : host.outbox.heldForLabel(peer);
+  // A 0.10 label is matched as stored, or as a line prints it (a quoted, escaped label: key-display.js).
+  const pending = isNodeId(peer) ? host.outbox.pendingFor(peer)
+    : [...host.outbox.heldForLabel(peer), ...Object.keys(host.outbox.summary().byLabelOnly).filter((l) => l !== peer && deliveryPolicy.displayName(l) === peer).flatMap((l) => host.outbox.heldForLabel(l))];
   if (!pending.length) return text(`Nothing held for ${JSON.stringify(peer)}. sym_peers lists what the outbox holds.`);
   const now = Date.now();
   const ages = pending.map((i) => ageDays(i, now)).filter((a) => a !== null);
@@ -993,16 +1059,18 @@ function inviteInfoTool(args) {
   if (!url || typeof url !== 'string') return text('Missing required argument: url', true);
   const p = parseInviteURL(url);
   if (p.error) return text(p.error, true);
+  // The token is never repeated (review R4-6): this answer reaches the model and the transcript, and the
+  // invite it came from is already in the caller's hands.
   const out = {
     app: p.appScheme, room: p.room,
     room_id: p.appScheme === 'sym' ? undefined : p.roomId, room_name: p.appScheme === 'sym' ? undefined : p.roomName,
-    relay_url: p.relayUrl || undefined, relay_token: p.relayToken || undefined,
+    relay_url: p.relayUrl ? redactSecrets(p.relayUrl) : undefined, relay_token: p.relayToken ? `<redacted: ${p.relayToken.length} characters>` : undefined,
     issuer_node_id: p.issuer ? p.issuer.nodeId : undefined, issuer_key_fingerprint: p.issuer ? keyFingerprint(p.issuer.publicKey) : undefined,
   };
   for (const k of Object.keys(out)) if (out[k] === undefined) delete out[k];
-  return text(`Parsed invite: ${url}\n\n${JSON.stringify(out, null, 2)}\n\n` +
+  return text(`Parsed invite${p.relayToken ? ' (its relay token is not repeated here: the invite is a secret, so share it as you would a password)' : ''}:\n\n${JSON.stringify(out, null, 2)}\n\n` +
     (p.issuer ? 'Joining with it pins the issuer\'s key for that nodeId, if this node has no key for it yet.\n\n' : 'This invite names no issuer, so joining pins no key: the first session with each peer is trusted on its own proof.\n\n') +
-    `To join, call sym_join_room:\n\n    ${JSON.stringify({ invite: url })}`);
+    'To join, call sym_join_room with the invite URL you were given:\n\n    {"invite": "<the invite URL>"}');
 }
 
 async function joinRoomTool(args) {
@@ -1027,6 +1095,14 @@ async function joinRoomTool(args) {
   } else if (!relayUrl) {
     const saved = loadRelay(room);
     if (saved) { relayUrl = saved.relay_url; relayToken = saved.relay_token; relaySource = `remembered (${saved.file})`; }
+    // Joining the room this node is in, with no relay named, keeps its relay: that is how a relay that
+    // stopped (4004, 4006) is dialled again without a restart (R4-1).
+    else if (room === ROOM && RELAY_URL) { relayUrl = RELAY_URL; relayToken = RELAY_TOKEN; relaySource = RELAY_SOURCE || 'the relay this node had'; }
+  }
+  // A relay URL that is not one is refused before the node is touched (R4-3).
+  if (relayUrl && relayUrlProblem(relayUrl)) {
+    return text(`Not joined: the relay URL ${relaySource === 'the invite' ? 'in the invite' : (relaySource && relaySource.startsWith('remembered') ? `remembered for room "${room}"` : 'given')} is not a relay URL (${relayUrlProblem(relayUrl)}); ` +
+      `a relay URL is ws:// or wss://. Nothing was changed — this node is still in room '${ROOM}'.`, true);
   }
   if (relayUrl && relayToken && relayUrl === HOSTED_RELAY_URL && relayToken.length < HOSTED_RELAY_MIN_TOKEN) {
     return text(`relay_token is ${relayToken.length} characters; ${HOSTED_RELAY_URL} admits ${HOSTED_RELAY_MIN_TOKEN} or more, so this join would be refused on every attempt. ` +
@@ -1045,15 +1121,18 @@ async function joinRoomTool(args) {
   }
   const r = await host.rebuild({ room, relay: relayUrl, relayToken });
   if (!r.ok) {
-    if (r.restored) return text(`Could not join room "${room}": ${r.error}\n\nRestored the previous room "${prevRoom}"; this node is back where it was.`, true);
-    NODE_FAULT = `MESH NODE NOT RUNNING: sym_join_room "${room}" failed (${r.error}) and the previous room "${prevRoom}" could not be restored (${r.restoreError}). Restart this MCP server.`;
+    if (r.restored) return text(`Could not join room "${room}": ${redactSecrets(r.error)}\n\nRestored the previous room "${prevRoom}"; this node is back where it was.`, true);
+    NODE_FAULT = `MESH NODE NOT RUNNING: sym_join_room "${room}" failed (${redactSecrets(r.error)}) and the previous room "${prevRoom}" could not be restored (${redactSecrets(r.restoreError)}). Restart this MCP server.`;
     host = null;
     return text(NODE_FAULT, true);
   }
+  // A new relay connection: what the last one said about a stop is no longer the state.
+  relayStops.reset(); advisories.delete('relay-stop'); advisories.delete('relay-refused');
   ROOM = room;
   ROOM_SOURCE = 'sym_join_room at runtime (not persisted to this server\'s env)';
   RELAY_URL = relayUrl;
   RELAY_TOKEN = relayToken;
+  RELAY_DISABLED = null;
   let remembered = null;
   if (relayUrl && (relaySource === 'this call' || relaySource === 'the invite')) {
     remembered = saveRelay(room, { relay_url: relayUrl, relay_token: relayToken });
@@ -1070,8 +1149,8 @@ async function joinRoomTool(args) {
     ? `Relay credential remembered for room "${room}" (${remembered}, mode 0600) — the next start re-joins it; sym_join_room {room, lan_only: true} forgets it.\n`
     : (relaySource && relaySource.startsWith('remembered') ? 'Relay credential restored from the one remembered for this room.\n' : '');
   const outcome = await host.awaitRelayOutcome(10000);
-  const relayNow = relayLine(host.status().relayStatus) || `relay: ${relayLine(relayUrl)}`;
-  const failed = outcome && (outcome.phase === 'refused' || outcome.phase === 'collision');
+  const relayNow = relayLine(redactSecrets(host.status().relayStatus)) || `relay: ${relayLine(redactSecrets(relayUrl))}`;
+  const failed = outcome && (outcome.phase === 'refused' || outcome.phase === 'collision' || outcome.phase === 'duplicate-rejected');
   const settled = outcome && outcome.phase === 'connected';
   return text(swapped + `Relay: ${relayNow}\n` + credentialLine +
     (settled ? 'Call sym_peers to see who has a session; teammates who join with the same invite appear as they arrive.'
@@ -1138,6 +1217,56 @@ function relayLine(t) {
   return flat;
 }
 
+// ── Relay stops and budget drops: said where the agent reads (R4-1, R4-10) ──
+// A relay that refuses the token (4003) or closes this node's connection because another one claims its
+// identity (4004 replaced, 4006 duplicate rejected) is reported the same way: on stderr, in ONE push, once
+// in the next tool answer, and in sym_status for as long as it lasts. The process and its LAN node stay
+// up: relay-auth carries no key proof, so any holder of the relay token can cause a 4004, and exiting on
+// it handed that holder every mesh tool of this session, LAN included (until 0.11.1 the server exited 2).
+const ADVISORY_REPEAT_MS = 10 * 60_000;
+const advisories = new Map();   // key -> { line, said, at }
+function advise(key, line) { advisories.set(key, { line, said: false, at: Date.now() }); }
+function withEventAdvisories(result, toolName) {
+  const due = [...advisories.values()].filter((a) => !a.said);
+  if (!due.length) return result;
+  for (const a of due) a.said = true;
+  if (toolName === 'sym_status' || !result || !Array.isArray(result.content)) return result;   // status says them itself
+  const add = due.map((a) => a.line).join('\n');
+  const last = result.content[result.content.length - 1];
+  if (last && last.type === 'text') return { ...result, content: [...result.content.slice(0, -1), { ...last, text: `${last.text}\n\n${add}` }] };
+  return { ...result, content: [...result.content, { type: 'text', text: add }] };
+}
+
+// The relay stop (R4-1): relay-stop.js says it, for sym 0.14.2's stop and sym 0.14.3's retry and ping-pong alike.
+const relayStops = createRelayStops({
+  relayState: () => (host && MODE === 'node' ? host.status().relayState : null),
+  room: () => ROOM,
+  push: (type, line, meta) => pushChannel(type, line, meta),
+  advise: (key, line) => advise(key, line),
+  log: stderrLog,
+  relayName: () => redactSecrets(String(RELAY_URL || 'the relay')),
+  repeatMs: ADVISORY_REPEAT_MS,
+});
+
+let budgetSaidAt = 0;
+function onBudgetDrop() {
+  const now = Date.now();
+  if (now - budgetSaidAt < ADVISORY_REPEAT_MS) return;
+  budgetSaidAt = now;
+  // Said after the burst has landed, so the count is the burst's.
+  setTimeout(() => { const line = budgetLine(true); if (line) advise('budget', line); }, 1000).unref?.();
+}
+/** What sym dropped past a peer's budget, in our words (R4-10); null when nothing was. */
+function budgetLine(advisory) {
+  if (MODE !== 'node' || !host || typeof host.budgetDrops !== 'function') return null;
+  const b = host.budgetDrops();
+  if (!b.total) return null;
+  const peers = b.byPeer.slice(0, 5).map(([label, n]) => `${deliveryPolicy.displayName(label)} ×${n}`).join(', ');
+  return `${advisory ? 'MESH INBOX ADVISORY: ' : 'Dropped by sym\'s budget: '}${b.total} record(s) or message(s) since this server started were dropped ` +
+    `by sym before delivery, past their sender's budget (8 a second, a burst of 32, per session) or its verification budget${peers ? ` — from ${peers}` : ''}. ` +
+    'They were never delivered and are not in the inbox; their senders were told they were handed to a session. Ask a sender to resend what you did not get, more slowly.';
+}
+
 function wireHost(h) {
   h.on('delivery', onDelivery);
   h.on('relay-auth-refused', (info) => {
@@ -1147,12 +1276,11 @@ function wireHost(h) {
     const line = `The relay refused this node's token${code !== null ? ` (code ${code})` : ''}${why ? `; the relay said: ${JSON.stringify(why)}` : ''}. ` +
       'Mint a fresh invite with sym_invite_create, or get the team\'s invite, then sym_join_room with it (or fix SYM_RELAY_TOKEN and restart). LAN peers are unaffected.';
     stderrLog(line);
-    pushChannel('relay-auth-refused', line, { relay_url: relayLine(info && info.relayUrl), code: code === null ? '' : String(code) });
+    advise('relay-refused', `MESH RELAY ADVISORY: ${line}`);
+    pushChannel('relay-auth-refused', line, { relay_url: relayLine(redactSecrets(String((info && info.relayUrl) || ''))), code: code === null ? '' : String(code) });
   });
-  h.on('identity-collision', (info) => {
-    stderrLog(`identity collision on relay — another process is holding nodeId=${info.nodeId} name=${info.name}. Exiting.`);
-    process.exit(2);
-  });
+  h.on('identity-collision', (info) => relayStops.onStop(info));
+  h.on('budget-drop', () => onBudgetDrop());
 }
 if (host) wireHost(host);
 
@@ -1184,13 +1312,10 @@ async function shutdown() {
 
 let internalErrors = 0;
 let lastInternalError = null;
-let mcpConnected = false;
 function recordInternalError(kind, err) {
   if (err && err.code === 'EPIPE') { shutdown(); return; }
-  if (!mcpConnected) {
-    try { process.stderr.write(`sym-mesh-channel: ${kind} before the host connected: ${err?.stack || err}\n`); } catch {}
-    process.exit(1);
-  }
+  // Before the host has connected too, an error is counted and said, not fatal (R4-3): the server that
+  // connects can say what went wrong, and one that exited cannot.
   internalErrors++;
   lastInternalError = `${kind}: ${err?.message || err}`;
   try { process.stderr.write(`sym-mesh-channel: ${kind} (server kept running): ${err?.stack || err}\n`); } catch {}
@@ -1219,7 +1344,8 @@ function stopRoomBeacon() { roomBeacon.stop(); }
 function announce() {
   if (MODE === 'interior') { stderrLog(`interior mode: attached to ${INTERIOR_SOCKET}`); return; }
   stderrLog(`node '${NODE_NAME}' (${selfNodeId}) in room '${ROOM}' — room source: ${ROOM_SOURCE}`);
-  if (RELAY_URL) stderrLog(`relay ${RELAY_URL} — credential source: ${RELAY_SOURCE}`);
+  if (RELAY_URL) stderrLog(`relay ${redactSecrets(RELAY_URL)} — credential source: ${RELAY_SOURCE}`);
+  if (RELAY_DISABLED) stderrLog(relayDisabledLine());
   try {
     const ob = host.outbox.summary();
     if (ob.total) stderrLog(`OUTBOX carries ${ob.total} CMB(s) held from a previous run. They are NOT delivered; they flush when each peer's session returns.`);
@@ -1230,8 +1356,13 @@ async function main() {
   if (host) {
     try { await host.start(); }
     catch (e) {
-      if (MODE !== 'interior') throw e;
-      NODE_FAULT = `INTERIOR MODE NOT ATTACHED: could not open ${INTERIOR_SOCKET} (${e.code || e.message}). Is the node running, and listening on its interior?`;
+      if (MODE === 'interior') NODE_FAULT = `INTERIOR MODE NOT ATTACHED: could not open ${INTERIOR_SOCKET} (${e.code || e.message}). Is the node running, and listening on its interior?`;
+      else {
+        // A node that cannot start is said, not thrown (R4-3): the MCP server still connects.
+        NODE_FAULT = nodeFault(e, 'started');
+        if (!identityFault(e)) stderrLog(`node start failed: ${e && e.stack ? e.stack : e}`);
+        try { await host.stop(); } catch { /* it never ran */ }
+      }
       stderrLog(NODE_FAULT);
       host = null;
     }
@@ -1243,7 +1374,6 @@ async function main() {
   mcp = createMcpServer();
   const transport = new StdioServerTransport();
   await mcp.connect(transport);
-  mcpConnected = true;
 }
 
 main().catch((err) => {

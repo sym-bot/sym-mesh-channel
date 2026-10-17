@@ -61,3 +61,60 @@ test('transitively: local modules required BY those modules also ship', () => {
     for (const r of localRequiresOf(f)) queue.push(r.endsWith('.js') ? r : `${r}.js`);
   }
 });
+
+// R4-14: what ships is what a user needs, and every link in a shipped document opens. 0.11.0 shipped the
+// release script and the packed-artifact gate (scripts/), and its README pointed at docs/ images and pages
+// that are not in the tarball, so on npm they were broken.
+const shipped = (f) => pkg.files.some((w) => w === f || (w.endsWith('/') && f.startsWith(w))) || ['package.json', 'README.md', 'LICENSE'].includes(f);
+
+test('R4-14: no development script ships: the release script and the packed-artifact gate stay in the repository', () => {
+  for (const f of ['scripts/release.mjs', 'scripts/verify-packed-artifact.mjs', 'test/run.js', 'docs/DESIGN-0.11.0.md']) {
+    assert.ok(!shipped(f), `${f} is in package.json "files"`);
+  }
+});
+
+test('R4-14: every relative link and image in a shipped document resolves to a file that ships', () => {
+  const docs = pkg.files.filter((f) => f.endsWith('.md'));
+  assert.ok(docs.includes('README.md') && docs.includes('SECURITY.md'), `shipped documents: ${docs.join(', ')}`);
+  let links = 0;
+  for (const doc of docs) {
+    const text = fs.readFileSync(path.join(root, doc), 'utf8');
+    for (const m of text.matchAll(/!?\[[^\]\n]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)|<(?:img|a)\s[^>]*(?:src|href)="([^"]+)"/g)) {
+      const target = m[1] || m[2];
+      if (/^(https?:|mailto:|#)/i.test(target)) continue;
+      links++;
+      const file = path.posix.normalize(path.posix.join(path.posix.dirname(doc), target.split('#')[0]));
+      assert.ok(fs.existsSync(path.join(root, file)), `${doc} links to ${target}, which does not exist`);
+      assert.ok(shipped(file), `${doc} links to ${target}, which is not in the published package (package.json "files"): make it an absolute GitHub URL or ship it`);
+    }
+  }
+  assert.ok(links > 0, 'the check saw the relative links that do ship (LICENSE, SECURITY.md)');
+});
+
+// 0.11.1 review S10: the check above reads server.js only. bin/install.js (the `start` command) required ../claude-bin.js,
+// and nothing in the suite would have noticed that file missing from the tarball. Walk EVERY shipped JavaScript file.
+function shippedFiles() {
+  const out = [];
+  const walk = (rel) => {
+    const abs = path.join(root, rel);
+    if (fs.statSync(abs).isDirectory()) { for (const e of fs.readdirSync(abs)) walk(path.posix.join(rel, e)); } else out.push(rel);
+  };
+  for (const f of pkg.files) { if (fs.existsSync(path.join(root, f))) walk(f.replace(/\/$/, '')); }
+  return out;
+}
+
+test('every relative require in every shipped JavaScript file resolves to a file that ships (0.11.1 review S10)', () => {
+  const shipped = new Set([...shippedFiles(), 'package.json']);
+  const js = [...shipped].filter((f) => /\.(js|mjs|cjs)$/.test(f));
+  assert.ok(js.includes('bin/install.js') && js.includes('server.js'), 'the walk found the entry points');
+  const problems = [];
+  for (const file of js) {
+    const code = fs.readFileSync(path.join(root, file), 'utf8');
+    for (const m of code.matchAll(/require\(\s*(['"])(\.{1,2}\/[^'"]+)\1\s*\)/g)) {
+      const target = path.posix.normalize(path.posix.join(path.posix.dirname(file), m[2]));
+      const found = [target, `${target}.js`, `${target}.json`, `${target}/index.js`].find((c) => shipped.has(c));
+      if (!found) problems.push(`${file} requires '${m[2]}' (${target}), which the tarball does not ship`);
+    }
+  }
+  assert.deepStrictEqual(problems, [], problems.join('\n'));
+});

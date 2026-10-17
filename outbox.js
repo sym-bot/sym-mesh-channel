@@ -59,7 +59,8 @@ function createOutbox(dir) {
   // held items.
   function loadRoster() {
     const raw = readJson(rosterFile, {});
-    if (raw && raw.version === 2 && raw.peers && typeof raw.peers === 'object') return { peers: raw.peers, byOldName: raw.byOldName || {} };
+    const keys = raw && raw.version === 2 && raw.keys && typeof raw.keys === 'object' && !Array.isArray(raw.keys) ? raw.keys : {};
+    if (raw && raw.version === 2 && raw.peers && typeof raw.peers === 'object') return { peers: raw.peers, byOldName: raw.byOldName || {}, keys };
     const peers = {};
     const byOldName = {};
     for (const [name, v] of Object.entries(raw || {})) {
@@ -68,18 +69,63 @@ function createOutbox(dir) {
       peers[id] = { label: name, lastSeen: v.lastSeen || null };
       byOldName[name] = id;
     }
-    return { peers, byOldName };
+    return { peers, byOldName, keys: {} };
   }
-  function saveRoster(r) { writeJsonAtomic(rosterFile, { version: 2, peers: r.peers, byOldName: r.byOldName }); }
+  function saveRoster(r) { writeJsonAtomic(rosterFile, { version: 2, peers: r.peers, byOldName: r.byOldName, keys: r.keys || {} }); }
 
-  function rememberPeer(nodeId, label) {
+  function rememberPeer(nodeId, label, key) {
     if (!isNodeId(nodeId)) return;
     const id = nodeId.toLowerCase();
+    if (typeof key === 'string' && key) rememberKey({ key, nodeId: id, label });
     const r = loadRoster();
     const prev = r.peers[id];
     if (prev && prev.label === (label || prev.label) && prev.lastSeen && Date.now() - prev.lastSeen < 3_600_000) return;   // no churn
     r.peers[id] = { label: typeof label === 'string' ? label.slice(0, 256) : (prev && prev.label) || '', lastSeen: Date.now() };
     saveRoster(r);
+  }
+
+  // ── Known keys: the labels and nodeIds each verified key was seen with (review R4-7) ──
+  // A line says "(2 keys)" when a label is used by more than one known key. Counted from memory alone,
+  // that warning was gone after a restart: the impostor's first line looked like the real peer's. The
+  // keys are written down here, next to the peers, so a later run counts them too. Bounded: at most
+  // MAX_KEYS keys (the least recently seen go first) and 8 labels and 8 nodeIds each.
+  const MAX_KEYS = 2000;
+  const MAX_PER_KEY = 8;
+  let keysCache = null;   // { mtimeMs, size, list }
+  function rememberKey({ key, nodeId, label } = {}) {
+    if (typeof key !== 'string' || !key || key.length > 128) return false;
+    const r = loadRoster();
+    const now = Date.now();
+    const e = r.keys[key] && typeof r.keys[key] === 'object' ? r.keys[key] : { labels: [], nodeIds: [], lastSeen: 0 };
+    e.labels = Array.isArray(e.labels) ? e.labels.filter((x) => typeof x === 'string') : [];
+    e.nodeIds = Array.isArray(e.nodeIds) ? e.nodeIds.filter((x) => isNodeId(x)) : [];
+    let changed = !r.keys[key];
+    const l = typeof label === 'string' && label ? label.slice(0, 256) : null;
+    if (l && !e.labels.includes(l)) { e.labels.push(l); if (e.labels.length > MAX_PER_KEY) e.labels.shift(); changed = true; }
+    const id = isNodeId(nodeId) ? nodeId.toLowerCase() : null;
+    if (id && !e.nodeIds.includes(id)) { e.nodeIds.push(id); if (e.nodeIds.length > MAX_PER_KEY) e.nodeIds.shift(); changed = true; }
+    if (!changed && now - (e.lastSeen || 0) < 86_400_000) return false;   // no churn
+    e.lastSeen = now;
+    r.keys[key] = e;
+    const all = Object.entries(r.keys);
+    if (all.length > MAX_KEYS) {
+      all.sort((a, b) => ((a[1] && a[1].lastSeen) || 0) - ((b[1] && b[1].lastSeen) || 0));
+      for (const [k] of all.slice(0, all.length - MAX_KEYS)) delete r.keys[k];
+    }
+    try { saveRoster(r); } catch { return false; }
+    return true;
+  }
+
+  /** Every key written down, with the labels and nodeIds it was seen with: [{ key, labels, nodeIds }]. */
+  function knownKeys() {
+    let st = null;
+    try { st = fs.statSync(rosterFile); } catch { return []; }
+    if (keysCache && keysCache.mtimeMs === st.mtimeMs && keysCache.size === st.size) return keysCache.list;
+    const keys = loadRoster().keys;
+    const list = Object.entries(keys).filter(([, v]) => v && typeof v === 'object')
+      .map(([key, v]) => ({ key, labels: Array.isArray(v.labels) ? v.labels : [], nodeIds: Array.isArray(v.nodeIds) ? v.nodeIds : [] }));
+    keysCache = { mtimeMs: st.mtimeMs, size: st.size, list };
+    return list;
   }
 
   function isKnown(nodeId) {
@@ -192,7 +238,7 @@ function createOutbox(dir) {
     return d.items.length;
   }
 
-  return { hold, pendingFor, heldForLabel, summary, drop, markStuck, clearStuck, rememberPeer, isKnown, knownLabel, outboxFile, rosterFile };
+  return { hold, pendingFor, heldForLabel, summary, drop, markStuck, clearStuck, rememberPeer, rememberKey, knownKeys, isKnown, knownLabel, outboxFile, rosterFile };
 }
 
 module.exports = { createOutbox, ageDays, MAX_ITEMS, MAX_BYTES };

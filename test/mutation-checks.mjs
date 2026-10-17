@@ -14,7 +14,8 @@
 // Exit 0 when every check is killed. The 21 checks the 0.11.0 design speaks of (the security review's ten,
 // and the ones added on 2026-10-07) were run by hand and their list was not kept in the repository. These
 // are rebuilt from the review's findings, named in brackets (H1, r2, M3...), and extended for the move onto
-// sym 0.14.0 (M16 onward); `--check` verifies that every edit target still exists exactly once.
+// sym 0.14.0 (M16 onward) and for 0.11.1's review R4 (M32 onward); `--check` verifies that every edit target
+// still exists exactly once.
 
 import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -36,11 +37,11 @@ const CHECKS = [
   ['M05', 'a Legacy Import entry is shown (D7)', 'provenance.js', "if (entry.profile === 'legacy-import') return { withheld: 'legacy-import' };", '', 'provenance.test.js'],
   ['M06', 'facts for another author than the entry\'s are accepted (r2, r11)', 'provenance.js', "if (nodeId(author.nodeId) !== facts.signer.nodeId) return { withheld: 'facts-mismatch' };", '', 'provenance.test.js'],
   ['M07', 'a mood frame is attributed though another session delivered it (M1, r3)', 'provenance.js', 'nodeId(m.authorNodeId) !== peer || by !== peer)', 'nodeId(m.authorNodeId) !== peer)', 'provenance.test.js'],
-  ['M08', 'peer text is not escaped as a JSON string in a lead (M2, r4)', 'delivery-policy.js', 'return JSON.stringify(cut);', 'return cut;', 'delivery-policy.test.js'],
+  ['M08', 'peer text is not escaped as a JSON string in a lead (M2, r4)', 'delivery-policy.js', 'return escapeInvisible(JSON.stringify(cut));', 'return escapeInvisible(cut);', 'delivery-policy.test.js'],
   ['M09', 'the fence marker has no nonce, so peer text can close it (M2, r4)', 'delivery-policy.js', "const nonce = crypto.randomBytes(6).toString('hex');", "const nonce = '000000000000';", 'delivery-policy.test.js'],
   ['M10', 'a non-CAT7 key of a record is shown (M3, r8)', 'signed-parts.js', 'for (const f of CAT7) {', 'for (const f of Object.keys(cats)) {', 'provenance.test.js'],
   ['M11', 'the push rate limit never holds (r10)', 'delivery-policy.js', 'return w.length <= limit;', 'return true;', 'delivery-policy.test.js'],
-  ['M12', 'a list of names allows everyone (M5)', 'delivery-policy.js', 'failClosed: entries.length > 0 && nodeIds.length === 0,', 'failClosed: false,', 'delivery-policy.test.js'],
+  ['M12', 'a list of names allows everyone (M5)', 'delivery-policy.js', 'failClosed: entries.length > 0 && nodeIds.length + keys.length + pairs.length === 0,', 'failClosed: false,', 'delivery-policy.test.js'],
   ['M13', 'a tool call\'s hold timer starts when it is queued, not when it starts (L1, r5)', 'tool-queue.js', '    tail = gate;\n    return prev.then(async () => {\n      const t = setTimeout(release, holdMs);', '    tail = gate;\n    const t = setTimeout(release, holdMs);\n    return prev.then(async () => {', 'tool-queue.test.js'],
   ['M14', 'the sandbox lets an XMesh mind\'s interior variables through (M5, r9)', 'test/_clean-env.js', 'const DANGEROUS_PARENT = /^(SYM_INTERIOR_[A-Z_]*|', 'const DANGEROUS_PARENT = /^(SYM_INTERIOR_NEVER|', 'sandbox.test.js'],
   ['M15', 'the gate lets a file: dependency through (M4, r6)', 'scripts/verify-packed-artifact.mjs', '/^(file|link):/.test(String(v))', '/^(link):/.test(String(v))', 'release-gate.test.js'],
@@ -49,7 +50,7 @@ const CHECKS = [
   ['M18', 'a store that could not write is answered as "already in memory" (sym 0.14: null)', 'channel-delivery.js', "if (!entry) return { outcome: 'store-failed' };", "if (!entry) return { outcome: 'already-in-memory' };", 'channel-delivery.test.js'],
   ['M19', 'parents are not bounded', 'channel-delivery.js', 'const MAX_PARENTS = 16;', 'const MAX_PARENTS = 1000;', 'channel-delivery.test.js'],
   ['M20', 'the host feed reuses the ids of evicted items (inbox-id bug)', 'node-host.js', 'else if (Number.isSafeInteger(o.seqFloor) && o.seqFloor > seq) seq = o.seqFloor;', '', 'node-host.test.js'],
-  ['M21', 'a receive never drains the inbox, so the same deliveries are listed again', 'node-host.js', "if (tookInbox.length) this.node.inbox({ limit: Math.max(1, tookInbox.filter((d) => !d.acked).length) });", '', 'redelivery-e2e.test.js'],
+  ['M21', 'a receive never drains the inbox, so the same deliveries are listed again', 'node-host.js', 'const drained = this.node.inbox({ limit: Math.max(1, inboxUnread) });', 'const drained = null;', 'redelivery-e2e.test.js'],
   ['M22', 'a room is the kebab-case grammar again', 'room-names.js', 'return isValidRoom(room);', "return typeof room === 'string' && /^[a-z0-9]+(?:--?[a-z0-9]+)*$/.test(room);", 'plugin.test.js'],
   ['M23', 'the relay store keeps its own kebab-case pattern again', 'relay-store.js', 'if (!isValidRoom(room)) return null;', "if (typeof room !== 'string' || !/^[a-z0-9][a-z0-9-]{0,127}$/.test(room)) return null;", 'relay-store.test.js'],
   ['M24', 'the installer\'s mirror of the room grammar is one character short', 'bin/install.js', 'const FALLBACK_ROOM_RE = /^[a-z0-9._-]{1,64}$/;', 'const FALLBACK_ROOM_RE = /^[a-z0-9._-]{1,63}$/;', 'plugin.test.js'],
@@ -60,6 +61,33 @@ const CHECKS = [
   ['M29', 'a malformed anchor pin crashes the server instead of stopping the node with the cause', 'server.js', '(/^anchor pin:/.test(String(err.message)) || err instanceof SyntaxError)', 'false', 'rooms-surface.test.js'],
   ['M30', 'sym_fetch does not acknowledge what it read to the end', 'node-host.js', 'try { return this.node.inboxAck(id); } catch { return false; }', 'return false;', 'core-secure-e2e.test.js'],
   ['M31', 'the release gate looks for package.json.js in the packed artifact and fails a correct tarball', 'scripts/verify-packed-artifact.mjs', "/\\.(js|json|mjs|cjs)$/.test(m[1])", "m[1].endsWith('.js')", 'release-gate.test.js'],
+  // 0.11.1, review R4
+  ['M32', 'a read item takes a place in a receive again, so the unread one after it is never listed (R4-2)', 'node-host.js', 'if (!d.acked) { if (unread >= lim) break; unread++; }', 'if (unread >= lim) break; unread++;', 'node-host.test.js'],
+  ['M33', 'a relay close 4004 exits the server again (R4-1)', 'server.js', "h.on('identity-collision', (info) => relayStops.onStop(info));", "h.on('identity-collision', () => process.exit(2));", 'server-hardening-e2e.test.js'],
+  ['M34', 'the installer writes a config file with the default mode again (R4-4)', 'bin/install.js', 'fs.writeFileSync(tmp, data, { mode });\n    // best effort: a file system without modes (FAT, some network shares) refuses chmod, and the write must still land\n    try { fs.chmodSync(tmp, mode); } catch { /* the mode writeFileSync created it with stands */ }', 'fs.writeFileSync(tmp, data);', 'installer-modes.test.js'],
+  ['M35', 'a label is printed bare whatever it holds (R4-5)', 'key-display.js', '  if (s.length <= LABEL_MAX && PLAIN_LABEL.test(s)', '  if (true || s.length <= LABEL_MAX && PLAIN_LABEL.test(s)', 'key-display.test.js'],
+  ['M36', 'sym_invite_info repeats the relay token (R4-6)', 'server.js', 'relay_token: p.relayToken ? `<redacted: ${p.relayToken.length} characters>` : undefined,', 'relay_token: p.relayToken || undefined,', 'server-hardening-e2e.test.js'],
+  ['M37', 'a nodeId pinned to a key in the allowlist is allowed with any key (R4-8)', 'delivery-policy.js', '(fp && pairs.has(`${id}@${fp}`))', '[...pairs].some((x) => x.startsWith(`${id}@`))', 'delivery-policy.test.js'],
+  ['M38', 'a fault building the node kills the server before MCP connects again (R4-3)', 'server.js', "      NODE_FAULT = nodeFault(err, 'built');", '      throw err;', 'server-hardening-e2e.test.js'],
+  ['M39', 'a lead lets invisible characters through again (R4-13)', 'delivery-policy.js', 'return escapeInvisible(JSON.stringify(cut));', 'return JSON.stringify(cut);', 'delivery-policy.test.js'],
+  ['M40', 'the keys written down in earlier runs are not counted for "(2 keys)" (R4-7)', 'key-display.js', 'for (const p of persistedEntries()) {', 'for (const p of []) {', 'key-display.test.js'],
+  ['M41', 'records sym drops past a budget are not counted (R4-10)', 'node-host.js', "if (!m || (m.type !== 'cmb-over-budget' && m.type !== 'cmb-over-verify-budget')) return;", 'return;', 'server-hardening-e2e.test.js'],
+  ['M43', 'a ping-pong sym 0.14.3 finds is not pushed when a stop was pushed just before (R4-1)', 'relay-stop.js', ' && !(pingPong && !stop.pingPong);', ';', 'relay-stop.test.js'],
+  ['M42', 'the release script ships in the package again (R4-14)', 'package.json', '    "LICENSE"\n  ],', '    "LICENSE",\n    "scripts/"\n  ],', 'packaging.test.js'],
+  // 0.11.1, `start` finds claude itself
+  ['M44', 'the system PATH (the registry) is not read, so a terminal opened before an install does not see the new claude', 'claude-bin.js', '  if (win) {\n    const sys = systemPathDirs', '  if (false) {\n    const sys = systemPathDirs', 'claude-bin.test.js'],
+  ['M45', 'the folders Claude Code installs into are not searched', 'claude-bin.js', "for (const p of known) if (exists(p)) return { path: p, source: 'an install folder' };", '', 'claude-bin.test.js'],
+  ['M46', 'a wrong SYM_CLAUDE_BIN falls through to another claude instead of stopping', 'claude-bin.js', "return { path: null, searched: [`SYM_CLAUDE_BIN=${given} (not found, not a file, or not executable)`], override: given };", '', 'claude-bin.test.js'],
+  ['M47', 'an npm .cmd shim is started without a shell (Node refuses a batch file)', 'claude-bin.js', "options: { shell: true } };\n  }\n  return { command: file", "options: { shell: false } };\n  }\n  return { command: file", 'claude-bin.test.js'],
+  ['M48', '`start` runs the bare name `claude` again instead of the one it found', 'bin/install.js', 'spawnSync(spec.command, spec.args, {', "spawnSync('claude', claudeArgs, {", 'claude-bin.test.js'],
+  // 0.11.1, the pre-publish review of `start`
+  ['M49', 'an http:// or https:// relay URL is refused again, so the relay is turned off (review B2)', 'room-names.js', "['ws:', 'wss:', 'http:', 'https:'].includes(u.protocol)", "['ws:', 'wss:'].includes(u.protocol)", 'server-hardening-e2e.test.js'],
+  ['M50', 'a trailing backslash in a Windows argument is not doubled, so it escapes the closing quote', 'claude-bin.js', "a = a.replace(/(\\\\+)$/, '$1$1');", '', 'claude-bin.test.js'],
+  ['M51', 'reg.exe is run by bare name, which Windows looks for in the current folder first', 'claude-bin.js', "const regExe = path.win32.join(env.SystemRoot || env.windir || 'C:\\\\Windows', 'System32', 'reg.exe');", "const regExe = 'reg';", 'claude-bin.test.js'],
+  ['M52', 'a claude killed by a signal makes start exit 0 again', 'bin/install.js', '(run.signal ? 128 + (os.constants.signals[run.signal] || 0) : 0)', '0', 'claude-bin.test.js'],
+  ['M53', 'claude-bin.js is left out of the package, which only install.js requires', 'package.json', '    "server.js",\n    "claude-bin.js",', '    "server.js",', 'packaging.test.js'],
+  ['M54', 'a password in a relay URL is printed as typed', 'room-names.js', "    .replace(/(\\/\\/)[^\\/\\s:@\"'<>]+:[^\\/\\s@\"'<>]*@/g, '$1<redacted>@')\n", '', 'server-hardening-e2e.test.js'],
+  ['M55', 'a decision is attributed to the owner again in the changelog', 'CHANGELOG.md', 'Decision, 2026-08-27: one name per room, one room per name.', 'Founder ruling, 2026-08-27: one name per room, one room per name.', 'no-owner-citings.test.js'],
 ];
 
 const arg = (n) => { const i = process.argv.indexOf(n); return i === -1 ? null : (process.argv[i + 1] || ''); };

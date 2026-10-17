@@ -40,6 +40,35 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
+// ── Writing a config file: atomic, and never more readable than it was (review R4-4) ──
+// ~/.claude.json carries SYM_RELAY_TOKEN, and so do its backups. A tmp file written with the default
+// mode and renamed over it left a 0600 file 0644: readable by every account on the machine. Every
+// write here goes through writeFileAtomic: the tmp file is created with the original's mode (0600 for a
+// new file), chmod-ed to it before the rename (the umask cannot widen it), and a SECRET file is kept
+// owner-only whatever it was. A backup gets the same mode as the file it copies.
+function modeFor(file, { secret = false } = {}) {
+  let mode = 0o600;
+  try { mode = fs.statSync(file).mode & 0o777; } catch { /* a new file */ }
+  return secret ? (mode & 0o700) | 0o600 : mode;
+}
+function writeFileAtomic(file, data, opts = {}) {
+  const mode = modeFor(file, opts);
+  const tmp = `${file}.tmp-${process.pid}`;
+  try {
+    fs.writeFileSync(tmp, data, { mode });
+    // best effort: a file system without modes (FAT, some network shares) refuses chmod, and the write must still land
+    try { fs.chmodSync(tmp, mode); } catch { /* the mode writeFileSync created it with stands */ }
+    fs.renameSync(tmp, file);
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch { /* never written */ }
+    throw e;
+  }
+}
+function backupFile(file, backup, opts = {}) {
+  fs.copyFileSync(file, backup);
+  try { fs.chmodSync(backup, modeFor(file, opts)); } catch { /* best effort on platforms without modes */ }
+}
+
 const args = process.argv.slice(2);
 const force = args.includes('--force');
 const isPostinstall = args.includes('--postinstall');
@@ -238,9 +267,7 @@ function writeProjectConfig(dir, { room, name, defaultName = true, inheritRoom =
   else if (!cfg.room && inheritRoom) cfg.room = inheritRoom;
   if (JSON.stringify(cfg) !== before) {
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    const tmp = `${file}.tmp-${process.pid}`;
-    fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2) + '\n');
-    fs.renameSync(tmp, file);
+    writeFileAtomic(file, JSON.stringify(cfg, null, 2) + '\n');
     console.log(`✓ Mesh identity for this folder written to ${file}: ${cfg.node_name ? `node '${cfg.node_name}', ` : ''}room '${cfg.room || 'default'}'`);
   }
   Object.defineProperty(cfg, 'named', { value: named, enumerable: false });
@@ -278,10 +305,8 @@ function disablePluginForFolder(dir) {
   for (const k of keys) settings.enabledPlugins[k] = false;
   if (JSON.stringify(settings) === before) return;
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  if (fs.existsSync(file)) fs.copyFileSync(file, `${file}.bak-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}`);
-  const tmp = `${file}.tmp-${process.pid}`;
-  fs.writeFileSync(tmp, JSON.stringify(settings, null, 2) + '\n');
-  fs.renameSync(tmp, file);
+  if (fs.existsSync(file)) backupFile(file, `${file}.bak-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}`);
+  writeFileAtomic(file, JSON.stringify(settings, null, 2) + '\n');
   console.log(`✓ The sym-mesh-channel plugin is off for this folder (${file}), so this session runs one mesh node.`);
 }
 
@@ -442,7 +467,7 @@ if (cmd === 'start') {
   if (!isProject) {
     let oldName = existing?.env && typeof existing.env.SYM_NODE_NAME === 'string' ? existing.env.SYM_NODE_NAME.trim() : '';
     if (oldName) {
-      try { fs.mkdirSync(path.dirname(pinNote), { recursive: true }); fs.writeFileSync(pinNote, JSON.stringify({ name: oldName, removedAt: new Date().toISOString() }) + '\n'); } catch { /* best effort */ }
+      try { fs.mkdirSync(path.dirname(pinNote), { recursive: true }); writeFileAtomic(pinNote, JSON.stringify({ name: oldName, removedAt: new Date().toISOString() }) + '\n'); } catch { /* best effort */ }
     } else {
       try { oldName = JSON.parse(fs.readFileSync(pinNote, 'utf8')).name || ''; } catch { /* none removed here */ }
     }
@@ -465,23 +490,28 @@ if (cmd === 'start') {
   // Launched with the channels flag, push CAN reach the session; whether it does, only the session can
   // say (design D5): the server sends a push check, and the session answers it with sym_push_confirm.
   console.log(`\n▶ Launching Claude Code on the SYM mesh with the channels flag for ${handle}.\n  (the dev flag is temporary until Anthropic allowlists it; the session confirms push itself with sym_push_confirm)\n`);
-  // On Windows the `claude` CLI is a `.cmd`/`.ps1` shim (npm) or `.exe`
-  // (native installer). Node's spawn does an exact-filename lookup that
-  // ignores PATHEXT, so bare `spawnSync('claude', …)` returns ENOENT even
-  // when `claude` runs fine in the user's shell. Route through a shell on
-  // Windows so PATHEXT resolution kicks in; quote args that contain spaces
-  // since shell:true forwards the args unquoted.
-  const isWindows = process.platform === 'win32';
-  const spawnArgs = isWindows
-    ? claudeArgs.map((a) => (/\s/.test(a) ? `"${a}"` : a))
-    : claudeArgs;
-  const run = spawnSync('claude', spawnArgs, { stdio: 'inherit', cwd: launchDir, shell: isWindows });
-  if (run.error && run.error.code === 'ENOENT') {
-    process.stderr.write('ERROR: `claude` was not found on your PATH.\n');
-    process.stderr.write('Install Claude Code (https://claude.com/code), make sure `claude` runs in your terminal, then re-run `sym-mesh-channel start`.\n');
+  // WHERE IS `claude`? Not "whatever the shell finds": a program started from a terminal has the PATH that terminal
+  // had when it was opened, so a Claude Code that an update or installer moved (and put on the user PATH in the
+  // registry), or one the user's shell only knows as an alias or function, is not found by `claude` here although it
+  // runs fine in the user's own prompt. claude-bin.js looks where it can be: SYM_CLAUDE_BIN, this PATH, on Windows
+  // the system PATH as the registry holds it now, the folders Claude Code installs into, and the running session's
+  // own binary. A .exe is started directly; an npm .cmd shim needs cmd.exe (Node refuses a batch file otherwise).
+  const claudeBin = require('../claude-bin.js');
+  const found = claudeBin.resolveClaude({ run: (command, cmdArgs) => spawnSync(command, cmdArgs, { encoding: 'utf8', windowsHide: true, timeout: 5000 }) });
+  if (!found.path) {
+    process.stderr.write(claudeBin.notFoundMessage(found));
     process.exit(127);
   }
-  process.exit(run.status == null ? 0 : run.status);
+  if (found.source !== 'PATH') console.log(`  (claude found at ${found.path}, from ${found.source})\n`);
+  const spec = claudeBin.launchSpec(found.path, claudeArgs);
+  const run = spawnSync(spec.command, spec.args, { stdio: 'inherit', cwd: launchDir, ...spec.options });
+  if (run.error) {
+    process.stderr.write(`ERROR: could not start ${found.path}: ${run.error.code || ''} ${run.error.message}\n`);
+    process.stderr.write('If that is not the Claude Code you meant, set SYM_CLAUDE_BIN to the right file and run `start` again.\n');
+    process.exit(127);
+  }
+  // claude's own exit code, and for a claude that was killed by a signal the shell convention 128 + signal (it used to read as success)
+  process.exit(run.status != null ? run.status : (run.signal ? 128 + (os.constants.signals[run.signal] || 0) : 0));
 }
 
 // --postinstall always runs global install (npm postinstall runs from
@@ -625,7 +655,7 @@ if (useProjectMode) {
   let mcpBackupPath = null;
   if (fs.existsSync(mcpJsonPath)) {
     mcpBackupPath = `${mcpJsonPath}.bak-${ts}`;
-    fs.copyFileSync(mcpJsonPath, mcpBackupPath);
+    backupFile(mcpJsonPath, mcpBackupPath);
   }
 
   mcpJson.mcpServers['claude-sym-mesh'] = projectEntry;
@@ -636,9 +666,7 @@ if (useProjectMode) {
     process.stderr.write(`ERROR: serialization produced invalid JSON: ${e.message}\n`);
     process.exit(1);
   }
-  const mcpTmpPath = `${mcpJsonPath}.tmp-${process.pid}`;
-  fs.writeFileSync(mcpTmpPath, mcpSerialized);
-  fs.renameSync(mcpTmpPath, mcpJsonPath);
+  writeFileAtomic(mcpJsonPath, mcpSerialized);
 
   // Merge <projectDir>/.claude/settings.local.json. Claude Code gates
   // loading of project-scoped MCP servers on the enabledMcpjsonServers
@@ -676,12 +704,9 @@ if (useProjectMode) {
   if (settingsChanged) {
     if (existingSettings) {
       settingsBackupPath = `${settingsLocalPath}.bak-${ts}`;
-      fs.copyFileSync(settingsLocalPath, settingsBackupPath);
+      backupFile(settingsLocalPath, settingsBackupPath);
     }
-    const settingsSerialized = JSON.stringify(settings, null, 2) + '\n';
-    const settingsTmpPath = `${settingsLocalPath}.tmp-${process.pid}`;
-    fs.writeFileSync(settingsTmpPath, settingsSerialized);
-    fs.renameSync(settingsTmpPath, settingsLocalPath);
+    writeFileAtomic(settingsLocalPath, JSON.stringify(settings, null, 2) + '\n');
   }
 
   // Print next steps
@@ -746,7 +771,8 @@ try {
 
 // `ts` was defined above, shared with project-mode install
 const backupPath = `${claudeJsonPath}.bak-${ts}`;
-fs.copyFileSync(claudeJsonPath, backupPath);
+// The backup holds the relay token too: owner-only, as the file itself is kept.
+backupFile(claudeJsonPath, backupPath, { secret: true });
 
 // ── Find the MCP servers entry to insert into ───────────────────
 // Write to global mcpServers (available in all Claude Code sessions),
@@ -936,14 +962,11 @@ try {
   process.exit(1);
 }
 
-const tmpPath = `${claudeJsonPath}.tmp-${process.pid}`;
 try {
-  fs.writeFileSync(tmpPath, serialized);
-  fs.renameSync(tmpPath, claudeJsonPath);
+  writeFileAtomic(claudeJsonPath, serialized, { secret: true });
 } catch (e) {
   // EBUSY on Windows when Claude Code has ~/.claude.json locked
   if (e.code === 'EBUSY' || e.code === 'EPERM') {
-    try { fs.unlinkSync(tmpPath); } catch {}
     if (isPostinstall) {
       console.log('sym-mesh-channel: ~/.claude.json is locked (Claude Code may be running).');
       console.log('Run `sym-mesh-channel init` after quitting Claude Code.');

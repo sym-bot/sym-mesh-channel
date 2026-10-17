@@ -123,12 +123,12 @@ t('without push confirmed, the unread footer counts what waits; sym_fetch to the
 t('SYM_ALLOWED_PEERS of names allows nothing, and says so; of nodeIds, admits exactly those', async () => {
   const { A, B, a, b } = await pair({}, { SYM_ALLOWED_PEERS: 'alice' });
   try {
-    assert.match(B.instructions, /SYM_ALLOWED_PEERS lists 1 entry that is not a nodeId, ignored: names are labels, not identities\. It lists no nodeId, so it allows nothing/);
+    assert.match(B.instructions, /SYM_ALLOWED_PEERS lists 1 entry that is not a key fingerprint or a nodeId, ignored: names are labels, not identities\. It lists no key or nodeId, so it allows nothing/);
     await A.call('sym_send', { to: b, focus: 'kept out by a name list' });
     const r = await h.until(async () => { const x = (await B.call('sym_receive')).text; return /signer outside SYM_ALLOWED_PEERS/.test(x) && x; }, 10000, 300);
     assert.ok(r, 'counted, never shown');
     assert.ok(!/kept out by a name list/.test(r));
-    assert.match((await B.call('sym_status')).text, /Allowlist: 0 nodeId\(s\); 1 entr\(ies\) ignored \(not nodeIds\) — it allows nothing/);
+    assert.match((await B.call('sym_status')).text, /Allowlist: 0 key\(s\), 0 nodeId\(s\) pinned to a key, 0 nodeId\(s\) with no key; 1 entr\(ies\) ignored \(not keys or nodeIds\) — it allows nothing/);
   } finally { await closeAll(A, B); }
   // A listed nodeId is admitted; another node with the same label is not.
   const sdk = require('@sym-bot/sym');
