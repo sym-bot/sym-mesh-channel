@@ -489,20 +489,24 @@ if (cmd === 'start') {
   // Launched with the channels flag, push CAN reach the session; whether it does, only the session can
   // say (design D5): the server sends a push check, and the session answers it with sym_push_confirm.
   console.log(`\n▶ Launching Claude Code on the SYM mesh with the channels flag for ${handle}.\n  (the dev flag is temporary until Anthropic allowlists it; the session confirms push itself with sym_push_confirm)\n`);
-  // On Windows the `claude` CLI is a `.cmd`/`.ps1` shim (npm) or `.exe`
-  // (native installer). Node's spawn does an exact-filename lookup that
-  // ignores PATHEXT, so bare `spawnSync('claude', …)` returns ENOENT even
-  // when `claude` runs fine in the user's shell. Route through a shell on
-  // Windows so PATHEXT resolution kicks in; quote args that contain spaces
-  // since shell:true forwards the args unquoted.
-  const isWindows = process.platform === 'win32';
-  const spawnArgs = isWindows
-    ? claudeArgs.map((a) => (/\s/.test(a) ? `"${a}"` : a))
-    : claudeArgs;
-  const run = spawnSync('claude', spawnArgs, { stdio: 'inherit', cwd: launchDir, shell: isWindows });
-  if (run.error && run.error.code === 'ENOENT') {
-    process.stderr.write('ERROR: `claude` was not found on your PATH.\n');
-    process.stderr.write('Install Claude Code (https://claude.com/code), make sure `claude` runs in your terminal, then re-run `sym-mesh-channel start`.\n');
+  // WHERE IS `claude`? Not "whatever the shell finds": a program started from a terminal has the PATH that terminal
+  // had when it was opened, so a Claude Code that an update or installer moved (and put on the user PATH in the
+  // registry), or one the user's shell only knows as an alias or function, is not found by `claude` here although it
+  // runs fine in the user's own prompt. claude-bin.js looks where it can be: SYM_CLAUDE_BIN, this PATH, on Windows
+  // the system PATH as the registry holds it now, the folders Claude Code installs into, and the running session's
+  // own binary. A .exe is started directly; an npm .cmd shim needs cmd.exe (Node refuses a batch file otherwise).
+  const claudeBin = require('../claude-bin.js');
+  const found = claudeBin.resolveClaude({ run: (command, cmdArgs) => spawnSync(command, cmdArgs, { encoding: 'utf8', windowsHide: true, timeout: 5000 }) });
+  if (!found.path) {
+    process.stderr.write(claudeBin.notFoundMessage(found));
+    process.exit(127);
+  }
+  if (found.source !== 'PATH') console.log(`  (claude found at ${found.path}, from ${found.source})\n`);
+  const spec = claudeBin.launchSpec(found.path, claudeArgs);
+  const run = spawnSync(spec.command, spec.args, { stdio: 'inherit', cwd: launchDir, ...spec.options });
+  if (run.error) {
+    process.stderr.write(`ERROR: could not start ${found.path}: ${run.error.code || ''} ${run.error.message}\n`);
+    process.stderr.write('If that is not the Claude Code you meant, set SYM_CLAUDE_BIN to the right file and run `start` again.\n');
     process.exit(127);
   }
   process.exit(run.status == null ? 0 : run.status);

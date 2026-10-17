@@ -74,6 +74,12 @@ const CHECKS = [
   ['M41', 'records sym drops past a budget are not counted (R4-10)', 'node-host.js', "if (!m || (m.type !== 'cmb-over-budget' && m.type !== 'cmb-over-verify-budget')) return;", 'return;', 'server-hardening-e2e.test.js'],
   ['M43', 'a ping-pong sym 0.14.3 finds is not pushed when a stop was pushed just before (R4-1)', 'relay-stop.js', ' && !(pingPong && !stop.pingPong);', ';', 'relay-stop.test.js'],
   ['M42', 'the release script ships in the package again (R4-14)', 'package.json', '    "LICENSE"\n  ],', '    "LICENSE",\n    "scripts/"\n  ],', 'packaging.test.js'],
+  // 0.11.1, `start` finds claude itself
+  ['M44', 'the system PATH (the registry) is not read, so a terminal opened before an install does not see the new claude', 'claude-bin.js', '  if (win) {\n    const sys = systemPathDirs', '  if (false) {\n    const sys = systemPathDirs', 'claude-bin.test.js'],
+  ['M45', 'the folders Claude Code installs into are not searched', 'claude-bin.js', "for (const p of known) if (exists(p)) return { path: p, source: 'an install folder' };", '', 'claude-bin.test.js'],
+  ['M46', 'a wrong SYM_CLAUDE_BIN falls through to another claude instead of stopping', 'claude-bin.js', "return { path: null, searched: [`SYM_CLAUDE_BIN=${p} (not a file)`], override: p };", '', 'claude-bin.test.js'],
+  ['M47', 'an npm .cmd shim is started without a shell (Node refuses a batch file)', 'claude-bin.js', "options: { shell: true } };\n  }\n  return { command: file", "options: { shell: false } };\n  }\n  return { command: file", 'claude-bin.test.js'],
+  ['M48', '`start` runs the bare name `claude` again instead of the one it found', 'bin/install.js', 'spawnSync(spec.command, spec.args, {', "spawnSync('claude', claudeArgs, {", 'claude-bin.test.js'],
 ];
 
 const arg = (n) => { const i = process.argv.indexOf(n); return i === -1 ? null : (process.argv[i + 1] || ''); };

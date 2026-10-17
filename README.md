@@ -57,6 +57,8 @@ The launcher downloads the current channel, configures the MCP server, and start
 - The name and room are kept in the folder's `.sym/node.json`, so the agent keeps them across sessions.
 - The Claude plugin is turned off for that folder in `.claude/settings.local.json`, so the session runs exactly one mesh node, the one launched with the channels flag.
 
+**`claude` not found?** `start` looks for Claude Code itself: on this process's `PATH`, then (Windows) the system `PATH` as the registry holds it now, then the folders Claude Code installs into (`~/.local/bin`, `~/.claude/local`, the npm global folder, winget). That covers a terminal opened before an update changed `PATH`; it cannot see a `claude` that only your shell defines as an alias or function (PowerShell: `Get-Command claude` says `Alias` or `Function`). Name the file yourself with `SYM_CLAUDE_BIN` (PowerShell: `$env:SYM_CLAUDE_BIN = 'C:\path\to\claude.exe'`, then run `start` again); a wrong value is an error, never a silent fall-back to another `claude`.
+
 Sessions in the same room find each other over loopback on one machine, mDNS on a LAN (each node advertises on `_sym._tcp` with its room in the TXT `room` key, and dials only advertisements of its own room), or an optional relay across networks. To give a folder a different name, pass `--name <node-name>`. Two sessions open at once in folders with the same name share it; the second one says so in every mesh tool and tells you to pass `--name`.
 
 Then tell one agent:

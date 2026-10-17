@@ -32,6 +32,23 @@ mesh with each other.
 
 ### Fixed — high
 
+- **`start` finds Claude Code itself, so it starts on Windows after an update.** On Windows `start` failed with
+  `'claude' is not recognized as an internal or external command` once Claude Code had been updated (or moved
+  by an installer): it ran the bare name `claude` through a shell, which finds Claude Code only where THIS
+  process's PATH reaches. A terminal opened before the PATH changed keeps the old one for every process it
+  starts (npx included), and a `claude` that only the user's own shell defines as an alias or a function is
+  invisible to a child process. `claude-bin.js` now looks where Claude Code can be, first hit wins:
+  `SYM_CLAUDE_BIN` (explicit; a wrong value is an error, never a fall-through to another claude), this
+  process's PATH (by PATHEXT on Windows), the system PATH as the registry holds it now (Windows), the folders
+  Claude Code installs into (`~/.local/bin`, `~/.claude/local`, the npm global folder, winget), and last
+  `CLAUDE_CODE_EXECPATH` (a versioned file an update may have removed, so the launcher beats it). A `.exe` or a
+  POSIX file is started directly, with no shell; an npm `.cmd` shim goes through cmd.exe with every word quoted
+  (Node refuses a batch file otherwise). When `claude` is found anywhere but on PATH the launch says where;
+  when it is found nowhere the error lists every place it looked and the three ways out (`Get-Command
+  claude`, `SYM_CLAUDE_BIN`, a new terminal). Not checked: a real Windows machine (the Windows cases are
+  decided with the platform, the environment and the file system injected); the winget and local-install
+  folders are best-effort and an absent one costs one stat.
+
 - **A fault at startup no longer kills the server before MCP connects (R4-3).** Only a closed list of
   identity errors became a fault the tools report; anything else (a read-only or non-directory
   `SYM_STATE_DIR`, an identity file that does not parse, a start that throws) ended in a stack trace

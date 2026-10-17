@@ -15,6 +15,7 @@
   },
   "files": [
     "server.js",
+    "claude-bin.js",
     "channel-delivery.js",
     "classifier-risk.js",
     "delivery-policy.js",
