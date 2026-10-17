@@ -47,15 +47,20 @@ function roomRefusalReason(room) {
 function redactSecrets(text) {
   return String(text ?? '')
     .replace(/(token=)[^&#\s"'<>]*/gi, '$1<redacted>')
+    // a password in a URL's userinfo: ws://user:SECRET@host (0.11.1 review: it was printed as typed)
+    .replace(/(\/\/)[^\/\s:@"'<>]+:[^\/\s@"'<>]*@/g, '$1<redacted>@')
     .replace(/("relay_token"\s*:\s*")[^"]*(")/gi, '$1<redacted>$2');
 }
 
-/** Why `url` is not a relay URL a node can dial (ws:// or wss://, with a host), or null when it is one (R4-3). */
+/**
+ * Why `url` is not a relay URL a node can dial, or null when it is one (R4-3): ws:// or wss://, or http:// or https://
+ * (the WebSocket client dials those as ws and wss, and 0.11.0 accepted them; users paste https://), with a host.
+ */
 function relayUrlProblem(url) {
   if (typeof url !== 'string' || !url.trim()) return 'it is empty';
   let u;
-  try { u = new URL(url.trim()); } catch { return /^[a-z][a-z0-9+.-]*:\/\//i.test(url.trim()) ? 'it does not parse as a URL' : 'it has no ws:// or wss:// scheme'; }
-  if (u.protocol !== 'ws:' && u.protocol !== 'wss:') return `its scheme is ${JSON.stringify(u.protocol.replace(/:$/, '').slice(0, 16))}, not ws or wss`;
+  try { u = new URL(url.trim()); } catch { return /^[a-z][a-z0-9+.-]*:\/\//i.test(url.trim()) ? 'it does not parse as a URL' : 'it has no ws://, wss://, http:// or https:// scheme'; }
+  if (!['ws:', 'wss:', 'http:', 'https:'].includes(u.protocol)) return `its scheme is ${JSON.stringify(u.protocol.replace(/:$/, '').slice(0, 16))}, not ws, wss, http or https`;
   if (!u.hostname) return 'it names no host';
   return null;
 }

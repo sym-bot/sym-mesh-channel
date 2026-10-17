@@ -809,7 +809,10 @@ async function runProjectInstallTests() {
       const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'smc-bin-'));
       try {
         fs.mkdirSync(path.join(pkgDir, 'bin'), { recursive: true });
-        for (const f of ['package.json', 'server.js', 'identity.js']) fs.copyFileSync(path.join(__dirname, '..', f), path.join(pkgDir, f));
+        // every root module the package ships (its `files` list), not a fixed few: install.js requires ../claude-bin.js,
+        // server.js requires the rest, and a list written here goes stale the next time a module is added (0.11.1 review B1)
+        const shipped = require('../package.json').files.filter((f) => /^[A-Za-z0-9._-]+\.js$/.test(f));
+        for (const f of ['package.json', ...shipped]) fs.copyFileSync(path.join(__dirname, '..', f), path.join(pkgDir, f));
         fs.copyFileSync(path.join(__dirname, '..', 'bin', 'install.js'), path.join(pkgDir, 'bin', 'install.js'));
         fs.writeFileSync(path.join(home, '.claude.json'), '{}');
         fs.writeFileSync(path.join(binDir, 'claude'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });

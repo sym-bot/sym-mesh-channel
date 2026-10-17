@@ -51,6 +51,8 @@ function expandWindowsVars(value, env) {
  */
 function systemPathDirs({ platform = process.platform, env = process.env, run } = {}) {
   if (platform !== 'win32' || typeof run !== 'function') return [];
+  // by absolute path: a bare `reg` is looked for in the current folder first on Windows, and a project folder is not trusted
+  const regExe = path.win32.join(env.SystemRoot || env.windir || 'C:\\Windows', 'System32', 'reg.exe');
   const keys = [
     ['HKCU\\Environment', 'Path'],
     ['HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment', 'Path'],
@@ -58,7 +60,7 @@ function systemPathDirs({ platform = process.platform, env = process.env, run } 
   const dirs = [];
   for (const [key, name] of keys) {
     let r;
-    try { r = run('reg', ['query', key, '/v', name]); } catch { continue; }
+    try { r = run(regExe, ['query', key, '/v', name]); } catch { continue; }
     if (!r || r.status !== 0 || typeof r.stdout !== 'string') continue;
     // "    Path    REG_EXPAND_SZ    C:\Users\x\bin;%USERPROFILE%\.local\bin"
     const m = new RegExp(`^\\s*${name}\\s+REG_(?:EXPAND_)?SZ\\s+(.*)$`, 'im').exec(r.stdout);
@@ -99,7 +101,7 @@ function knownLocations({ platform = process.platform, env = process.env, homedi
 }
 
 /** Find `claude` in `dirs`: on Windows by every extension PATHEXT lists (directly runnable ones), elsewhere by exact name. */
-function findInDirs(dirs, { platform = process.platform, env = process.env, exists } = {}) {
+function findInDirs(dirs, { platform = process.platform, env = process.env, exists, name = 'claude' } = {}) {
   const win = platform === 'win32';
   const j = win ? path.win32.join : path.posix.join;
   const check = exists || (win ? isFile : isExecutableFile);
@@ -115,7 +117,7 @@ function findInDirs(dirs, { platform = process.platform, env = process.env, exis
     if (!dir || seen.has(dir.toLowerCase())) continue;
     seen.add(dir.toLowerCase());
     for (const ext of exts) {
-      const candidate = j(dir, `claude${ext.toLowerCase()}`); // Windows ignores case; the path shown and stored is the usual spelling
+      const candidate = j(dir, `${name}${ext.toLowerCase()}`); // Windows ignores case; the path shown and stored is the usual spelling
       if (check(candidate)) return candidate;
     }
   }
@@ -138,9 +140,19 @@ function resolveClaude(o = {}) {
 
   const override = (env.SYM_CLAUDE_BIN || '').trim();
   if (override) {
-    const p = override.replace(/^"|"$/g, '');
-    if (exists(p)) return { path: p, source: 'SYM_CLAUDE_BIN' };
-    return { path: null, searched: [`SYM_CLAUDE_BIN=${p} (not a file)`], override: p };
+    const given = override.replace(/^"|"$/g, '');
+    const dirs = String(env.PATH || env.Path || '').split(delimiter);
+    let hit = null;
+    if (/[\\/]/.test(given)) {
+      // a path: as written, or (Windows) with an extension PATHEXT lists, so `C:\\x\\claude` finds claude.exe
+      const exts = win ? ['', ...WINDOWS_EXTS_DEFAULT.map((e) => e.toLowerCase())] : [''];
+      hit = exts.map((e) => `${given}${e}`).find((c) => exists(c)) || null;
+    } else {
+      // a bare name (`claude`, `claude-dev`): looked for on PATH, as the shell would
+      hit = findInDirs(dirs, { platform, env, exists, name: given });
+    }
+    if (hit) return { path: hit, source: 'SYM_CLAUDE_BIN' };
+    return { path: null, searched: [`SYM_CLAUDE_BIN=${given} (not found, not a file, or not executable)`], override: given };
   }
 
   const processDirs = String(env.PATH || env.Path || '').split(delimiter);
@@ -167,12 +179,25 @@ function resolveClaude(o = {}) {
   return { path: null, searched };
 }
 
-/** One argument for cmd.exe: left as is when plain, else in double quotes with embedded quotes doubled. */
-function quoteForCmd(arg) {
-  const s = String(arg);
-  if (s !== '' && !/[\s"&|<>^%()!,;=]/.test(s)) return s;
-  return `"${s.replace(/"/g, '""')}"`;
+/**
+ * Escaping for cmd.exe, by the published algorithm (https://qntm.org/cmd, as cross-spawn applies it). A command line
+ * reaches a program through TWO parsers: cmd.exe first (its metacharacters ( ) % ! ^ " < > & | and the space), then
+ * the program's C runtime (backslashes before a quote, a quote ends an argument). An npm .cmd shim forwards its
+ * arguments with `%*`, so cmd.exe parses the line a SECOND time when the shim runs: the escaping is applied twice.
+ */
+const CMD_META = /([()\][%!^"`<>&|;, *?])/g;
+/** One argument: made safe for the C runtime (quotes in, trailing backslashes doubled), quoted, then caret-escaped for cmd.exe. */
+function escapeCmdArgument(arg, { doubleEscape = false } = {}) {
+  let a = `${arg}`;
+  a = a.replace(/(\\*)"/g, '$1$1\\"');   // backslashes before a quote: doubled, and the quote escaped
+  a = a.replace(/(\\+)$/, '$1$1');        // trailing backslashes: doubled, so they do not escape the closing quote
+  a = `"${a}"`;
+  a = a.replace(CMD_META, '^$1');
+  if (doubleEscape) a = a.replace(CMD_META, '^$1');
+  return a;
 }
+/** The program's own path: caret-escaped for cmd.exe (it is not quoted, so a space is escaped too). */
+function escapeCmdCommand(command) { return `${command}`.replace(CMD_META, '^$1'); }
 
 /**
  * How to start `file` with `args`, for child_process.spawnSync.
@@ -183,7 +208,7 @@ function quoteForCmd(arg) {
  */
 function launchSpec(file, args, { platform = process.platform } = {}) {
   if (platform === 'win32' && /\.(cmd|bat)$/i.test(file)) {
-    return { command: [quoteForCmd(file), ...args.map(quoteForCmd)].join(' '), args: [], options: { shell: true } };
+    return { command: [escapeCmdCommand(file), ...args.map((a) => escapeCmdArgument(a, { doubleEscape: true }))].join(' '), args: [], options: { shell: true } };
   }
   return { command: file, args: [...args], options: { shell: false } };
 }
@@ -192,8 +217,8 @@ function launchSpec(file, args, { platform = process.platform } = {}) {
 function notFoundMessage(result, { platform = process.platform } = {}) {
   const win = platform === 'win32';
   if (result.override) {
-    return `ERROR: SYM_CLAUDE_BIN is set to ${result.override}, which is not a file.\n` +
-      'Fix the path, or unset SYM_CLAUDE_BIN to let `start` look for Claude Code itself.\n';
+    return `ERROR: SYM_CLAUDE_BIN is set to ${result.override}, which was not found as an executable file.\n` +
+      'Fix it (a full path to the file, or a name on PATH), or unset SYM_CLAUDE_BIN to let `start` look for Claude Code itself.\n';
   }
   const lines = ['ERROR: `start` could not find the `claude` command (Claude Code).', '  It looked in:'];
   for (const s of result.searched) lines.push(`    - ${s}`);
@@ -217,4 +242,4 @@ function notFoundMessage(result, { platform = process.platform } = {}) {
   return `${lines.join('\n')}\n`;
 }
 
-module.exports = { resolveClaude, launchSpec, notFoundMessage, quoteForCmd, systemPathDirs, knownLocations, findInDirs, expandWindowsVars };
+module.exports = { resolveClaude, launchSpec, notFoundMessage, escapeCmdArgument, escapeCmdCommand, systemPathDirs, knownLocations, findInDirs, expandWindowsVars };

@@ -56,7 +56,8 @@ function writeFileAtomic(file, data, opts = {}) {
   const tmp = `${file}.tmp-${process.pid}`;
   try {
     fs.writeFileSync(tmp, data, { mode });
-    fs.chmodSync(tmp, mode);
+    // best effort: a file system without modes (FAT, some network shares) refuses chmod, and the write must still land
+    try { fs.chmodSync(tmp, mode); } catch { /* the mode writeFileSync created it with stands */ }
     fs.renameSync(tmp, file);
   } catch (e) {
     try { fs.unlinkSync(tmp); } catch { /* never written */ }
@@ -509,7 +510,8 @@ if (cmd === 'start') {
     process.stderr.write('If that is not the Claude Code you meant, set SYM_CLAUDE_BIN to the right file and run `start` again.\n');
     process.exit(127);
   }
-  process.exit(run.status == null ? 0 : run.status);
+  // claude's own exit code, and for a claude that was killed by a signal the shell convention 128 + signal (it used to read as success)
+  process.exit(run.status != null ? run.status : (run.signal ? 128 + (os.constants.signals[run.signal] || 0) : 0));
 }
 
 // --postinstall always runs global install (npm postinstall runs from

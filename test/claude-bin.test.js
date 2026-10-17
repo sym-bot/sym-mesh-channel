@@ -24,7 +24,7 @@ const files = (...list) => { const set = new Set(list.map((p) => p.toLowerCase()
 // what `reg query HKCU\Environment /v Path` prints
 const regOut = (value, type = 'REG_EXPAND_SZ') => ({ status: 0, stdout: `\r\nHKEY_CURRENT_USER\\Environment\r\n    Path    ${type}    ${value}\r\n\r\n` });
 const regRunner = (user, machine) => (command, args) => {
-  assert.strictEqual(command, 'reg');
+  assert.match(command, /^C:\\Windows\\System32\\reg\.exe$/i, 'reg.exe by absolute path: a bare name is searched in the current folder first on Windows');
   if (args[1] === 'HKCU\\Environment') return user === null ? { status: 1, stdout: '' } : regOut(user);
   return machine === null ? { status: 1, stdout: '' } : regOut(machine);
 };
@@ -70,7 +70,7 @@ test('SYM_CLAUDE_BIN wins; set wrongly it is an error, never a silent fall-throu
   const bad = cb.resolveClaude({ ...W, env, exists: files(other) });
   assert.strictEqual(bad.path, null, 'a claude on PATH was used although the operator named another');
   assert.strictEqual(bad.override, mine);
-  assert.match(cb.notFoundMessage(bad, { platform: 'win32' }), /SYM_CLAUDE_BIN is set to D:\\apps\\claude\.exe, which is not a file/);
+  assert.match(cb.notFoundMessage(bad, { platform: 'win32' }), /SYM_CLAUDE_BIN is set to D:\\apps\\claude\.exe, which was not found as an executable file/);
   assert.strictEqual(cb.resolveClaude({ ...W, env: winEnv({ SYM_CLAUDE_BIN: '"D:\\apps\\claude.exe"' }), exists: files(mine) }).path, mine, 'quotes around the value are ignored');
 });
 
@@ -108,15 +108,35 @@ test('the registry is read from both hives, skips a hive it cannot read, and nev
   assert.strictEqual(cb.expandWindowsVars('%userprofile%\\a;%NOPE%', { USERPROFILE: 'C:\\U' }), 'C:\\U\\a;%NOPE%');
 });
 
-test('launching: a .exe or POSIX file directly with no shell; an npm .cmd through cmd.exe with every word quoted', () => {
+test('launching: a .exe or POSIX file directly with no shell; an npm .cmd through cmd.exe, escaped for both parsers', () => {
   assert.deepStrictEqual(cb.launchSpec('C:\\a b\\claude.exe', ['--x', 'server:y'], { platform: 'win32' }), { command: 'C:\\a b\\claude.exe', args: ['--x', 'server:y'], options: { shell: false } });
   assert.deepStrictEqual(cb.launchSpec('/Users/u/.local/bin/claude', ['--resume'], { platform: 'darwin' }), { command: '/Users/u/.local/bin/claude', args: ['--resume'], options: { shell: false } });
-  const s = cb.launchSpec('C:\\Users\\micha\\AppData\\Roaming\\npm\\claude.cmd', ['--dangerously-load-development-channels', 'server:claude-sym-mesh', 'a b'], { platform: 'win32' });
+  const s = cb.launchSpec('C:\\Users\\micha\\AppData\\Roaming\\npm\\claude.cmd', ['--dangerously-load-development-channels', 'server:claude-sym-mesh'], { platform: 'win32' });
   assert.strictEqual(s.options.shell, true);
   assert.deepStrictEqual(s.args, []);
-  assert.strictEqual(s.command, 'C:\\Users\\micha\\AppData\\Roaming\\npm\\claude.cmd --dangerously-load-development-channels server:claude-sym-mesh "a b"');
-  assert.strictEqual(cb.launchSpec('C:\\Program Files\\x\\claude.bat', [], { platform: 'win32' }).command, '"C:\\Program Files\\x\\claude.bat"');
-  assert.deepStrictEqual(['plain', '', 'a b', 'say "hi"', '100%', 'a&b'].map(cb.quoteForCmd), ['plain', '""', '"a b"', '"say ""hi"""', '"100%"', '"a&b"']);
+  assert.strictEqual(s.command, 'C:\\Users\\micha\\AppData\\Roaming\\npm\\claude.cmd ^^^"--dangerously-load-development-channels^^^" ^^^"server:claude-sym-mesh^^^"');
+  assert.strictEqual(cb.launchSpec('C:\\Program Files\\x\\claude.bat', [], { platform: 'win32' }).command, 'C:\\Program^ Files\\x\\claude.bat', 'a space in the program path is caret-escaped (it is not quoted)');
+});
+
+test('cmd.exe escaping: the C-runtime rules (quotes, trailing backslashes) then the cmd metacharacters, twice for a shim that forwards %*', () => {
+  const e = (a, doubleEscape = false) => cb.escapeCmdArgument(a, { doubleEscape });
+  assert.strictEqual(e('plain'), '^"plain^"');
+  assert.strictEqual(e(''), '^"^"');
+  assert.strictEqual(e('a b'), '^"a^ b^"');
+  assert.strictEqual(e('C:\\My Projects\\'), '^"C:\\My^ Projects\\\\^"', 'a trailing backslash is doubled so it cannot escape the closing quote');
+  assert.strictEqual(e('say "hi"'), '^"say^ \\^"hi\\^"^"', 'a quote is escaped for the C runtime, and its caret for cmd.exe');
+  assert.strictEqual(e('back\\slash'), '^"back\\slash^"', 'a backslash not before a quote is literal');
+  for (const [raw, want] of [['100%', '%'], ['%PATH%', '%'], ['a&b', '&'], ['x^y', '^'], ['!bang', '!'], ['(p)', '(']]) assert.ok(e(raw).includes(`^${want}`), `${raw}: ${want} is caret-escaped`);
+  assert.strictEqual(e('a b', true), '^^^"a^^^ b^^^"');
+});
+
+test('SYM_CLAUDE_BIN may be a path, a path without its extension (Windows), or a bare name looked up on PATH', () => {
+  const real = 'D:\\apps\\claude.exe';
+  const r = cb.resolveClaude({ ...W, env: winEnv({ SYM_CLAUDE_BIN: 'D:\\apps\\claude' }), exists: files(real) });
+  assert.deepStrictEqual({ path: r.path, source: r.source }, { path: real, source: 'SYM_CLAUDE_BIN' });
+  const dev = '/opt/dev/claude-dev';
+  assert.strictEqual(cb.resolveClaude({ platform: 'linux', env: { PATH: '/opt/dev:/usr/bin', SYM_CLAUDE_BIN: 'claude-dev' }, homedir: '/h', exists: (p) => p === dev }).path, dev);
+  assert.strictEqual(cb.resolveClaude({ platform: 'linux', env: { PATH: '/usr/bin', SYM_CLAUDE_BIN: 'claude-dev' }, homedir: '/h', exists: () => false }).override, 'claude-dev');
 });
 
 // ── the real `start`, end to end (POSIX: the stand-in is a shell script) ──
@@ -169,8 +189,18 @@ test('start: SYM_CLAUDE_BIN names the claude to run; a wrong one stops with a cl
   standIn(path.join(home, '.local', 'bin'), record); // a claude exists in an install folder: the wrong override must NOT fall through to it
   const bad = runStart(['--room', 'xmesh-world-room'], { home, extraEnv: { SYM_CLAUDE_BIN: path.join(home, 'nope', 'claude') } });
   assert.strictEqual(bad.r.status, 127);
-  assert.match(bad.r.stderr, /SYM_CLAUDE_BIN is set to .*nope.*which is not a file/);
+  assert.match(bad.r.stderr, /SYM_CLAUDE_BIN is set to .*nope.*which was not found as an executable file/);
   assert.ok(!fs.existsSync(record), 'a claude was started although the operator named another');
+});
+
+test('start: a claude killed by a signal makes start exit 128+signal, never 0 (0.11.1 review)', posixOnly, () => {
+  const home = h.stateDir('home');
+  fs.writeFileSync(path.join(home, '.claude.json'), '{}\n', { mode: 0o600 });
+  const dir = path.join(home, '.local', 'bin');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'claude'), '#!/bin/sh\nkill -TERM $$\n', { mode: 0o755 });
+  const { r } = runStart(['--room', 'xmesh-world-room'], { home });
+  assert.strictEqual(r.status, 143, `SIGTERM is 15, so 128+15; got ${r.status} ${r.signal}\n${r.stderr}`);
 });
 
 // The fixed system folders are searched too, so this case only exists on a machine with no claude in any of them.
@@ -198,24 +228,40 @@ test('Windows: `reg query` of the real registry parses into the folders a new te
   assert.ok(dirs.every((d) => !d.includes('%')), 'a %VAR% in the registry value was left unexpanded');
 });
 
-test('Windows: start launches a claude.cmd that is NOT on PATH, from a folder with a space, with every argument intact', winOnly, () => {
+test('Windows: start launches an npm-style claude.cmd that is NOT on PATH, from a folder with a space, every argument intact', winOnly, () => {
   const base = h.stateDir('home');
   const home = path.join(base, 'home dir');
   fs.mkdirSync(path.join(home, '.claude', 'local'), { recursive: true });
   fs.writeFileSync(path.join(home, '.claude.json'), '{}\n');
   const bin = path.join(home, '.claude', 'local');
-  // an npm-style shim: it records its first three arguments, quotes kept, and exits 7
-  fs.writeFileSync(path.join(bin, 'claude.cmd'), '@echo off\r\necho %1> "%~dp0argv1.txt"\r\necho %2> "%~dp0argv2.txt"\r\necho %3> "%~dp0argv3.txt"\r\nexit /b 7\r\n');
+  // the shape of an npm shim: it forwards its arguments with %* to node, which records exactly what it received
+  fs.writeFileSync(path.join(bin, 'print-args.js'), "require('fs').writeFileSync(require('path').join(__dirname, 'argv.json'), JSON.stringify(process.argv.slice(2)));\n");
+  fs.writeFileSync(path.join(bin, 'claude.cmd'), `@echo off\r\n"${process.execPath}" "%~dp0print-args.js" %*\r\nexit /b 7\r\n`);
   const sys = process.env.SystemRoot || 'C:\\Windows';
   const env = cleanEnv({ HOME: home, USERPROFILE: home, APPDATA: path.join(home, 'AppData', 'Roaming'), LOCALAPPDATA: path.join(home, 'AppData', 'Local'), SYM_STATE_DIR: path.join(home, '.sym'), PATH: `${sys}\\System32;${sys}` });
   const cwd = fs.mkdtempSync(path.join(home, 'proj-'));
-  const r = spawnSync(process.execPath, [SERVER, 'start', '--room', 'xmesh-world-room', '--', 'a b'], { cwd, env, encoding: 'utf8', timeout: 90000 });
+  const nasty = ['a b', 'C:\\My Projects\\', 'say "hi"', '100%', '%PATH%', 'a&b', 'x^y', '!bang', '(paren)', 'back\\slash', 'a|b', 'x<y>z'];
+  const r = spawnSync(process.execPath, [SERVER, 'start', '--room', 'xmesh-world-room', '--', ...nasty], { cwd, env, encoding: 'utf8', timeout: 90000 });
   assert.strictEqual(r.status, 7, `the shim's exit code is passed on; got ${r.status}\n${r.stdout}\n${r.stderr}`);
-  const got = (n) => fs.readFileSync(path.join(bin, `argv${n}.txt`), 'utf8').trim();
-  assert.strictEqual(got(1), '--dangerously-load-development-channels');
-  assert.strictEqual(got(2), 'server:claude-sym-mesh');
-  assert.strictEqual(got(3), '"a b"', 'an argument with a space reaches claude as one argument');
+  const got = JSON.parse(fs.readFileSync(path.join(bin, 'argv.json'), 'utf8'));
+  assert.deepStrictEqual(got, ['--dangerously-load-development-channels', 'server:claude-sym-mesh', ...nasty], 'every argument reaches claude exactly as typed');
   assert.ok(/claude found at .*claude\.cmd, from an install folder/.test(r.stdout), r.stdout);
+});
+
+test('Windows: a native claude.exe in ~/.local/bin that is NOT on PATH is found and started directly', winOnly, () => {
+  const home = path.join(h.stateDir('home'), 'home dir');
+  const bin = path.join(home, '.local', 'bin');
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(home, '.claude.json'), '{}\n');
+  // a real .exe: node itself, copied. Started with the channels flag it refuses it as a bad option, which proves it was started with our arguments.
+  fs.copyFileSync(process.execPath, path.join(bin, 'claude.exe'));
+  const sys = process.env.SystemRoot || 'C:\\Windows';
+  const env = cleanEnv({ HOME: home, USERPROFILE: home, APPDATA: path.join(home, 'AppData', 'Roaming'), LOCALAPPDATA: path.join(home, 'AppData', 'Local'), SYM_STATE_DIR: path.join(home, '.sym'), PATH: `${sys}\\System32;${sys}` });
+  const cwd = fs.mkdtempSync(path.join(home, 'proj-'));
+  const r = spawnSync(process.execPath, [SERVER, 'start', '--room', 'xmesh-world-room'], { cwd, env, encoding: 'utf8', timeout: 90000 });
+  assert.ok(/claude found at .*\.local\\bin\\claude\.exe, from an install folder/.test(r.stdout), r.stdout);
+  assert.notStrictEqual(r.status, 127, `claude.exe was found and started: ${r.stdout}\n${r.stderr}`);
+  assert.ok(/bad option: --dangerously-load-development-channels/.test(`${r.stdout}${r.stderr}`), `the exe was started with the channels flag:\n${r.stdout}\n${r.stderr}`);
 });
 
 test('Windows: start with no claude anywhere exits 127 and names Get-Command and SYM_CLAUDE_BIN', winOnly, () => {

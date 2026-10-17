@@ -48,13 +48,22 @@ mesh with each other.
   claude`, `SYM_CLAUDE_BIN`, a new terminal). Not checked: a real Windows machine (the Windows cases are
   decided with the platform, the environment and the file system injected); the winget and local-install
   folders are best-effort and an absent one costs one stat.
+  Hardened by the pre-publish review: an npm `.cmd` shim's arguments are escaped for BOTH parsers that read them (the
+  C runtime, then cmd.exe twice, as the shim forwards `%*`), so a passthrough argument like `--add-dir "C:\My Projects\"`,
+  `%PATH%`, `a&b`, `x^y` or a quote reaches `claude` as typed (tested on a real Windows runner against a shim that
+  forwards `%*` to node); `reg.exe` is run by its absolute path (a bare name is looked for in the project folder first
+  on Windows); `SYM_CLAUDE_BIN` may also be a path without its extension (Windows) or a bare name looked up on PATH; a
+  `claude` killed by a signal makes `start` exit 128 plus the signal, not 0.
+- **An `http://` or `https://` relay URL works again (review B2).** 0.11.0 accepted them (the WebSocket client dials
+  them as `ws` and `wss`) and users paste `https://`; an earlier draft of this release treated them as not a relay
+  and turned the relay off without saying why. A new test connects through an `http://` URL.
 
 - **A fault at startup no longer kills the server before MCP connects (R4-3).** Only a closed list of
   identity errors became a fault the tools report; anything else (a read-only or non-directory
   `SYM_STATE_DIR`, an identity file that does not parse, a start that throws) ended in a stack trace
   and exit 1. Every build or start error is now said in the instructions and by every tool, and the
-  server connects. A relay URL that is not `ws://` or `wss://` (no scheme, `ftp://`, `http://`, not a
-  URL) turns off only the relay: the node runs, LAN peers only, and the instructions and `sym_status`
+  server connects. A relay URL that is not `ws://`, `wss://`, `http://` or `https://` (no scheme, `ftp://`,
+  not a URL) turns off only the relay: the node runs, LAN peers only, and the instructions and `sym_status`
   say why without repeating the value. `sym_join_room` refuses such a relay before it touches the node.
   An uncaught error before MCP connects is counted and said, as after, not fatal.
 - **The installer keeps `~/.claude.json` owner-only (R4-4).** It wrote a tmp file with the default mode
@@ -117,6 +126,23 @@ mesh with each other.
   relative link in a shipped document resolves to a shipped file.
 
 ### Known, not fixed here
+
+Found by the pre-publish review of this release and left for 0.11.2 on purpose (none loses a message or opens a
+hole; each is a readability, cost or hardening item that needs its own validation):
+
+- A peer label or message body with non-ASCII text is shown escaped (`Zo\u00eb`, `\u674e\u96f7`, `\u000d` for a CRLF, ZWJ
+  and variation selectors in an emoji): safe and complete, but noisier than 0.11.0 for non-English names. A label
+  with letters of a left-to-right script will be shown as it is, once the confusable check (the "(2 keys)" skeleton)
+  is validated for it.
+- Counting the keys that share a label recomputes each stored label's skeleton on every line (23 ms per line at
+  2000 keys with 8 labels each): it will be cached.
+- The installer still drops `SYM_ALLOWED_PEERS` from a `~/.claude.json` env when it rewrites a stale entry (as 0.11.0
+  does; it fails open): carry it over or warn.
+- A `~/.claude.json` that is already 0644 and its old `.bak-*` files stay 0644 until the installer next rewrites
+  that file; the fix is not retroactive.
+- `start` takes the `claude` its PATH names before an install folder, as your shell would: a stale `claude` earlier on
+  PATH (an old npm-global install) wins over the newer native one. Remove the stale one or set `SYM_CLAUDE_BIN`.
+- Joining back to the original environment room after a detour does not restore the environment's relay (as 0.11.0).
 
 - **R4-9** (a folder that pins another agent's nodeId under this folder's name re-points this folder's
   agent) is sym's name index; it is fixed in sym 0.14.3. The end-to-end test for it runs once sym 0.14.3

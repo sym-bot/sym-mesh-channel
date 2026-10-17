@@ -161,7 +161,7 @@ function resolveRelay(room) {
   return { url: null, token: null, source: null };
 }
 let { url: RELAY_URL, token: RELAY_TOKEN, source: RELAY_SOURCE } = resolveRelay(ROOM);
-// A relay URL that is not one (no ws:// or wss://, another scheme, not a URL) turns off the relay only
+// A relay URL that is not one (no ws://, wss://, http:// or https://, another scheme, not a URL) turns off the relay only
 // (review R4-3): the node still starts, with its LAN, and every surface says why. It used to stop the
 // server before MCP connected. The value is not repeated: it may carry a token.
 let RELAY_DISABLED = null;

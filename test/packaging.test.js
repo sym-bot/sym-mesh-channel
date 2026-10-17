@@ -90,3 +90,31 @@ test('R4-14: every relative link and image in a shipped document resolves to a f
   }
   assert.ok(links > 0, 'the check saw the relative links that do ship (LICENSE, SECURITY.md)');
 });
+
+// 0.11.1 review S10: the check above reads server.js only. bin/install.js (the `start` command) required ../claude-bin.js,
+// and nothing in the suite would have noticed that file missing from the tarball. Walk EVERY shipped JavaScript file.
+function shippedFiles() {
+  const out = [];
+  const walk = (rel) => {
+    const abs = path.join(root, rel);
+    if (fs.statSync(abs).isDirectory()) { for (const e of fs.readdirSync(abs)) walk(path.posix.join(rel, e)); } else out.push(rel);
+  };
+  for (const f of pkg.files) { if (fs.existsSync(path.join(root, f))) walk(f.replace(/\/$/, '')); }
+  return out;
+}
+
+test('every relative require in every shipped JavaScript file resolves to a file that ships (0.11.1 review S10)', () => {
+  const shipped = new Set([...shippedFiles(), 'package.json']);
+  const js = [...shipped].filter((f) => /\.(js|mjs|cjs)$/.test(f));
+  assert.ok(js.includes('bin/install.js') && js.includes('server.js'), 'the walk found the entry points');
+  const problems = [];
+  for (const file of js) {
+    const code = fs.readFileSync(path.join(root, file), 'utf8');
+    for (const m of code.matchAll(/require\(\s*(['"])(\.{1,2}\/[^'"]+)\1\s*\)/g)) {
+      const target = path.posix.normalize(path.posix.join(path.posix.dirname(file), m[2]));
+      const found = [target, `${target}.js`, `${target}.json`, `${target}/index.js`].find((c) => shipped.has(c));
+      if (!found) problems.push(`${file} requires '${m[2]}' (${target}), which the tarball does not ship`);
+    }
+  }
+  assert.deepStrictEqual(problems, [], problems.join('\n'));
+});

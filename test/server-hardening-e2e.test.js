@@ -153,7 +153,7 @@ t('R4-3: a state directory that is read-only, or a file, or an identity that doe
 });
 
 t('R4-3: a relay URL that is not one turns off the relay only: the node runs, and the instructions and sym_status say why without repeating it', async () => {
-  for (const url of ['relay.example.invalid', 'ftp://127.0.0.1:9', 'not a url', 'http://127.0.0.1:9']) {
+  for (const url of ['relay.example.invalid', 'ftp://127.0.0.1:9', 'not a url', 'file:///etc/passwd']) {
     const s = new h.McpSession({ env: { SYM_NODE_NAME: 'probe-a', SYM_ROOM: ROOM, SYM_RELAY_URL: url, SYM_RELAY_TOKEN: 'S3CRET'.padEnd(40, 'q') } });
     try {
       const r = await upOrDied(s);
@@ -166,6 +166,30 @@ t('R4-3: a relay URL that is not one turns off the relay only: the node runs, an
       assert.ok(!st.includes(url) && !s.instructions.includes(url) && !st.includes('S3CRET'), 'the value is not repeated');
     } finally { await s.close(); }
   }
+});
+
+// 0.11.1 review B2: 0.11.0 dialled an http:// or https:// relay URL (the WebSocket client maps them to ws and wss) and users paste
+// https://; 0.11.1 first turned such a relay off, silently. They must connect.
+t('B2: an http:// relay URL (the WebSocket client dials it as ws://) connects, as it did in 0.11.0', async () => {
+  const httpUrl = relay.url.replace(/^ws:/, 'http:');
+  assert.ok(httpUrl.startsWith('http://'), httpUrl);
+  const s = new h.McpSession({ env: { SYM_NODE_NAME: 'probe-http', SYM_ROOM: ROOM, SYM_RELAY_URL: httpUrl, SYM_RELAY_TOKEN: TOKEN } });
+  try {
+    assert.strictEqual(await upOrDied(s), 'init', s.stderr.slice(-400));
+    assert.ok(!/MESH RELAY ADVISORY/.test(s.instructions), 'the relay was not turned off');
+    let st = '';
+    for (let i = 0; i < 40 && !/^Relay: connected/m.test(st); i++) { st = (await s.call('sym_status')).text; if (!/^Relay: connected/m.test(st)) await new Promise((r) => setTimeout(r, 250)); }
+    assert.match(st, /^Relay: connected to http:\/\/127\.0\.0\.1:\d+/m, st);
+  } finally { await s.close(); }
+});
+
+// 0.11.1 review: a password in a relay URL's userinfo was printed as typed (redaction covered token= only).
+t('R4-6: redactSecrets also hides a password in a URL\'s userinfo, and leaves a URL without one alone', () => {
+  const { redactSecrets } = require('../room-names.js');
+  assert.strictEqual(redactSecrets('relay ws://user:SECRET@relay.example.com:8080/x'), 'relay ws://<redacted>@relay.example.com:8080/x');
+  assert.strictEqual(redactSecrets('wss://relay.example.com/?token=abc&x=1'), 'wss://relay.example.com/?token=<redacted>&x=1');
+  assert.strictEqual(redactSecrets('ws://relay.example.com:8080/path'), 'ws://relay.example.com:8080/path');
+  assert.ok(!redactSecrets('see https://a:b@host and ws://c:d@host2').includes(':b@') && !redactSecrets('ws://c:d@host2').includes(':d@'));
 });
 
 // ── R4-5 ──

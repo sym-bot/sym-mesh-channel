@@ -64,7 +64,7 @@ const CHECKS = [
   // 0.11.1, review R4
   ['M32', 'a read item takes a place in a receive again, so the unread one after it is never listed (R4-2)', 'node-host.js', 'if (!d.acked) { if (unread >= lim) break; unread++; }', 'if (unread >= lim) break; unread++;', 'node-host.test.js'],
   ['M33', 'a relay close 4004 exits the server again (R4-1)', 'server.js', "h.on('identity-collision', (info) => relayStops.onStop(info));", "h.on('identity-collision', () => process.exit(2));", 'server-hardening-e2e.test.js'],
-  ['M34', 'the installer writes a config file with the default mode again (R4-4)', 'bin/install.js', 'fs.writeFileSync(tmp, data, { mode });\n    fs.chmodSync(tmp, mode);', 'fs.writeFileSync(tmp, data);', 'installer-modes.test.js'],
+  ['M34', 'the installer writes a config file with the default mode again (R4-4)', 'bin/install.js', 'fs.writeFileSync(tmp, data, { mode });\n    // best effort: a file system without modes (FAT, some network shares) refuses chmod, and the write must still land\n    try { fs.chmodSync(tmp, mode); } catch { /* the mode writeFileSync created it with stands */ }', 'fs.writeFileSync(tmp, data);', 'installer-modes.test.js'],
   ['M35', 'a label is printed bare whatever it holds (R4-5)', 'key-display.js', '  if (s.length <= LABEL_MAX && PLAIN_LABEL.test(s)', '  if (true || s.length <= LABEL_MAX && PLAIN_LABEL.test(s)', 'key-display.test.js'],
   ['M36', 'sym_invite_info repeats the relay token (R4-6)', 'server.js', 'relay_token: p.relayToken ? `<redacted: ${p.relayToken.length} characters>` : undefined,', 'relay_token: p.relayToken || undefined,', 'server-hardening-e2e.test.js'],
   ['M37', 'a nodeId pinned to a key in the allowlist is allowed with any key (R4-8)', 'delivery-policy.js', '(fp && pairs.has(`${id}@${fp}`))', '[...pairs].some((x) => x.startsWith(`${id}@`))', 'delivery-policy.test.js'],
@@ -77,9 +77,16 @@ const CHECKS = [
   // 0.11.1, `start` finds claude itself
   ['M44', 'the system PATH (the registry) is not read, so a terminal opened before an install does not see the new claude', 'claude-bin.js', '  if (win) {\n    const sys = systemPathDirs', '  if (false) {\n    const sys = systemPathDirs', 'claude-bin.test.js'],
   ['M45', 'the folders Claude Code installs into are not searched', 'claude-bin.js', "for (const p of known) if (exists(p)) return { path: p, source: 'an install folder' };", '', 'claude-bin.test.js'],
-  ['M46', 'a wrong SYM_CLAUDE_BIN falls through to another claude instead of stopping', 'claude-bin.js', "return { path: null, searched: [`SYM_CLAUDE_BIN=${p} (not a file)`], override: p };", '', 'claude-bin.test.js'],
+  ['M46', 'a wrong SYM_CLAUDE_BIN falls through to another claude instead of stopping', 'claude-bin.js', "return { path: null, searched: [`SYM_CLAUDE_BIN=${given} (not found, not a file, or not executable)`], override: given };", '', 'claude-bin.test.js'],
   ['M47', 'an npm .cmd shim is started without a shell (Node refuses a batch file)', 'claude-bin.js', "options: { shell: true } };\n  }\n  return { command: file", "options: { shell: false } };\n  }\n  return { command: file", 'claude-bin.test.js'],
   ['M48', '`start` runs the bare name `claude` again instead of the one it found', 'bin/install.js', 'spawnSync(spec.command, spec.args, {', "spawnSync('claude', claudeArgs, {", 'claude-bin.test.js'],
+  // 0.11.1, the pre-publish review of `start`
+  ['M49', 'an http:// or https:// relay URL is refused again, so the relay is turned off (review B2)', 'room-names.js', "['ws:', 'wss:', 'http:', 'https:'].includes(u.protocol)", "['ws:', 'wss:'].includes(u.protocol)", 'server-hardening-e2e.test.js'],
+  ['M50', 'a trailing backslash in a Windows argument is not doubled, so it escapes the closing quote', 'claude-bin.js', "a = a.replace(/(\\\\+)$/, '$1$1');", '', 'claude-bin.test.js'],
+  ['M51', 'reg.exe is run by bare name, which Windows looks for in the current folder first', 'claude-bin.js', "const regExe = path.win32.join(env.SystemRoot || env.windir || 'C:\\\\Windows', 'System32', 'reg.exe');", "const regExe = 'reg';", 'claude-bin.test.js'],
+  ['M52', 'a claude killed by a signal makes start exit 0 again', 'bin/install.js', '(run.signal ? 128 + (os.constants.signals[run.signal] || 0) : 0)', '0', 'claude-bin.test.js'],
+  ['M53', 'claude-bin.js is left out of the package, which only install.js requires', 'package.json', '    "server.js",\n    "claude-bin.js",', '    "server.js",', 'packaging.test.js'],
+  ['M54', 'a password in a relay URL is printed as typed', 'room-names.js', "    .replace(/(\\/\\/)[^\\/\\s:@\"'<>]+:[^\\/\\s@\"'<>]*@/g, '$1<redacted>@')\n", '', 'server-hardening-e2e.test.js'],
 ];
 
 const arg = (n) => { const i = process.argv.indexOf(n); return i === -1 ? null : (process.argv[i + 1] || ''); };
