@@ -100,8 +100,26 @@ function knownLocations({ platform = process.platform, env = process.env, homedi
   return out;
 }
 
+/**
+ * An npm global install puts a `claude.cmd` shim in its folder that runs `node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe`. When an
+ * auto-update has renamed that exe aside (`claude.exe.old.*`) and not put the new one in place, the shim is still there, so a plain
+ * "is it a file" check takes it and cmd.exe then says only: '"...\\bin\\claude.exe"' is not recognized as an internal or external command.
+ * The shim's own target is checked: package.json of the npm package there and the exe not. Returns what is missing and, when the platform
+ * package npm installed beside it still holds the native binary (what the package's postinstall copies into bin/), where to copy it from.
+ * Only Windows has the problem (the other platforms' shim is a symlink to a file that exists or does not).
+ * @returns {{ missing: string, copyFrom: string | null } | null} null: not an npm shim, or its exe is there
+ */
+function brokenNpmShim(file, { platform = process.platform, exists } = {}) {
+  if (platform !== 'win32' || !/[\\/]claude\.(cmd|bat)$/i.test(file)) return null;
+  const j = path.win32.join, pkg = j(path.win32.dirname(file), 'node_modules', '@anthropic-ai', 'claude-code');
+  const there = exists || isFile;
+  if (!there(j(pkg, 'package.json')) || there(j(pkg, 'bin', 'claude.exe'))) return null;
+  const copyFrom = ['claude-code-win32-x64', 'claude-code-win32-arm64'].map((n) => j(pkg, 'node_modules', '@anthropic-ai', n, 'claude.exe')).find((p) => there(p)) || null;
+  return { missing: j(pkg, 'bin', 'claude.exe'), copyFrom };
+}
+
 /** Find `claude` in `dirs`: on Windows by every extension PATHEXT lists (directly runnable ones), elsewhere by exact name. */
-function findInDirs(dirs, { platform = process.platform, env = process.env, exists, name = 'claude' } = {}) {
+function findInDirs(dirs, { platform = process.platform, env = process.env, exists, name = 'claude', usable = () => true } = {}) {
   const win = platform === 'win32';
   const j = win ? path.win32.join : path.posix.join;
   const check = exists || (win ? isFile : isExecutableFile);
@@ -118,7 +136,7 @@ function findInDirs(dirs, { platform = process.platform, env = process.env, exis
     seen.add(dir.toLowerCase());
     for (const ext of exts) {
       const candidate = j(dir, `${name}${ext.toLowerCase()}`); // Windows ignores case; the path shown and stored is the usual spelling
-      if (check(candidate)) return candidate;
+      if (check(candidate) && usable(candidate)) return candidate;
     }
   }
   return null;
@@ -137,6 +155,14 @@ function resolveClaude(o = {}) {
   const exists = o.exists || (win ? isFile : isExecutableFile);
   const delimiter = win ? ';' : ':';
   const searched = [];
+  // npm shims whose claude.exe is gone (brokenNpmShim): passed over, kept to say so if nothing else is found
+  const broken = [];
+  const usable = (p) => {
+    const b = win ? brokenNpmShim(p, { platform, exists }) : null;
+    if (!b) return true;
+    if (!broken.some((x) => x.shim.toLowerCase() === p.toLowerCase())) { broken.push({ shim: p, ...b }); searched.push(`${p} (skipped: the claude.exe it runs is missing)`); }   // (the same shim is met on PATH and again in the install folders: said once)
+    return false;
+  };
 
   const override = (env.SYM_CLAUDE_BIN || '').trim();
   if (override) {
@@ -151,32 +177,32 @@ function resolveClaude(o = {}) {
       // a bare name (`claude`, `claude-dev`): looked for on PATH, as the shell would
       hit = findInDirs(dirs, { platform, env, exists, name: given });
     }
-    if (hit) return { path: hit, source: 'SYM_CLAUDE_BIN' };
-    return { path: null, searched: [`SYM_CLAUDE_BIN=${given} (not found, not a file, or not executable)`], override: given };
+    if (hit && usable(hit)) return { path: hit, source: 'SYM_CLAUDE_BIN' };
+    return { path: null, searched: [`SYM_CLAUDE_BIN=${given} (${hit ? 'an npm shim whose claude.exe is missing' : 'not found, not a file, or not executable'})`], override: given, broken };
   }
 
   const processDirs = String(env.PATH || env.Path || '').split(delimiter);
   searched.push(`PATH (${processDirs.filter(Boolean).length} folders)`);
-  let hit = findInDirs(processDirs, { platform, env, exists });
+  let hit = findInDirs(processDirs, { platform, env, exists, usable });
   if (hit) return { path: hit, source: 'PATH' };
 
   if (win) {
     const sys = systemPathDirs({ platform, env, run: o.run });
     searched.push(sys.length ? `the system PATH from the registry (${sys.length} folders)` : 'the system PATH from the registry (unreadable)');
-    hit = findInDirs(sys, { platform, env, exists });
+    hit = findInDirs(sys, { platform, env, exists, usable });
     if (hit) return { path: hit, source: 'the system PATH, which this terminal does not have yet' };
   }
 
   const known = knownLocations({ platform, env, homedir });
   searched.push(...known);
-  for (const p of known) if (exists(p)) return { path: p, source: 'an install folder' };
+  for (const p of known) if (exists(p) && usable(p)) return { path: p, source: 'an install folder' };
 
   const exec = (env.CLAUDE_CODE_EXECPATH || '').trim();
   if (exec) {
     searched.push(`CLAUDE_CODE_EXECPATH=${exec}`);
     if (exists(exec)) return { path: exec, source: 'CLAUDE_CODE_EXECPATH' };
   }
-  return { path: null, searched };
+  return { path: null, searched, broken };
 }
 
 /**
@@ -216,11 +242,19 @@ function launchSpec(file, args, { platform = process.platform } = {}) {
 /** The words for a `claude` that cannot be found: where we looked, and the three ways to fix it. */
 function notFoundMessage(result, { platform = process.platform } = {}) {
   const win = platform === 'win32';
+  const brokenLines = [];
+  for (const b of result.broken || []) {
+    brokenLines.push(`  Claude Code is installed by npm at ${b.shim}, but the program that command runs is gone:`, `    ${b.missing}`,
+      '  An update left it that way (look for claude.exe.old.* in the same folder). Repair it, then run `start` again:');
+    if (b.copyFrom) brokenLines.push(`    Copy-Item -LiteralPath '${b.copyFrom}' -Destination '${b.missing}'`, '    (the native program npm installed beside it; this is what the npm package\'s own postinstall does)');
+    brokenLines.push('  or reinstall it, with no Claude Code session open:  npm install -g @anthropic-ai/claude-code', '');
+  }
+  if (result.override && brokenLines.length) return `ERROR: SYM_CLAUDE_BIN is set to ${result.override}, an npm shim that cannot run.\n${brokenLines.join('\n')}\n`;
   if (result.override) {
     return `ERROR: SYM_CLAUDE_BIN is set to ${result.override}, which was not found as an executable file.\n` +
       'Fix it (a full path to the file, or a name on PATH), or unset SYM_CLAUDE_BIN to let `start` look for Claude Code itself.\n';
   }
-  const lines = ['ERROR: `start` could not find the `claude` command (Claude Code).', '  It looked in:'];
+  const lines = ['ERROR: `start` could not find the `claude` command (Claude Code).', ...brokenLines, '  It looked in:'];
   for (const s of result.searched) lines.push(`    - ${s}`);
   lines.push('  What to do:');
   if (win) {
@@ -242,4 +276,4 @@ function notFoundMessage(result, { platform = process.platform } = {}) {
   return `${lines.join('\n')}\n`;
 }
 
-module.exports = { resolveClaude, launchSpec, notFoundMessage, escapeCmdArgument, escapeCmdCommand, systemPathDirs, knownLocations, findInDirs, expandWindowsVars };
+module.exports = { resolveClaude, launchSpec, notFoundMessage, brokenNpmShim, escapeCmdArgument, escapeCmdCommand, systemPathDirs, knownLocations, findInDirs, expandWindowsVars };

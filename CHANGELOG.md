@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.11.2
+
+A fix for `sym-mesh-channel start` on Windows after a Claude Code auto-update. Nothing changes on the wire or in the tools; it
+requires the same `@sym-bot/sym` and Node.js as 0.11.1.
+
+### Fixed
+
+- **`start` no longer launches an npm `claude.cmd` whose `claude.exe` is gone.** An npm global install of Claude Code puts a
+  `claude.cmd` shim on PATH that runs `node_modules\@anthropic-ai\claude-code\bin\claude.exe`. When an auto-update renames that exe
+  aside (`claude.exe.old.<n>`) and does not put the new one in place, the shim stays, so 0.11.1's file check took it and `cmd.exe` then
+  answered only `'"...\bin\claude.exe"' is not recognized as an internal or external command`. `start` now checks the shim's target
+  (the npm package is there and its exe is not), passes over such a shim, and looks on: the system PATH, the install folders (the native
+  `~/.local/bin`, winget, the local installer). If nothing else works it says what is broken and how to repair it: the exact
+  `Copy-Item` from the platform package npm installed beside it (what the package's own postinstall does), or
+  `npm install -g @anthropic-ai/claude-code` with no Claude Code session open. A `SYM_CLAUDE_BIN` that names such a shim is an error
+  that says so, not a launch that fails inside `cmd.exe`. A healthy npm install, a shim with no npm package beside it, and every
+  non-Windows platform are unchanged.
+
+### Tests
+
+- The three Windows end-to-end `start` cases that say "claude is not on PATH" or "no claude anywhere" read the developer's real
+  registry PATH, so on a machine that has Claude Code installed they found it and failed. They now run with the registry unreadable
+  (`test/_no-registry.cjs`, a test-only preload), so they mean what they say on any machine.
+- Four cases for the broken shim, and a mutation check (M49) that fails the suite when the shim is taken again.
+
 ## 0.11.1
 
 A stability and security release on the 0.11 line, from an independent review of 0.11.0 (R4). Requires

@@ -80,6 +80,7 @@ const CHECKS = [
   ['M46', 'a wrong SYM_CLAUDE_BIN falls through to another claude instead of stopping', 'claude-bin.js', "return { path: null, searched: [`SYM_CLAUDE_BIN=${given} (not found, not a file, or not executable)`], override: given };", '', 'claude-bin.test.js'],
   ['M47', 'an npm .cmd shim is started without a shell (Node refuses a batch file)', 'claude-bin.js', "options: { shell: true } };\n  }\n  return { command: file", "options: { shell: false } };\n  }\n  return { command: file", 'claude-bin.test.js'],
   ['M48', '`start` runs the bare name `claude` again instead of the one it found', 'bin/install.js', 'spawnSync(spec.command, spec.args, {', "spawnSync('claude', claudeArgs, {", 'claude-bin.test.js'],
+  ['M49', 'an npm claude.cmd whose claude.exe is gone is taken as a file, so cmd.exe is what reports the missing program', 'claude-bin.js', "if (check(candidate) && usable(candidate)) return candidate;", "if (check(candidate)) return candidate;", 'claude-bin.test.js'],
   // 0.11.1, the pre-publish review of `start`
   ['M49', 'an http:// or https:// relay URL is refused again, so the relay is turned off (review B2)', 'room-names.js', "['ws:', 'wss:', 'http:', 'https:'].includes(u.protocol)", "['ws:', 'wss:'].includes(u.protocol)", 'server-hardening-e2e.test.js'],
   ['M50', 'a trailing backslash in a Windows argument is not doubled, so it escapes the closing quote', 'claude-bin.js', "a = a.replace(/(\\\\+)$/, '$1$1');", '', 'claude-bin.test.js'],
