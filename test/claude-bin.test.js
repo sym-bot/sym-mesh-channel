@@ -18,6 +18,8 @@ const { cleanEnv } = require('./_clean-env.js');
 const cb = require('../claude-bin.js');
 
 const SERVER = path.join(__dirname, '..', 'server.js');
+// the end-to-end `start` cases run with the registry unreadable (test/_no-registry.cjs), so a claude the developer really has installed is not found: they mean what they say on any machine
+const NO_REGISTRY = `--require ${JSON.stringify(path.join(__dirname, '_no-registry.cjs'))}`;
 const W = { platform: 'win32', homedir: 'C:\\Users\\micha' };
 const winEnv = (extra = {}) => ({ USERPROFILE: 'C:\\Users\\micha', LOCALAPPDATA: 'C:\\Users\\micha\\AppData\\Local', APPDATA: 'C:\\Users\\micha\\AppData\\Roaming', PATHEXT: '.COM;.EXE;.BAT;.CMD;.VBS;.PS1', PATH: 'C:\\Windows\\System32;C:\\Program Files\\nodejs', ...extra });
 const files = (...list) => { const set = new Set(list.map((p) => p.toLowerCase())); return (p) => set.has(String(p).toLowerCase()); };
@@ -60,6 +62,42 @@ test('an alias or a function (invisible to a program the shell starts) is not ne
   assert.deepStrictEqual({ path: r.path, source: r.source }, { path: exe, source: 'an install folder' });
   const local = 'C:\\Users\\micha\\.claude\\local\\claude.cmd';
   assert.strictEqual(cb.resolveClaude({ ...W, env: winEnv(), exists: files(local), run: regRunner(null, null) }).path, local);
+});
+
+// THE 0.11.2 CASE: a Claude Code auto-update on an npm install renamed bin\claude.exe to claude.exe.old.<n> and never put the new one in place.
+// claude.cmd is still on PATH and runs that exe, so 0.11.1 took the shim as a file and cmd.exe answered: '"...\\bin\\claude.exe"' is not recognized.
+const NPM = 'C:\\Users\\micha\\AppData\\Roaming\\npm';
+const PKG = NPM + '\\node_modules\\@anthropic-ai\\claude-code';
+const SHIM = NPM + '\\claude.cmd';
+const NATIVE_COPY = PKG + '\\node_modules\\@anthropic-ai\\claude-code-win32-x64\\claude.exe';
+
+test('an npm claude.cmd whose claude.exe is gone is passed over, and a native install elsewhere is used', () => {
+  const exe = 'C:\\Users\\micha\\.local\\bin\\claude.exe';
+  const exists = files(SHIM, PKG + '\\package.json', PKG + '\\bin\\claude.exe.old.1795107364854', exe);
+  const r = cb.resolveClaude({ ...W, env: winEnv({ PATH: 'C:\\Windows;' + NPM }), exists, run: regRunner(null, null) });
+  assert.deepStrictEqual({ path: r.path, source: r.source }, { path: exe, source: 'an install folder' }, 'the shim was taken although the exe it runs is not there');
+});
+
+test('with only the broken npm shim, nothing is returned and the words give the exact repair', () => {
+  const exists = files(SHIM, PKG + '\\package.json', NATIVE_COPY);
+  const r = cb.resolveClaude({ ...W, env: winEnv({ PATH: 'C:\\Windows;' + NPM }), exists, run: regRunner(null, null) });
+  assert.strictEqual(r.path, null);
+  assert.deepStrictEqual(r.broken.map((b) => [b.shim, b.missing, b.copyFrom]), [[SHIM, PKG + '\\bin\\claude.exe', NATIVE_COPY]]);
+  const words = cb.notFoundMessage(r, { platform: 'win32' });
+  for (const must of ['the program that command runs is gone', PKG + '\\bin\\claude.exe', 'claude.exe.old.*', "Copy-Item -LiteralPath '" + NATIVE_COPY + "' -Destination '" + PKG + "\\bin\\claude.exe'", 'npm install -g @anthropic-ai/claude-code', 'SYM_CLAUDE_BIN']) assert.ok(words.includes(must), `missing: ${must}\n${words}`);
+});
+
+test('the shim check only fires when the npm package is there and its exe is not: a healthy install, or a bare shim, is used', () => {
+  const env = winEnv({ PATH: 'C:\\Windows;' + NPM }), run = regRunner(null, null);
+  assert.strictEqual(cb.resolveClaude({ ...W, env, exists: files(SHIM, PKG + '\\package.json', PKG + '\\bin\\claude.exe'), run }).path, SHIM, 'a healthy npm install');
+  assert.strictEqual(cb.resolveClaude({ ...W, env, exists: files(SHIM), run }).path, SHIM, 'a shim with no npm package beside it (another install) is left alone');
+  assert.strictEqual(cb.brokenNpmShim('/usr/local/bin/claude', { platform: 'linux', exists: () => true }), null, 'POSIX is not affected');
+});
+
+test('SYM_CLAUDE_BIN naming the broken npm shim is an error that says so, not a launch that fails in cmd.exe', () => {
+  const r = cb.resolveClaude({ ...W, env: winEnv({ SYM_CLAUDE_BIN: SHIM }), exists: files(SHIM, PKG + '\\package.json') });
+  assert.strictEqual(r.path, null);
+  assert.match(cb.notFoundMessage(r, { platform: 'win32' }), /SYM_CLAUDE_BIN is set to .*claude\.cmd, an npm shim that cannot run[\s\S]*the program that command runs is gone/);
 });
 
 test('SYM_CLAUDE_BIN wins; set wrongly it is an error, never a silent fall-through to another claude', () => {
@@ -238,7 +276,7 @@ test('Windows: start launches an npm-style claude.cmd that is NOT on PATH, from 
   fs.writeFileSync(path.join(bin, 'print-args.js'), "require('fs').writeFileSync(require('path').join(__dirname, 'argv.json'), JSON.stringify(process.argv.slice(2)));\n");
   fs.writeFileSync(path.join(bin, 'claude.cmd'), `@echo off\r\n"${process.execPath}" "%~dp0print-args.js" %*\r\nexit /b 7\r\n`);
   const sys = process.env.SystemRoot || 'C:\\Windows';
-  const env = cleanEnv({ HOME: home, USERPROFILE: home, APPDATA: path.join(home, 'AppData', 'Roaming'), LOCALAPPDATA: path.join(home, 'AppData', 'Local'), SYM_STATE_DIR: path.join(home, '.sym'), PATH: `${sys}\\System32;${sys}` });
+  const env = cleanEnv({ HOME: home, USERPROFILE: home, APPDATA: path.join(home, 'AppData', 'Roaming'), LOCALAPPDATA: path.join(home, 'AppData', 'Local'), SYM_STATE_DIR: path.join(home, '.sym'), PATH: `${sys}\\System32;${sys}`, NODE_OPTIONS: NO_REGISTRY });
   const cwd = fs.mkdtempSync(path.join(home, 'proj-'));
   const nasty = ['a b', 'C:\\My Projects\\', 'say "hi"', '100%', '%PATH%', 'a&b', 'x^y', '!bang', '(paren)', 'back\\slash', 'a|b', 'x<y>z'];
   const r = spawnSync(process.execPath, [SERVER, 'start', '--room', 'xmesh-world-room', '--', ...nasty], { cwd, env, encoding: 'utf8', timeout: 90000 });
@@ -256,7 +294,7 @@ test('Windows: a native claude.exe in ~/.local/bin that is NOT on PATH is found 
   // a real .exe: node itself, copied. Started with the channels flag it refuses it as a bad option, which proves it was started with our arguments.
   fs.copyFileSync(process.execPath, path.join(bin, 'claude.exe'));
   const sys = process.env.SystemRoot || 'C:\\Windows';
-  const env = cleanEnv({ HOME: home, USERPROFILE: home, APPDATA: path.join(home, 'AppData', 'Roaming'), LOCALAPPDATA: path.join(home, 'AppData', 'Local'), SYM_STATE_DIR: path.join(home, '.sym'), PATH: `${sys}\\System32;${sys}` });
+  const env = cleanEnv({ HOME: home, USERPROFILE: home, APPDATA: path.join(home, 'AppData', 'Roaming'), LOCALAPPDATA: path.join(home, 'AppData', 'Local'), SYM_STATE_DIR: path.join(home, '.sym'), PATH: `${sys}\\System32;${sys}`, NODE_OPTIONS: NO_REGISTRY });
   const cwd = fs.mkdtempSync(path.join(home, 'proj-'));
   const r = spawnSync(process.execPath, [SERVER, 'start', '--room', 'xmesh-world-room'], { cwd, env, encoding: 'utf8', timeout: 90000 });
   assert.ok(/claude found at .*\.local\\bin\\claude\.exe, from an install folder/.test(r.stdout), r.stdout);
@@ -268,7 +306,7 @@ test('Windows: start with no claude anywhere exits 127 and names Get-Command and
   const home = h.stateDir('home');
   fs.writeFileSync(path.join(home, '.claude.json'), '{}\n');
   const sys = process.env.SystemRoot || 'C:\\Windows';
-  const env = cleanEnv({ HOME: home, USERPROFILE: home, APPDATA: path.join(home, 'AppData', 'Roaming'), LOCALAPPDATA: path.join(home, 'AppData', 'Local'), SYM_STATE_DIR: path.join(home, '.sym'), PATH: `${sys}\\System32;${sys}` });
+  const env = cleanEnv({ HOME: home, USERPROFILE: home, APPDATA: path.join(home, 'AppData', 'Roaming'), LOCALAPPDATA: path.join(home, 'AppData', 'Local'), SYM_STATE_DIR: path.join(home, '.sym'), PATH: `${sys}\\System32;${sys}`, NODE_OPTIONS: NO_REGISTRY });
   const cwd = fs.mkdtempSync(path.join(home, 'proj-'));
   const r = spawnSync(process.execPath, [SERVER, 'start', '--room', 'xmesh-world-room'], { cwd, env, encoding: 'utf8', timeout: 90000 });
   assert.strictEqual(r.status, 127, `${r.stdout}\n${r.stderr}`);
